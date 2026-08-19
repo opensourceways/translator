@@ -40,9 +40,11 @@ PR 作者就是 Token 所属账号，请使用机器人账号而非个人账号�
 1. 安装 **Generic Webhook Trigger** 插件
 2. 新建 Pipeline 任务，「Pipeline script from SCM」指向本仓库，
    Script Path 填 `Jenkinsfile`
-3. 添加凭据（Secret text）：
-   - `gitcode-token-default` → 注入为 `GITCODE_TOKEN`
-   - 每套规则 Token 一个凭据，注入为对应的环境变量名
+3. 任务配置勾选「This project is parameterized」，添加 **Password Parameter**：
+   - Name：`GITCODE_TOKEN`，Default Value：默认 Token
+   - 每套规则 Token 再加一个密码参数，参数名与规则文件中的 `token_env`
+     一致（如 `GITCODE_TOKEN_MINDSTUDIO`）
+   - 密码参数在界面和构建日志中都会打码；参数会自动注入为构建环境变量
 
 ### 3. GitCode 侧配置 Webhook
 
@@ -75,8 +77,7 @@ https://<jenkins地址>/generic-webhook-trigger/invoke?token=translator-auto-pr
 - 文件不存在时任务正常运行（全部使用默认 Token）；配置有效规则后，
   未命中规则的仓库一律跳过不处理
 
-新增一套规则 = 规则文件加一行 + Jenkins 加凭据 + Jenkinsfile 的
-`withCredentials` 加一行 binding。
+新增一套规则 = 规则文件加一行 + 任务配置加一个同名 Password Parameter。
 
 ## 本地运行与测试
 
