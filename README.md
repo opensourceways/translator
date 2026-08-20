@@ -79,6 +79,22 @@ https://<jenkins地址>/generic-webhook-trigger/invoke?token=translator-auto-pr
 
 新增一套规则 = 规则文件加一行 + 任务配置加一个同名 Password Parameter。
 
+### 5. 没有权威仓库权限？用自己的 Fork 做来源
+
+没有权威仓库的管理权限（配不了 Webhook）时，可以把来源指向自己的 Fork：
+
+1. 在 GitCode 上 Fork `Computing_Ecosystem_Docs/Computing_Ecosystem_Docs-EN`
+   到自己的账号
+2. Webhook 配在 **Fork** 上（设置 → WebHooks → Push 事件），地址同上
+3. Jenkins 任务加一个 String Parameter：`GITCODE_SOURCE_REPO`，
+   Default Value 填 Fork 的完整路径（如 `myname/Computing_Ecosystem_Docs-EN`）
+4. Jenkinsfile 的运行命令加 `--sync-source`：Fork 不会自动跟进上游，
+   扫描前先同步，否则对比的是旧内容
+
+注意：Fork 模式下 Webhook 只对「推到 Fork 的提交」触发。生产环境的正道
+仍是让权威仓库管理员把 Webhook 加到权威仓库；过渡期可用 Fork +
+定时构建（cron）代替 Webhook。
+
 ## 本地运行与测试
 
 ```bash

@@ -35,12 +35,17 @@ def main(argv=None):
     parser.add_argument("--rules-path", default=service.DEFAULT_RULES_PATH,
                         help="权威仓库中 Token 规则文件的路径"
                              "（默认 %(default)s）")
+    parser.add_argument("--sync-source", action="store_true",
+                        help="来源为 Fork 时，扫描前先同步其与上游")
     args = parser.parse_args(argv)
 
     token = os.environ.get("GITCODE_TOKEN", "").strip()
     if not token:
         _log("错误：未配置 GITCODE_TOKEN 环境变量（默认 Token）")
         return 1
+
+    if args.sync_source:
+        service.sync_source(token, log=_log)
 
     # ── 加载 Token 规则（权威仓库内的规则文件）──
     try:

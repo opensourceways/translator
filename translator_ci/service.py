@@ -19,6 +19,9 @@ Ascend/26.1.0/MindStudio/msprof/docs/en/guide.md：
 - Token 规则（权限管控）：规则文件存于译稿权威仓库（默认根目录
   token_rules.json），每次运行时读取；文件不存在视为未配置规则（全部
   使用默认 Token）；配置了有效规则时只处理命中规则的仓库
+- 来源可替换：默认读取权威仓库，可用 GITCODE_SOURCE_REPO 环境变量
+  指向自己的 Fork（无权威仓库管理权限时测试用，Webhook 配在 Fork 上）；
+  该模式下可用 sync_source 在扫描前先同步 Fork 与上游
 
 流程函数：
   load_token_rules: 读取并解析规则文件（JSON 非法抛 ConfigError）
@@ -36,9 +39,20 @@ import time
 
 from translator_ci import client
 
-# 译稿权威来源仓库
+# 译稿权威来源仓库（默认）；可用 GITCODE_SOURCE_REPO 环境变量覆盖为
+# 自己的 Fork（如 "lei0308/Computing_Ecosystem_Docs-EN"），便于在
+# 没有权威仓库管理权限时测试（Webhook 配在 Fork 上）
 SOURCE_ORG = "Computing_Ecosystem_Docs"
 SOURCE_REPO = "Computing_Ecosystem_Docs-EN"
+
+
+def _source_repo():
+    """返回译稿来源仓库 (owner, repo)，优先取 GITCODE_SOURCE_REPO 环境变量。"""
+    full = os.environ.get("GITCODE_SOURCE_REPO", "").strip()
+    if full and "/" in full:
+        owner, repo = full.split("/", 1)
+        return owner, repo
+    return SOURCE_ORG, SOURCE_REPO
 
 DEFAULT_RULES_PATH = "token_rules.json"  # 权威仓库根目录下的规则文件
 MAX_TOTAL_SIZE = 5 * 1024 * 1024         # 单次上传累计文件大小上限 5 MB
@@ -100,11 +114,11 @@ def load_token_rules(token, rules_path=DEFAULT_RULES_PATH, log=print):
     Returns:
         list: [{"keyword": ..., "token": ...}]，无有效规则时为空列表
     """
-    repo_info = client.get_repo(SOURCE_ORG, SOURCE_REPO, token)
+    repo_info = client.get_repo(*_source_repo(), token)
     branch = repo_info.get("default_branch") or "master"
     try:
         text = client.get_file_text(
-            SOURCE_ORG, SOURCE_REPO, rules_path, branch, token)
+            *_source_repo(), rules_path, branch, token)
     except client.GitCodeError as e:
         if e.status_code == 404:
             log(f"权威仓库中不存在规则文件 {rules_path}，全部仓库使用默认 Token")
@@ -141,19 +155,53 @@ def load_token_rules(token, rules_path=DEFAULT_RULES_PATH, log=print):
     return resolved
 
 
+# ── 来源仓库同步（Fork 模式）─────────────────────────────────────────
+
+
+def sync_source(token, log=print, attempts=10, interval=2):
+    """扫描前同步来源仓库与其上游（来源为 Fork 时使用）。
+
+    没有权威仓库管理权限时，来源可指向自己的 Fork
+    （GITCODE_SOURCE_REPO 环境变量），但 Fork 不会自动跟进上游更新，
+    扫描前需先同步，否则对比的是旧内容。同步为异步操作，触发后
+    轮询等待完成；失败或超时不阻断——扫描仍按 Fork 当前内容继续。
+    """
+    owner, repo = _source_repo()
+    if (owner, repo) == (SOURCE_ORG, SOURCE_REPO):
+        log("来源为权威仓库本身，无需同步")
+        return
+    log(f"正在同步来源 Fork: {owner}/{repo}")
+    try:
+        client.sync_repo(owner, repo, token)
+    except client.GitCodeError as e:
+        log(f"来源 Fork 同步触发失败（{e}），按当前内容继续扫描")
+        return
+    try:
+        for i in range(attempts):
+            status = client.get_sync_status(owner, repo, token)
+            if not isinstance(status, dict) or status.get("repo_sync_result"):
+                if isinstance(status, dict) and status.get("repo_sync_message"):
+                    log(f"来源 Fork 同步结果: {status['repo_sync_message']}")
+                return
+            log(f"等待来源 Fork 同步 ({i + 1}/{attempts})...")
+            time.sleep(interval)
+    except client.GitCodeError as e:
+        log(f"来源 Fork 同步未完成（{e}），按当前内容继续扫描")
+
+
 # ── 目录索引与文件下载 ────────────────────────────────────────────────
 
 
 def _list_subdirs(path, ref, token):
     """列出权威仓库指定目录下的子目录名（过滤掉文件）。"""
-    entries = client.list_dir(SOURCE_ORG, SOURCE_REPO, path, ref, token)
+    entries = client.list_dir(*_source_repo(), path, ref, token)
     return [e["name"] for e in entries if e.get("type") == "dir"]
 
 
 def _walk_files(path, ref, token, prefix=""):
     """递归列出权威仓库指定目录下的全部文件，返回相对路径列表。"""
     files = []
-    entries = client.list_dir(SOURCE_ORG, SOURCE_REPO, path, ref, token)
+    entries = client.list_dir(*_source_repo(), path, ref, token)
     for e in entries:
         rel = f"{prefix}{e['name']}"
         if e.get("type") == "dir":
@@ -169,7 +217,7 @@ def _collect_dirs(path, ref, token, depth, out):
     Returns:
         int: 该目录子树内的文件总数（用于判断目录是否有效）。
     """
-    entries = client.list_dir(SOURCE_ORG, SOURCE_REPO, path, ref, token)
+    entries = client.list_dir(*_source_repo(), path, ref, token)
     count = 0
     for e in entries:
         if e.get("type") == "dir":
@@ -235,7 +283,7 @@ def _fetch_repo_files(project, branch, token, log):
         source_path = f"{project['path']}/{rel_path}"
         try:
             content = client.get_file_text(
-                SOURCE_ORG, SOURCE_REPO, source_path, branch, token)
+                *_source_repo(), source_path, branch, token)
         except client.GitCodeError as e:
             return {
                 "ok": False,
@@ -363,7 +411,7 @@ def scan_changed(keyword="", token="", token_rules=None, log=print):
 
     log("正在读取译稿权威仓库目录索引...")
     try:
-        repo_info = client.get_repo(SOURCE_ORG, SOURCE_REPO, token)
+        repo_info = client.get_repo(*_source_repo(), token)
         branch = repo_info.get("default_branch") or "master"
         paths = []
         top_dirs = _list_subdirs("", branch, token)

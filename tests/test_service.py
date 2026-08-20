@@ -190,6 +190,51 @@ class TestLoadTokenRules:
                 service.load_token_rules("tok", log=SILENT)
 
 
+class TestSourceRepoOverride:
+    """来源仓库可用 GITCODE_SOURCE_REPO 覆盖为自己的 Fork。"""
+
+    def test_default_is_authoritative(self, monkeypatch):
+        monkeypatch.delenv("GITCODE_SOURCE_REPO", raising=False)
+        assert service._source_repo() == (
+            service.SOURCE_ORG, service.SOURCE_REPO)
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("GITCODE_SOURCE_REPO", "user/Fork-Repo")
+        assert service._source_repo() == ("user", "Fork-Repo")
+
+
+class TestSyncSource:
+    """来源为 Fork 时扫描前同步：权威仓库跳过，失败不阻断。"""
+
+    def _client_mock(self):
+        client_mock = MagicMock()
+        client_mock.GitCodeError = GitCodeError
+        return client_mock
+
+    def test_authoritative_source_skips(self, monkeypatch):
+        monkeypatch.delenv("GITCODE_SOURCE_REPO", raising=False)
+        client_mock = self._client_mock()
+        with patch("translator_ci.service.client", client_mock):
+            service.sync_source("tok", log=SILENT)
+            client_mock.sync_repo.assert_not_called()
+
+    def test_fork_synced_and_polled(self, monkeypatch):
+        monkeypatch.setenv("GITCODE_SOURCE_REPO", "user/fork")
+        client_mock = self._client_mock()
+        client_mock.get_sync_status.return_value = {"repo_sync_result": True}
+        with patch("translator_ci.service.client", client_mock):
+            service.sync_source("tok", log=SILENT)
+            client_mock.sync_repo.assert_called_once_with("user", "fork", "tok")
+            client_mock.get_sync_status.assert_called_once()
+
+    def test_sync_failure_non_fatal(self, monkeypatch):
+        monkeypatch.setenv("GITCODE_SOURCE_REPO", "user/fork")
+        client_mock = self._client_mock()
+        client_mock.sync_repo.side_effect = GitCodeError(400, "not a fork")
+        with patch("translator_ci.service.client", client_mock):
+            service.sync_source("tok", log=SILENT)  # 不应抛异常
+
+
 class TestScanChanged:
     """扫描全部仓库级目录并与目标仓库对比，筛出有变更的仓库。"""
 

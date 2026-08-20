@@ -165,3 +165,23 @@ class TestSubmitPhase:
                              return_value=_scan_result()) as sm:
             cli.main(["--keyword", "msprof"])
             assert sm.call_args.args[0] == "msprof"
+
+    def test_sync_source_flag(self):
+        """--sync-source 时在加载规则前先同步来源 Fork。"""
+        with patch.object(cli.service, "sync_source") as sync_mock, \
+                patch.object(cli.service, "load_token_rules",
+                             return_value=[]), \
+                patch.object(cli.service, "scan_changed",
+                             return_value=_scan_result()):
+            assert cli.main(["--sync-source"]) == 0
+            sync_mock.assert_called_once()
+
+    def test_sync_source_default_off(self):
+        """默认不同步来源仓库。"""
+        with patch.object(cli.service, "sync_source") as sync_mock, \
+                patch.object(cli.service, "load_token_rules",
+                             return_value=[]), \
+                patch.object(cli.service, "scan_changed",
+                             return_value=_scan_result()):
+            assert cli.main([]) == 0
+            sync_mock.assert_not_called()
