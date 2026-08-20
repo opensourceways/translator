@@ -485,10 +485,12 @@ class TestSubmitRepo:
     def test_open_pr_dedup(self):
         """已存在同一 head/base 的 open PR 时不重复创建，返回已有 PR。"""
         client_mock = _make_submit_client_mock()
+        # 真实 API 的 head.label 只有分支名，不含用户前缀
         client_mock.list_pull_requests.return_value = [{
             "number": 42,
             "html_url": "http://x/42",
-            "head": {"label": "bot:translator/auto-26.1.0"},
+            "head": {"label": "translator/auto-26.1.0",
+                     "ref": "translator/auto-26.1.0"},
             "base": {"ref": "26.1.0"},
         }]
         with patch("translator_ci.service.client", client_mock):
@@ -499,10 +501,10 @@ class TestSubmitRepo:
             assert result["pr_url"] == "http://x/42"
             assert result["pr_number"] == 42
             client_mock.create_pr.assert_not_called()
-            # 去重查询带 head/base 过滤参数
+            # 服务端不支持 head/base 过滤，拉全量 open PR 后客户端过滤
             _, kwargs = client_mock.list_pull_requests.call_args
-            assert kwargs["head"] == "bot:translator/auto-26.1.0"
-            assert kwargs["base"] == "26.1.0"
+            assert "head" not in kwargs
+            assert "base" not in kwargs
 
     def test_pr_other_branch_not_deduped(self):
         """head 分支不同的 open PR 不影响本仓库创建新 PR。"""
@@ -539,6 +541,20 @@ class TestSubmitRepo:
             client_mock.create_file.assert_not_called()
             client_mock.update_file.assert_not_called()
             client_mock.create_pr.assert_not_called()
+
+    def test_create_pr_409_treated_as_existing(self):
+        """去重漏判时服务端返回 409：从错误消息提取 PR 号按已存在处理。"""
+        client_mock = _make_submit_client_mock()
+        client_mock.create_pr.side_effect = GitCodeError(
+            409, '{"error_code":409,"error_message":"Another open merge '
+                 'request already exists for this source branch: !443"}')
+        with patch("translator_ci.service.client", client_mock):
+            result = service.submit_repo(
+                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
+            assert result["ok"] is True
+            assert result["pr_existed"] is True
+            assert result["pr_number"] == 443
+            assert result["pr_url"].endswith("/merge_requests/443")
 
     def test_branch_not_exists(self):
         """目标仓库不存在版本分支时失败（不自动创建分支）。"""

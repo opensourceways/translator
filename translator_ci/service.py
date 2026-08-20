@@ -850,8 +850,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
     head = f"{fork_owner}:{head_branch}"
     log("正在检查是否已有未合并的 PR...")
     try:
-        open_prs = client.list_pull_requests(
-            org, repo, token, state="open", head=head, base=branch)
+        open_prs = client.list_pull_requests(org, repo, token, state="open")
     except client.GitCodeError as e:
         return {"ok": False, "stage": "list_pr", "error": str(e)}
     existing_pr = next(
@@ -886,6 +885,24 @@ def submit_repo(org, repo, branch, files, token, log=print):
             token, fork_path=fork_full,
         )
     except client.GitCodeError as e:
+        # 兜底：去重查询漏判（或并发）时服务端返回 409 并带出已有 PR 号，
+        # 按「已存在未合并 PR」处理而非失败
+        if e.status_code == 409:
+            m = re.search(r"!(\d+)", e.message or "")
+            number = int(m.group(1)) if m else None
+            pr_url = (f"https://gitcode.com/{org}/{repo}/merge_requests/{number}"
+                      if number else None)
+            log(f"服务端提示已存在未合并的 PR，本次变更已并入: {pr_url or e.message}")
+            return {
+                "ok": True,
+                "pr_existed": True,
+                "pr_url": pr_url,
+                "pr_number": number,
+                "head_branch": head_branch,
+                "succeeded": succeeded,
+                "unchanged": unchanged,
+                "failed": failed,
+            }
         return {
             "ok": False,
             "stage": "create_pr",

@@ -91,16 +91,14 @@ class TestEndpoints:
         assert payload["head"] == "user:translator/auto-26.1.0"
         assert payload["base"] == "26.1.0"
 
-    def test_list_pull_requests_filters(self):
+    def test_list_pull_requests_no_server_filters(self):
+        """GitCode 服务端不支持 head/base 过滤（带参返回空），不得传参。"""
         m = self._call(client.list_pull_requests, "Ascend", "msprof", "tok",
-                       state="open", head="user:translator/auto-26.1.0",
-                       base="26.1.0")
+                       state="open")
         assert m.call_args.args[0] == "GET"
         assert m.call_args.args[1].endswith("/repos/Ascend/msprof/pulls")
         params = m.call_args.kwargs["params"]
-        assert params["state"] == "open"
-        assert params["head"] == "user:translator/auto-26.1.0"
-        assert params["base"] == "26.1.0"
+        assert params == {"state": "open", "per_page": 100}
 
     def test_list_pull_requests_default_open(self):
         m = self._call(client.list_pull_requests, "Ascend", "msprof", "tok")

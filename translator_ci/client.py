@@ -167,17 +167,13 @@ def get_sync_status(owner, repo, token, branch=None):
                        token, params=params)
 
 
-def list_pull_requests(owner, repo, token, state="open", head=None, base=None):
+def list_pull_requests(owner, repo, token, state="open"):
     """列出仓库的 Pull Request（默认仅 open），供提交前去重。
 
-    head 格式为 "用户名:分支名"，base 为目标分支名；
-    两者均作为 query 参数传给 API 做服务端过滤。
+    注意：GitCode 服务端不支持 head/base 过滤参数（带了会返回空
+    列表），调用方需拉全量 open PR 后自行按 head/base 过滤。
     """
     params = {"state": state, "per_page": 100}
-    if head:
-        params["head"] = head
-    if base:
-        params["base"] = base
     return _do_request("GET", f"{BASE_URL}/repos/{owner}/{repo}/pulls", token,
                        params=params)
 
