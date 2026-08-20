@@ -82,12 +82,12 @@ def _compare_files(project, files, cmp_token, source_token, log=print):
         source_path = f"{project['path']}/{rel_path}"
         log(f"  下载译稿: {rel_path}")
         try:
-            text = client.get_file_text(
+            # 按字节读取：译稿可能混有图片等二进制文件，不能按文本解码
+            content = client.get_file_bytes(
                 *_source_repo(), source_path, branch, source_token)
         except client.GitCodeError as e:
             raise client.GitCodeError(
                 e.status_code, f"下载文件 {source_path} 失败: {e.message}")
-        content = text.encode("utf-8")
         total_size += len(content)
         if total_size > MAX_TOTAL_SIZE:
             raise client.GitCodeError(
@@ -130,9 +130,9 @@ def _compare_files(project, files, cmp_token, source_token, log=print):
         if remote_sha:
             same = remote_sha == _git_blob_sha(content)
         else:
-            remote_text = client.get_file_text(
+            remote_bytes = client.get_file_bytes(
                 org, repo, f["target_path"], branch, cmp_token)
-            same = remote_text.encode("utf-8") == content
+            same = remote_bytes == content
         if not same:
             update_count += 1
             changed.append({"target_path": f["target_path"],

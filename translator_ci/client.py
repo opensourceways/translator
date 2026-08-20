@@ -124,18 +124,26 @@ def list_dir(owner, repo, path, ref, token):
     return result
 
 
-def get_file_text(owner, repo, path, ref, token):
-    """读取指定文件的文本内容（base64 解码为 UTF-8 字符串）。
+def get_file_bytes(owner, repo, path, ref, token):
+    """读取指定文件的原始字节内容（base64 解码，不假定文本编码）。
 
-    文件不存在时抛出 GitCodeError(404)。
+    兼容二进制文件（如图片）；文本文件同样适用。文件不存在时抛出
+    GitCodeError(404)。
     """
     result = _do_request("GET",
                          f"{BASE_URL}/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
                          token, params={"ref": ref})
     content_b64 = result.get("content", "")
     # API 返回的 base64 可能按行折叠，需先去除空白字符
-    raw = base64.b64decode("".join(content_b64.split()))
-    return raw.decode("utf-8")
+    return base64.b64decode("".join(content_b64.split()))
+
+
+def get_file_text(owner, repo, path, ref, token):
+    """读取指定文件的文本内容（UTF-8 解码，适用于 Markdown/JSON 等文本）。
+
+    对二进制文件调用会抛 UnicodeDecodeError，读取原始字节请用 get_file_bytes。
+    """
+    return get_file_bytes(owner, repo, path, ref, token).decode("utf-8")
 
 
 def create_file(owner, repo, path, message, content_b64, branch, token):

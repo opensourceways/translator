@@ -96,7 +96,7 @@ def _make_client_mock():
 def _make_scan_client_mock():
     """构造扫描用的 mock 客户端：源仓下载固定内容，目标分支默认存在。"""
     client_mock = _make_client_mock()
-    client_mock.get_file_text.return_value = "content"
+    client_mock.get_file_bytes.return_value = b"content"
     client_mock.list_branches.return_value = [
         {"name": "26.1.0"}, {"name": "master"}, {"name": "9.1.0"},
     ]
@@ -340,10 +340,10 @@ class TestScanChanged:
         """目标文件未返回 sha 时退化为下载全文比对。"""
         client_mock = _make_scan_client_mock()
         client_mock.get_contents.return_value = {}
-        # 源仓下载与目标比对共用 get_file_text，按 owner 区分返回内容
-        client_mock.get_file_text.side_effect = (
+        # 源仓下载与目标比对共用 get_file_bytes，按 owner 区分返回内容
+        client_mock.get_file_bytes.side_effect = (
             lambda owner, repo, path, ref, token:
-            "content" if owner == common.SOURCE_ORG else "different"
+            b"content" if owner == common.SOURCE_ORG else b"different"
         )
         with _patch_scan_client(client_mock):
             result = scan.scan_changed("", "tok", log=SILENT)
@@ -411,7 +411,7 @@ class TestScanChanged:
             assert all(c.args[4] == "tokA" for c in compare_calls)
             # 权威仓库下载始终用默认 Token
             source_calls = [
-                c for c in client_mock.get_file_text.call_args_list
+                c for c in client_mock.get_file_bytes.call_args_list
                 if c.args[0] == common.SOURCE_ORG
             ]
             assert source_calls
@@ -436,7 +436,7 @@ class TestScanChanged:
             assert result["changed"] == []
             assert result["unchanged"] == REPO_PATHS
             # 核心优化：sha 一致直接判定未变更，来源文件一次都没下载
-            assert client_mock.get_file_text.call_count == 0
+            assert client_mock.get_file_bytes.call_count == 0
 
     def test_changed_with_source_sha_differs_downloads(self):
         """来源目录条目 sha 与目标 sha 不一致时，按需下载内容并记为更新。"""
@@ -448,9 +448,25 @@ class TestScanChanged:
                 assert c["new_count"] == 0
                 assert c["update_count"] == 1
             # 每个仓库各下载 1 个变更文件，且内容带 b64 供提交阶段使用
-            assert client_mock.get_file_text.call_count == 4
+            assert client_mock.get_file_bytes.call_count == 4
             assert all(f["content_b64"] for c in result["changed"]
                        for f in c["files"])
+
+    def test_binary_file_downloaded_as_bytes(self):
+        """译稿含二进制文件（如 GIF 图片）时按字节下载，不做 UTF-8 解码。
+
+        旧实现经 get_file_text 按文本解码，遇图片直接 UnicodeDecodeError
+        导致整轮扫描崩溃（对应 CI 中 docs/en/figures/*.gif 的失败）。
+        """
+        gif = b"GIF89a\x01\x00\x02\x00\xf7\x00\x80\x00\x00\xff\xff\xff\x00"
+        client_mock = _make_sha_scan_client_mock(entry_sha="aaa", target_sha="bbb")
+        client_mock.get_file_bytes.return_value = gif
+        with _patch_scan_client(client_mock):
+            result = scan.scan_changed("", "tok", log=SILENT)
+            assert len(result["changed"]) == 4
+            for c in result["changed"]:
+                assert c["update_count"] == 1
+                assert base64.b64decode(c["files"][0]["content_b64"]) == gif
 
     def test_invalid_path_rejected_before_download(self):
         """含 .. 的非法路径在列文件阶段即被拒绝，不触发任何内容下载。"""
@@ -469,7 +485,7 @@ class TestScanChanged:
             assert result["stage"] == "list_files"
             assert "非法的文件路径" in result["error"]
             # 校验前置：非法路径在下载前拦截，未下载任何文件
-            assert client_mock.get_file_text.call_count == 0
+            assert client_mock.get_file_bytes.call_count == 0
 
 
 # ── 幂等提交测试 ──────────────────────────────────────────────────────
@@ -513,6 +529,30 @@ def _make_submit_client_mock():
 
 class TestSubmitRepo:
     """幂等提交：固定分支复用、相同内容跳过、open PR 去重。"""
+
+    def test_binary_gif_flows_through_submit(self):
+        """图片/GIF 全流程适配：扫描按字节下载、提交按 base64 写入不解码。"""
+        gif = b"GIF89a\x01\x00\x02\x00\xf7\x00\x80\x00\x00\xff\xff\xff\x00"
+        # 扫描：源/目标 sha 不同 → 按字节下载 GIF，content_b64 为原始字节
+        scan_client = _make_sha_scan_client_mock(entry_sha="aaa", target_sha="bbb")
+        scan_client.get_file_bytes.return_value = gif
+        with _patch_scan_client(scan_client):
+            scanned = scan.scan_changed("", "tok", log=SILENT)
+        assert len(scanned["changed"]) == 4
+        gif_entry = scanned["changed"][0]["files"][0]
+        assert base64.b64decode(gif_entry["content_b64"]) == gif
+
+        # 提交：目标已有同名文件 → 走 update_file，写回同样的 GIF 字节
+        submit_client = _make_submit_client_mock()
+        submit_client.get_contents.return_value = {"sha": "targetsha"}
+        with patch("translator_ci.submit.client", submit_client):
+            result = submit.submit_repo(
+                "Ascend", "msprof", "26.1.0", [gif_entry], "tok", log=SILENT)
+        assert result["ok"] is True
+        assert submit_client.create_file.call_count == 0
+        update_kwargs = submit_client.update_file.call_args
+        assert base64.b64decode(update_kwargs.args[4]) == gif
+        assert update_kwargs.args[5] == "targetsha"
 
     def test_success_creates_fixed_branch_and_pr(self):
         client_mock = _make_submit_client_mock()
