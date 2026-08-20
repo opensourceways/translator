@@ -610,6 +610,9 @@ class TestSubmitRepo:
             GitCodeError(400, "26.1.0 branch or tag not found"),
             {"repo_sync_result": False},
         ]
+        # 全量同步后目标分支立即出现在 Fork 上（免于轮询等待）
+        client_mock.list_branches.side_effect = lambda owner, repo, token: [
+            {"name": "26.1.0", "commit": {"sha": "abc123"}}]
         with patch("translator_ci.service.client", client_mock):
             result = service.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
@@ -617,6 +620,32 @@ class TestSubmitRepo:
             assert client_mock.sync_repo.call_count == 2
             second = client_mock.sync_repo.call_args_list[1]
             assert second.kwargs == {}
+
+    def test_full_sync_waits_for_branch_to_appear(self):
+        """全量同步是异步的：轮询 Fork 分支列表，等目标分支出现再建分支。"""
+        client_mock = _make_submit_client_mock()
+        client_mock.sync_repo.side_effect = [
+            GitCodeError(400, "26.1.0 branch or tag not found"),
+            {},
+        ]
+        calls = {"n": 0}
+
+        def list_branches(owner, repo, token):
+            if owner == "Ascend":
+                return [{"name": "26.1.0", "commit": {"sha": "abc123"}}]
+            # Fork：前两次轮询分支尚未同步过来，第三次出现
+            calls["n"] += 1
+            return [{"name": "26.1.0"}] if calls["n"] >= 3 else []
+
+        client_mock.list_branches.side_effect = list_branches
+        with patch("translator_ci.service.client", client_mock), \
+                patch("translator_ci.service.time.sleep") as sleep_mock:
+            result = service.submit_repo(
+                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
+            assert result["ok"] is True
+            # 等到了分支才继续（睡了 2 次），且没再查同步状态接口
+            assert sleep_mock.call_count == 2
+            client_mock.get_sync_status.assert_not_called()
 
 
 class TestSubmitAll:

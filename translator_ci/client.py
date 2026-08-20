@@ -51,8 +51,9 @@ def get_repo(owner, repo, token):
 
 
 def list_branches(owner, repo, token):
-    """列出仓库所有分支。"""
-    return _do_request("GET", f"{BASE_URL}/repos/{owner}/{repo}/branches", token)
+    """列出仓库所有分支（每页 100 条，取第一页）。"""
+    return _do_request("GET", f"{BASE_URL}/repos/{owner}/{repo}/branches",
+                       token, params={"per_page": 100})
 
 
 def create_branch(owner, repo, branch_name, refs, token):

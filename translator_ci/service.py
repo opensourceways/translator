@@ -553,7 +553,9 @@ def _sync_fork_branch(owner, repo_name, branch, token, log,
     在未同步的 Fork 上都不存在，直接建分支会 404（建分支前的必要步骤）。
     同步为异步操作：PUT 触发后轮询 GET 状态直到 repo_sync_result 为真。
     按分支同步要求该分支在 Fork 上已存在（否则 400），此时退化为
-    全量同步（不传 branch）——全量同步会把上游新增分支补进 Fork。
+    全量同步（不传 branch）——全量同步会把上游新增分支补进 Fork；
+    全量同步也是异步的，且状态接口对尚不存在的分支不可靠，故触发后
+    轮询分支列表等待目标分支真正出现（超时仍继续，建分支有兜底）。
     同步接口最终失败或轮询超时都不阻断流程——后续建分支仍有
     sha/分支名两级兜底。
     """
@@ -571,6 +573,21 @@ def _sync_fork_branch(owner, repo_name, branch, token, log,
         except client.GitCodeError as e2:
             log(f"Fork 分支同步未完成（{e2}），继续尝试建分支")
             return
+        # 全量同步是异步的，且 get_sync_status 对 Fork 上尚不存在的分支
+        # 不可靠（可能立即返回成功），改为轮询分支列表等该分支出现
+        for i in range(attempts):
+            try:
+                names = {b.get("name")
+                         for b in client.list_branches(owner, repo_name, token)}
+            except client.GitCodeError:
+                names = set()
+            if branch in names:
+                log(f"全量同步完成，Fork 已出现分支: {branch}")
+                return
+            log(f"等待 Fork 全量同步 ({i + 1}/{attempts})...")
+            time.sleep(interval)
+        log(f"Fork 全量同步超时（未等到分支 {branch}），继续尝试建分支")
+        return
     try:
         for i in range(attempts):
             status = client.get_sync_status(owner, repo_name, token,
