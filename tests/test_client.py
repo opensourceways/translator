@@ -175,6 +175,18 @@ class TestListDir:
             assert m.call_args.args[1].endswith("/repos/o/r/contents")
 
 
+class TestRateLimit:
+    """进程级限流：限额内请求不等待，超限后才进入等待。"""
+
+    def test_under_limit_no_wait(self):
+        with patch("translator_ci.client.requests.request",
+                   return_value=make_ok_response({})), \
+                patch("translator_ci.client.time.sleep") as sleep_mock:
+            for _ in range(3):
+                client.get_repo("o", "r", "tok")
+            assert sleep_mock.call_count == 0
+
+
 class TestPagination:
     """列表接口自动分页：超过单页继续拉下一页，直到取空。"""
 

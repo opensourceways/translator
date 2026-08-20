@@ -6,7 +6,9 @@
 """
 
 import base64
+import threading
 import time
+from collections import deque
 from urllib.parse import quote
 
 import requests
@@ -15,6 +17,39 @@ BASE_URL = "https://api.gitcode.com/api/v5"
 MAX_RETRIES = 4
 RETRY_DELAY = 5
 DEFAULT_TIMEOUT = 30          # 单次请求超时（秒），防止连接挂死
+
+# 进程级限流：GitCode 单账号 50 次/分钟，而默认 Token 与规则 Token 属于
+# 同一账号，全部请求共享同一配额。把任意 60 秒窗口内的请求数压在上限
+# 之下（留余量），从源头避免触发 429；指数退避只兜底窗口重置前的个别
+# 突发。上限按「每账号」而非「每 Token」计，因此全局共享一个计数器。
+RATE_LIMIT_MAX = 45
+RATE_LIMIT_WINDOW = 60.0
+_rate_lock = threading.Lock()
+_recent_requests = deque()
+
+
+def _throttle():
+    """限流：保证任意 RATE_LIMIT_WINDOW 秒窗口内最多发起 RATE_LIMIT_MAX 次请求。
+
+    需等待时每次只睡一小段后重新检查，保证锁内操作极短、不阻塞其他线程。
+    """
+    while True:
+        with _rate_lock:
+            now = time.monotonic()
+            while (_recent_requests and
+                    now - _recent_requests[0] >= RATE_LIMIT_WINDOW):
+                _recent_requests.popleft()
+            if len(_recent_requests) < RATE_LIMIT_MAX:
+                _recent_requests.append(now)
+                return
+            wait = _recent_requests[0] + RATE_LIMIT_WINDOW - now
+        time.sleep(max(wait, 0.01))
+
+
+def _reset_rate_limit():
+    """清空限流计数（仅测试用）。"""
+    with _rate_lock:
+        _recent_requests.clear()
 
 
 class GitCodeError(Exception):
@@ -52,11 +87,13 @@ def _retry_delay(r, attempt):
 def _do_request(method, url, token, timeout=None, **kwargs):
     """发起 HTTP 请求，遇到 429 / GET 5xx 自动等待后重试（最多 {MAX_RETRIES} 次）。
 
-    所有请求统一携带默认超时（可用 timeout 覆盖），避免连接挂死；
-    429 按 Retry-After/指数退避等待以跨过限流窗口，GET 5xx 幂等，
-    短暂等待后重试更稳。
+    每次请求前先过进程级限流（_throttle），从源头把请求数控制在单账号
+    限流上限之下；429 按 Retry-After/指数退避等待以跨过限流窗口，GET 5xx
+    幂等，短暂等待后重试更稳。所有请求统一携带默认超时（可用 timeout
+    覆盖），避免连接挂死。
     """
     for attempt in range(MAX_RETRIES):
+        _throttle()
         r = requests.request(method, url, headers=_headers(token),
                              timeout=timeout or DEFAULT_TIMEOUT, **kwargs)
         if (r.status_code == 429 or

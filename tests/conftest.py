@@ -6,6 +6,22 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
+from translator_ci import client
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit():
+    """每个测试前清空进程级限流计数。
+
+    限流器按 60 秒窗口全局计数，测试不做真实等待；不重置的话
+    前序测试累积的计数可能触发 _throttle 进入 sleep（被 mock 掉的
+    time.sleep 会打乱重试断言）。
+    """
+    client._reset_rate_limit()
+    yield
+
 
 def make_ok_response(json_data=None):
     """构造一个模拟的 requests 成功响应（status 200, ok=True）。"""
