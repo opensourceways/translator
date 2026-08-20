@@ -35,6 +35,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import time
 
 from translator_ci import client
@@ -47,11 +48,18 @@ SOURCE_REPO = "Computing_Ecosystem_Docs-EN"
 
 
 def _source_repo():
-    """返回译稿来源仓库 (owner, repo)，优先取 GITCODE_SOURCE_REPO 环境变量。"""
+    """返回译稿来源仓库 (owner, repo)，优先取 GITCODE_SOURCE_REPO 环境变量。
+
+    对环境变量的写法做宽容解析：允许粘贴完整 URL
+    （https://gitcode.com/owner/repo）或带 .git 后缀，只取最后两段。
+    """
     full = os.environ.get("GITCODE_SOURCE_REPO", "").strip()
-    if full and "/" in full:
-        owner, repo = full.split("/", 1)
-        return owner, repo
+    if full:
+        full = re.sub(r"^https?://[^/]+/", "", full)
+        full = full.removesuffix(".git").strip("/")
+        parts = full.split("/")
+        if len(parts) >= 2:
+            return parts[-2], parts[-1]
     return SOURCE_ORG, SOURCE_REPO
 
 DEFAULT_RULES_PATH = "token_rules.json"  # 权威仓库根目录下的规则文件
@@ -114,14 +122,16 @@ def load_token_rules(token, rules_path=DEFAULT_RULES_PATH, log=print):
     Returns:
         list: [{"keyword": ..., "token": ...}]，无有效规则时为空列表
     """
-    repo_info = client.get_repo(*_source_repo(), token)
+    owner, repo = _source_repo()
+    log(f"正在从来源仓库 {owner}/{repo} 读取规则文件: {rules_path}")
+    repo_info = client.get_repo(owner, repo, token)
     branch = repo_info.get("default_branch") or "master"
     try:
         text = client.get_file_text(
-            *_source_repo(), rules_path, branch, token)
+            owner, repo, rules_path, branch, token)
     except client.GitCodeError as e:
         if e.status_code == 404:
-            log(f"权威仓库中不存在规则文件 {rules_path}，全部仓库使用默认 Token")
+            log(f"来源仓库中不存在规则文件 {rules_path}，全部仓库使用默认 Token")
             return []
         raise
     try:

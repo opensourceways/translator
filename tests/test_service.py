@@ -202,6 +202,17 @@ class TestSourceRepoOverride:
         monkeypatch.setenv("GITCODE_SOURCE_REPO", "user/Fork-Repo")
         assert service._source_repo() == ("user", "Fork-Repo")
 
+    def test_env_full_url_tolerated(self, monkeypatch):
+        """粘贴完整 URL 或带 .git 后缀时也能正确解析。"""
+        for value in (
+            "https://gitcode.com/user/Fork-Repo",
+            "https://gitcode.com/user/Fork-Repo.git",
+            "user/Fork-Repo.git",
+            "user/Fork-Repo/",
+        ):
+            monkeypatch.setenv("GITCODE_SOURCE_REPO", value)
+            assert service._source_repo() == ("user", "Fork-Repo")
+
 
 class TestSyncSource:
     """来源为 Fork 时扫描前同步：权威仓库跳过，失败不阻断。"""
