@@ -8,6 +8,12 @@
                              规则的仓库也用它）
     规则文件中的 token_env   各规则 Token 对应的环境变量名
 
+本地化模式（绕开 API 限流，由 Jenkinsfile 克隆权威仓库后注入）：
+    GITCODE_LOCAL_SOURCE_DIR 权威仓库的本地克隆目录（设置后索引/列文件
+                             走本地 git，不再调用 API）
+    GITCODE_CLONE_DIR        目标仓库本地克隆目录（设置后目标对比也本地
+                             化；未设置则目标对比回退 API）
+
 退出码：
     0  成功（含「没有变更」）
     1  运行失败（Token 缺失、规则文件损坏、扫描失败等）
@@ -44,13 +50,21 @@ def main(argv=None):
         _log("错误：未配置 GITCODE_TOKEN 环境变量（默认 Token）")
         return 1
 
+    # 本地化模式：权威仓库已在 agent 上克隆（Jenkinsfile 注入）
+    local_source_dir = os.environ.get("GITCODE_LOCAL_SOURCE_DIR", "").strip() or None
+    clone_root = os.environ.get("GITCODE_CLONE_DIR", "").strip() or None
+    if local_source_dir:
+        _log(f"本地化模式：索引来源 {local_source_dir}，目标克隆目录 "
+             f"{clone_root or '未设置（目标对比回退 API）'}")
+
     if args.sync_source:
         service.sync_source(token, log=_log)
 
     # ── 加载 Token 规则（权威仓库内的规则文件）──
     try:
         token_rules = service.load_token_rules(
-            token, rules_path=args.rules_path, log=_log)
+            token, rules_path=args.rules_path, log=_log,
+            source_repo_dir=local_source_dir)
     except service.ConfigError as e:
         _log(f"错误：{e}")
         return 1
@@ -62,7 +76,8 @@ def main(argv=None):
     _log("开始扫描全部译稿仓库..."
          if not args.keyword else f"开始扫描（关键字: {args.keyword}）...")
     result = service.scan_changed(
-        args.keyword, token, token_rules=token_rules, log=_log)
+        args.keyword, token, token_rules=token_rules, log=_log,
+        source_repo_dir=local_source_dir, clone_root=clone_root)
     if not result["ok"]:
         _log(f"扫描失败（阶段: {result.get('stage', 'unknown')}）"
              f": {result.get('error', '未知错误')}")

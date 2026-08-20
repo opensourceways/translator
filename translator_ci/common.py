@@ -18,6 +18,7 @@ import re
 # 没有权威仓库管理权限时测试（Webhook 配在 Fork 上）
 SOURCE_ORG = "Computing_Ecosystem_Docs"
 SOURCE_REPO = "Computing_Ecosystem_Docs-EN"
+GIT_HOST = "https://gitcode.com"  # git 协议仓库地址（API 用 client.BASE_URL）
 
 DEFAULT_RULES_PATH = "token_rules.json"  # 权威仓库根目录下的规则文件
 MAX_TOTAL_SIZE = 5 * 1024 * 1024         # 单次上传累计文件大小上限 5 MB

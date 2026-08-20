@@ -2,7 +2,14 @@
 
 _fetch_repo_files: 列出仓库级目录的译稿文件（带来源 blob sha，不下载内容）
 _compare_files:    逐文件对比来源与目标内容，筛出有变更的文件（按需下载）
+_local_target_tree: 本地化模式下克隆目标仓库、生成本地文件映射
 scan_changed:      扫描全部（或按关键字过滤的）仓库级目录 → 有变更清单
+
+两种工作模式：
+- API 模式（默认）：索引/列文件/对比全部走 GitCode API，进程级限流兜底。
+- 本地化模式（source_repo_dir 非空）：权威仓库已在 agent 上克隆，索引、
+  列文件与来源内容读取全走本地 git；目标仓库按需浅克隆后本地对比，
+  彻底绕开 API 限流，API 只保留建 PR 等少量写操作。
 
 读取译稿权威仓库始终使用默认 token；访问目标仓库做对比的 Token
 由 resolve_token 按 token_rules 逐仓路由（权限管控）：配置了有效
@@ -10,27 +17,38 @@ scan_changed:      扫描全部（或按关键字过滤的）仓库级目录 →
 """
 
 import base64
+import os
 
-from translator_ci import client
+from translator_ci import client, localgit
 from translator_ci.common import _source_repo, MAX_TOTAL_SIZE, _git_blob_sha
-from translator_ci.index import _list_subdirs, _collect_dirs, _to_project, _walk_files
+from translator_ci.index import (
+    _list_subdirs, _collect_dirs, _to_project, _walk_files,
+    _repo_dirs_from_tree, _repo_files_from_tree,
+)
 from translator_ci.rules import resolve_token, _effective_rules
 
 
-def _fetch_repo_files(project, branch, token, log):
+def _fetch_repo_files(project, branch, token, log, tree=None):
     """列出仓库级目录的全部译稿文件（携带来源 blob sha，不下载内容）。
 
     目标路径为仓库级目录内的相对路径（即目标仓库中的真实存放路径）；
-    路径校验已在 _walk_files 阶段前置完成。文件内容推迟到「确认有变更」
-    后再按需下载（见 _compare_files），避免为无变更文件做无谓传输。
+    路径校验已在 _walk_files / _repo_files_from_tree 阶段前置完成。
+    文件内容推迟到「确认有变更」后再按需下载（见 _compare_files），
+    避免为无变更文件做无谓传输。tree 非空时从本地文件映射提取
+    （本地化模式），否则走 API 逐目录列举。
 
     Returns:
         dict: {"ok": bool, "files": [{target_path, sha}], "error": ...}
     """
     log(f"正在列出文件: {project['path']}")
     try:
-        rel_files = sorted(_walk_files(project["path"], branch, token),
-                           key=lambda f: f["path"])
+        if tree is not None:
+            rel_files = sorted(
+                _repo_files_from_tree(tree, project["path"]),
+                key=lambda f: f["path"])
+        else:
+            rel_files = sorted(_walk_files(project["path"], branch, token),
+                               key=lambda f: f["path"])
     except client.GitCodeError as e:
         return {"ok": False, "stage": "list_files", "error": str(e)}
     if not rel_files:
@@ -41,7 +59,7 @@ def _fetch_repo_files(project, branch, token, log):
 
 
 def _compare_files(project, files, cmp_token, source_token, source_branch,
-                   log=print):
+                   log=print, target_tree=None, source_repo_dir=None):
     """对比仓库级目录的译稿与目标仓库内容，筛出有变更的文件。
 
     目标定位：org/repo/branch 取目录第 1/4/2 段；下载来源内容时使用
@@ -51,6 +69,10 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
     才下载全文做 blob sha / 文本兜底比对）。变更文件按需下载并携带内容，
     供提交阶段写入使用。
 
+    本地化模式（target_tree / source_repo_dir 非空）：目标仓库已在本地
+    克隆，用本地 blob sha 映射直接比对，一条 API 都不发；来源内容从本地
+    克隆按 sha 读取。target_tree 为 None 时走 API 逐文件对比（回退）。
+
     Returns:
         dict: {"status": "changed" | "unchanged" | "skipped", ...}
     """
@@ -58,6 +80,78 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
     repo = project["project"]
     target_branch = project["version"]
 
+    changed = []
+    new_count = 0
+    update_count = 0
+    total_size = 0
+
+    def download(rel_path, sha=None):
+        """按需获取来源仓库单个文件内容（累计大小受 MAX_TOTAL_SIZE 约束）。
+
+        来源仓库始终用默认 Token 读取（与扫描一致），规则 Token 只用于
+        访问目标仓库。本地化模式下从本地克隆按 sha 读取（git cat-file，
+        部分克隆时按需补取 blob），否则走 API。
+        """
+        nonlocal total_size
+        source_path = f"{project['path']}/{rel_path}"
+        if source_repo_dir:
+            if not sha:
+                raise client.GitCodeError(
+                    200, f"本地化模式缺少来源 blob sha: {rel_path}")
+            log(f"  读取本地译稿: {rel_path}")
+            try:
+                content = localgit.cat_blob(source_repo_dir, sha)
+            except client.GitCodeError as e:
+                raise client.GitCodeError(
+                    e.status_code, f"读取文件 {source_path} 失败: {e}")
+        else:
+            log(f"  下载译稿: {rel_path}")
+            try:
+                # 按字节读取：译稿可能混有图片等二进制文件，不能按文本解码。
+                # 注意必须用权威仓库分支 source_branch，而非目标分支 target_branch
+                content = client.get_file_bytes(
+                    *_source_repo(), source_path, source_branch, source_token)
+            except client.GitCodeError as e:
+                raise client.GitCodeError(
+                    e.status_code, f"下载文件 {source_path} 失败: {e.message}")
+        total_size += len(content)
+        if total_size > MAX_TOTAL_SIZE:
+            raise client.GitCodeError(
+                200, f"累计文件大小 {total_size / 1024 / 1024:.1f} MB 超过上限 "
+                     f"{MAX_TOTAL_SIZE / 1024 / 1024:.0f} MB")
+        return base64.b64encode(content).decode("ascii")
+
+    if target_tree is not None:
+        # ── 本地化对比：目标仓库已在本地克隆，直接用 blob sha 比对 ──
+        # 分支存在性由克隆成功隐含（--branch 指定分支不存在即克隆失败），
+        # 无需再查分支列表；目标路径为同名目录时 ls-tree 不含该路径，
+        # 按「新文件」处理（提交阶段写入时若冲突记单文件失败）。
+        for f in files:
+            remote_sha = target_tree.get(f["target_path"])
+            if remote_sha is None:
+                new_count += 1
+                changed.append({
+                    "target_path": f["target_path"],
+                    "content_b64": download(f["target_path"], f.get("sha")),
+                })
+                continue
+            if remote_sha == f.get("sha"):
+                continue
+            update_count += 1
+            changed.append({
+                "target_path": f["target_path"],
+                "content_b64": download(f["target_path"], f.get("sha")),
+            })
+        if not changed:
+            return {"status": "unchanged"}
+        return {
+            "status": "changed",
+            "files": changed,
+            "new_count": new_count,
+            "update_count": update_count,
+        }
+
+    # ── API 路径（原有逻辑，保留为回退）──
     try:
         branches = client.list_branches(org, repo, cmp_token)
     except client.GitCodeError as e:
@@ -70,35 +164,6 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
         return {"status": "skipped",
                 "reason": f"目标仓库 {org}/{repo} 不存在分支 {target_branch}"}
 
-    changed = []
-    new_count = 0
-    update_count = 0
-    total_size = 0
-
-    def download(rel_path):
-        """按需下载来源仓库单个文件内容（累计大小受 MAX_TOTAL_SIZE 约束）。
-
-        来源仓库始终用默认 Token 读取（与扫描一致），规则 Token 只用于
-        访问目标仓库。
-        """
-        nonlocal total_size
-        source_path = f"{project['path']}/{rel_path}"
-        log(f"  下载译稿: {rel_path}")
-        try:
-            # 按字节读取：译稿可能混有图片等二进制文件，不能按文本解码。
-            # 注意必须用权威仓库分支 source_branch，而非目标分支 target_branch
-            content = client.get_file_bytes(
-                *_source_repo(), source_path, source_branch, source_token)
-        except client.GitCodeError as e:
-            raise client.GitCodeError(
-                e.status_code, f"下载文件 {source_path} 失败: {e.message}")
-        total_size += len(content)
-        if total_size > MAX_TOTAL_SIZE:
-            raise client.GitCodeError(
-                200, f"累计文件大小 {total_size / 1024 / 1024:.1f} MB 超过上限 "
-                     f"{MAX_TOTAL_SIZE / 1024 / 1024:.0f} MB")
-        return base64.b64encode(content).decode("ascii")
-
     for f in files:
         existing = client.get_contents(
             org, repo, f["target_path"], target_branch, cmp_token)
@@ -106,7 +171,7 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
             new_count += 1
             changed.append({
                 "target_path": f["target_path"],
-                "content_b64": download(f["target_path"]),
+                "content_b64": download(f["target_path"], f.get("sha")),
             })
             continue
         if isinstance(existing, list):
@@ -114,7 +179,7 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
             update_count += 1
             changed.append({
                 "target_path": f["target_path"],
-                "content_b64": download(f["target_path"]),
+                "content_b64": download(f["target_path"], f.get("sha")),
             })
             continue
         remote_sha = existing.get("sha")
@@ -125,11 +190,11 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
             update_count += 1
             changed.append({
                 "target_path": f["target_path"],
-                "content_b64": download(f["target_path"]),
+                "content_b64": download(f["target_path"], f.get("sha")),
             })
             continue
         # 任一 sha 缺失：下载来源内容做 blob sha / 文本兜底比对
-        b64 = download(f["target_path"])
+        b64 = download(f["target_path"], f.get("sha"))
         content = base64.b64decode(b64)
         if remote_sha:
             same = remote_sha == _git_blob_sha(content)
@@ -152,12 +217,39 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
     }
 
 
-def scan_changed(keyword="", token="", token_rules=None, log=print):
+def _local_target_tree(project, cmp_token, clone_root, log):
+    """克隆目标仓库到本地并返回其指定分支的文件映射（path → blob sha）。
+
+    克隆失败（仓库不存在 / 无权限 / 目标分支不存在等）返回 None，由
+    _compare_files 回退到 API 路径处理（保持原有的跳过/报错语义）。
+    使用规则 Token（或默认 Token）克隆，与 API 访问目标仓库的口径一致；
+    部分克隆只拉目录树，对比无需 blob。
+    """
+    org = project["org"]
+    repo = project["project"]
+    target_branch = project["version"]
+    dest = os.path.join(clone_root, f"{org}__{repo}")
+    log(f"  克隆目标仓库本地索引: {org}/{repo}@{target_branch}")
+    try:
+        localgit.clone(org, repo, target_branch, cmp_token, dest, log=log)
+        return localgit.tree_map(dest)
+    except client.GitCodeError as e:
+        log(f"  目标仓库本地克隆失败，回退 API 对比: {e}")
+        return None
+
+
+def scan_changed(keyword="", token="", token_rules=None, log=print,
+                 source_repo_dir=None, clone_root=None):
     """扫描全部（或按关键字过滤的）仓库级目录，找出有变更的译稿仓库。
 
     逐仓下载译稿并与目标仓库同路径文件做内容对比（blob sha 比对），
     仅「有新增或有差异」的仓库进入 changed 清单。单仓失败不中断：
     目标仓库/分支不存在记入 skipped，其余错误记入 errors，扫描继续。
+
+    本地化模式（source_repo_dir 非空，通常由 Jenkinsfile 克隆权威仓库
+    后通过 GITCODE_LOCAL_SOURCE_DIR 注入）：索引与列文件走本地 git，
+    目标仓库按需浅克隆（clone_root 指定目录）后本地对比，彻底绕开 API
+    限流；clone_root 未设置时仅索引本地化、对比回退 API。
 
     Returns:
         dict with:
@@ -173,15 +265,23 @@ def scan_changed(keyword="", token="", token_rules=None, log=print):
     if not token:
         return {"ok": False, "stage": "validate", "error": "默认 Token 不能为空"}
 
+    local_mode = bool(source_repo_dir)
     log("正在读取译稿权威仓库目录索引...")
     try:
-        repo_info = client.get_repo(*_source_repo(), token)
-        branch = repo_info.get("default_branch") or "master"
-        paths = []
-        top_dirs = _list_subdirs("", branch, token)
-        for i, d in enumerate(top_dirs, 1):
-            log(f"正在扫描产品目录 ({i}/{len(top_dirs)}): {d}")
-            _collect_dirs(d, branch, token, paths, log)
+        if local_mode:
+            log(f"使用本地克隆目录索引: {source_repo_dir}")
+            tree = localgit.tree_map(source_repo_dir)
+            paths = _repo_dirs_from_tree(tree)
+            branch = "HEAD"
+        else:
+            tree = None
+            repo_info = client.get_repo(*_source_repo(), token)
+            branch = repo_info.get("default_branch") or "master"
+            paths = []
+            top_dirs = _list_subdirs("", branch, token)
+            for i, d in enumerate(top_dirs, 1):
+                log(f"正在扫描产品目录 ({i}/{len(top_dirs)}): {d}")
+                _collect_dirs(d, branch, token, paths, log)
     except client.GitCodeError as e:
         return {"ok": False, "stage": "load_index", "error": str(e)}
 
@@ -208,7 +308,8 @@ def scan_changed(keyword="", token="", token_rules=None, log=print):
         if rule_keyword:
             log(f"  命中 Token 规则「{rule_keyword}」，使用规则 Token 对比")
         try:
-            fetched = _fetch_repo_files(project, branch, token, log)
+            fetched = _fetch_repo_files(
+                project, branch, token, log, tree=tree if local_mode else None)
             if not fetched["ok"]:
                 errors.append({
                     "path": project["path"],
@@ -217,8 +318,14 @@ def scan_changed(keyword="", token="", token_rules=None, log=print):
                 continue
             if not fetched["files"]:
                 continue
-            cmp_result = _compare_files(project, fetched["files"], cmp_token,
-                                        token, branch, log)
+            target_tree = None
+            if local_mode and clone_root:
+                target_tree = _local_target_tree(
+                    project, cmp_token, clone_root, log)
+            cmp_result = _compare_files(
+                project, fetched["files"], cmp_token, token, branch, log,
+                target_tree=target_tree,
+                source_repo_dir=source_repo_dir if local_mode else None)
         except client.GitCodeError as e:
             errors.append({"path": project["path"], "error": str(e)})
             continue

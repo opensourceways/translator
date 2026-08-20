@@ -8,7 +8,8 @@
 
 import base64
 import json
-from contextlib import contextmanager
+import os
+from contextlib import ExitStack, contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -834,3 +835,234 @@ class TestSubmitAll:
         with patch.object(submit, "submit_repo", return_value=existed):
             result = submit.submit_all(items, "tok", log=SILENT)
             assert result["results"][0]["pr_existed"] is True
+
+
+# ── 本地化模式测试 ────────────────────────────────────────────────────
+
+
+def _local_mode_mocks(source_tree, target_trees, source_dir="/src"):
+    """构造本地化模式的 localgit 依赖 mock。
+
+    source_tree:  权威仓库的本地文件映射 {path: sha}
+    target_trees: 按 "{org}__{repo}" 键映射目标仓库的文件映射 {path: sha}
+    （本地模式目标仓库克隆到 {clone_root}/{org}__{repo}）
+    返回 (patches 列表, clone_mock, cat_blob_mock)。
+    """
+    clone_mock = MagicMock(return_value="/clones/dummy")
+    cat_blob_mock = MagicMock(return_value=b"content")
+
+    def tree_map(repo_dir):
+        if repo_dir == source_dir:
+            return source_tree
+        return target_trees.get(os.path.basename(repo_dir), {})
+
+    patches = [
+        patch("translator_ci.localgit.clone", clone_mock),
+        patch("translator_ci.localgit.tree_map", side_effect=tree_map),
+        patch("translator_ci.localgit.cat_blob", cat_blob_mock),
+    ]
+    return patches, clone_mock, cat_blob_mock
+
+
+class TestIndexLocalTree:
+    """从本地 git 文件映射提取仓库级目录与文件。"""
+
+    def test_repo_dirs_from_tree(self):
+        tree = {
+            "Ascend/26.1.0/MindStudio/msprof/test": "s",
+            "Ascend/26.1.0/MindStudio/mspti/test": "s",
+            "README.md": "s",
+        }
+        assert index._repo_dirs_from_tree(tree) == [
+            "Ascend/26.1.0/MindStudio/msprof",
+            "Ascend/26.1.0/MindStudio/mspti",
+        ]
+
+    def test_repo_files_from_tree(self):
+        tree = {
+            "Ascend/26.1.0/MindStudio/msprof/docs/en/a.md": "sha1",
+            "Ascend/26.1.0/MindStudio/msprof/docs/en/b.md": "sha2",
+            "Ascend/26.1.0/MindStudio/mspti/test": "sha3",
+        }
+        files = index._repo_files_from_tree(
+            tree, "Ascend/26.1.0/MindStudio/msprof")
+        assert files == [
+            {"path": "docs/en/a.md", "sha": "sha1"},
+            {"path": "docs/en/b.md", "sha": "sha2"},
+        ]
+
+    def test_repo_files_invalid_path_rejected(self):
+        tree = {
+            "Ascend/26.1.0/MindStudio/msprof/../../evil": "s",
+        }
+        with pytest.raises(GitCodeError) as exc_info:
+            index._repo_files_from_tree(
+                tree, "Ascend/26.1.0/MindStudio/msprof")
+        assert "非法的文件路径" in str(exc_info.value)
+
+
+class TestScanChangedLocalMode:
+    """本地化模式：索引/列文件/对比全走本地 git，扫描阶段不发 API。
+
+    注入 source_repo_dir + clone_root 后，目录索引与内容读取由
+    localgit 完成；目标仓库本地克隆失败时回退 API 对比。
+    """
+
+    LOCAL_SOURCE = {
+        "Ascend/26.1.0/MindStudio/msprof/test": "srcsha1",
+        "Ascend/26.1.0/MindStudio/mspti/test": "srcsha1",
+        "Ascend/master/MindStudio/msprof/test": "srcsha1",
+        "CANN/9.1.0/Toolkit/cann/README.md": "srcsha1",
+        "README.md": "srcsha1",
+    }
+
+    def _run(self, client_mock, target_trees, **kwargs):
+        patches, clone_mock, cat_blob_mock = _local_mode_mocks(
+            self.LOCAL_SOURCE, target_trees)
+        with _patch_scan_client(client_mock), ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            result = scan.scan_changed(
+                "", "tok", log=SILENT,
+                source_repo_dir="/src", clone_root="/clones", **kwargs)
+        return result, clone_mock, cat_blob_mock
+
+    def test_local_all_new_when_target_missing(self):
+        """目标仓库本地映射为空时全部记为新增，扫描零 API 调用。"""
+        client_mock = _make_scan_client_mock()
+        result, clone_mock, cat_blob_mock = self._run(client_mock, {})
+        assert result["ok"] is True
+        assert [c["project"]["path"] for c in result["changed"]] == REPO_PATHS
+        for c in result["changed"]:
+            assert c["new_count"] == 1
+            assert c["update_count"] == 0
+        # 索引/对比全部本地化：不调用来源仓库或目标的 API
+        client_mock.get_repo.assert_not_called()
+        client_mock.list_dir.assert_not_called()
+        client_mock.get_file_bytes.assert_not_called()
+        # 4 个仓库各本地克隆一次；每个变更文件读一次内容
+        assert clone_mock.call_count == 4
+        assert cat_blob_mock.call_count == 4
+
+    def test_local_unchanged_when_sha_matches(self):
+        """本地模式：目标 sha 与来源一致时未变更，不读任何内容。"""
+        client_mock = _make_scan_client_mock()
+        targets = {
+            "Ascend__msprof": {"test": "srcsha1"},
+            "Ascend__mspti": {"test": "srcsha1"},
+            "CANN__cann": {"README.md": "srcsha1"},
+        }
+        result, clone_mock, cat_blob_mock = self._run(client_mock, targets)
+        assert result["changed"] == []
+        assert result["unchanged"] == REPO_PATHS
+        assert cat_blob_mock.call_count == 0
+
+    def test_local_changed_when_sha_differs(self):
+        """本地模式：sha 不一致记为更新，内容走 git cat-file。"""
+        client_mock = _make_scan_client_mock()
+        targets = {
+            "Ascend__msprof": {"test": "tgt-other"},
+            "Ascend__mspti": {"test": "tgt-other"},
+            "CANN__cann": {"README.md": "tgt-other"},
+        }
+        result, clone_mock, cat_blob_mock = self._run(client_mock, targets)
+        assert len(result["changed"]) == 4
+        for c in result["changed"]:
+            assert c["new_count"] == 0
+            assert c["update_count"] == 1
+            assert c["files"][0]["content_b64"] == base64.b64encode(b"content").decode("ascii")
+
+    def test_local_partial_change(self):
+        """本地模式：部分仓库变化时只处理差异项。"""
+        client_mock = _make_scan_client_mock()
+        targets = {
+            "Ascend__msprof": {"test": "srcsha1"},   # 未变更
+            "Ascend__mspti": {"test": "tgt-other"},  # 变更
+            "CANN__cann": {"README.md": "srcsha1"},  # 未变更
+        }
+        result, clone_mock, cat_blob_mock = self._run(client_mock, targets)
+        assert [c["repo"] for c in result["changed"]] == ["mspti"]
+        assert set(result["unchanged"]) == {
+            "Ascend/26.1.0/MindStudio/msprof",
+            "Ascend/master/MindStudio/msprof",
+            "CANN/9.1.0/Toolkit/cann",
+        }
+        assert cat_blob_mock.call_count == 1
+
+    def test_local_clone_failure_falls_back_to_api(self):
+        """目标仓库本地克隆失败时回退 API 对比，不中断整轮扫描。"""
+        client_mock = _make_scan_client_mock()
+        patches, clone_mock, cat_blob_mock = _local_mode_mocks(
+            self.LOCAL_SOURCE, {})
+        clone_mock.side_effect = GitCodeError(404, "Repository not found")
+        with _patch_scan_client(client_mock), ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            result = scan.scan_changed(
+                "", "tok", log=SILENT,
+                source_repo_dir="/src", clone_root="/clones")
+        # 回退 API：list_branches 正常返回、目标无文件 → 全部记为新增
+        assert result["ok"] is True
+        assert len(result["changed"]) == 4
+        for c in result["changed"]:
+            assert c["new_count"] == 1
+        assert client_mock.list_branches.call_count == 4
+
+    def test_local_binary_content_via_cat_blob(self):
+        """本地模式读内容走 git cat-file，图片/GIF 原始字节直达提交。"""
+        gif = b"GIF89a\x01\x00\x02\x00\xf7\x00\x80\x00\x00\xff\xff\xff\x00"
+        client_mock = _make_scan_client_mock()
+        targets = {
+            "Ascend__msprof": {"test": "tgt-other"},
+            "Ascend__mspti": {"test": "tgt-other"},
+            "CANN__cann": {"README.md": "tgt-other"},
+        }
+        patches, clone_mock, cat_blob_mock = _local_mode_mocks(
+            self.LOCAL_SOURCE, targets)
+        cat_blob_mock.return_value = gif
+        with _patch_scan_client(client_mock), ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            result = scan.scan_changed(
+                "", "tok", log=SILENT,
+                source_repo_dir="/src", clone_root="/clones")
+        assert len(result["changed"]) == 4
+        for c in result["changed"]:
+            assert base64.b64decode(c["files"][0]["content_b64"]) == gif
+
+
+class TestLoadTokenRulesLocal:
+    """本地化模式：规则文件从本地克隆读取（git show），失败路径同 API。"""
+
+    def test_reads_from_local_clone(self):
+        with patch("translator_ci.localgit.read_file",
+                   return_value=b'{"rules": []}') as read_mock:
+            loaded = rules.load_token_rules("tok", log=SILENT,
+                                            source_repo_dir="/src")
+            assert loaded == []
+            read_mock.assert_called_once_with("/src", "token_rules.json")
+
+    def test_missing_file_returns_empty(self):
+        with patch("translator_ci.localgit.read_file",
+                   side_effect=GitCodeError(404, "missing")):
+            loaded = rules.load_token_rules("tok", log=SILENT,
+                                            source_repo_dir="/src")
+            assert loaded == []
+
+    def test_valid_rules_resolved_from_env(self, monkeypatch):
+        monkeypatch.setenv("GITCODE_TOKEN_MINDSTUDIO", "tokA")
+        text = json.dumps({"rules": [
+            {"keyword": "MindStudio", "token_env": "GITCODE_TOKEN_MINDSTUDIO"},
+        ]})
+        with patch("translator_ci.localgit.read_file",
+                   return_value=text.encode("utf-8")):
+            loaded = rules.load_token_rules("tok", log=SILENT,
+                                            source_repo_dir="/src")
+            assert loaded == [{"keyword": "MindStudio", "token": "tokA"}]
+
+    def test_invalid_json_raises_config_error(self):
+        with patch("translator_ci.localgit.read_file",
+                   return_value=b"{not json"):
+            with pytest.raises(common.ConfigError):
+                rules.load_token_rules("tok", log=SILENT,
+                                       source_repo_dir="/src")

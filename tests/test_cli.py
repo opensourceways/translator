@@ -185,3 +185,35 @@ class TestSubmitPhase:
                              return_value=_scan_result()):
             assert cli.main([]) == 0
             sync_mock.assert_not_called()
+
+
+class TestLocalModeEnv:
+    """本地化开关：由环境变量注入，透传到规则加载与扫描。"""
+
+    def test_local_env_passed_through(self, monkeypatch):
+        monkeypatch.setenv("GITCODE_LOCAL_SOURCE_DIR", "/src")
+        monkeypatch.setenv("GITCODE_CLONE_DIR", "/clones")
+        with patch.object(cli.service, "load_token_rules",
+                          return_value=[]) as load_mock, \
+                patch.object(cli.service, "scan_changed",
+                             return_value=_scan_result()) as scan_mock:
+            assert cli.main([]) == 0
+            _, kwargs = load_mock.call_args
+            assert kwargs["source_repo_dir"] == "/src"
+            _, kwargs = scan_mock.call_args
+            assert kwargs["source_repo_dir"] == "/src"
+            assert kwargs["clone_root"] == "/clones"
+
+    def test_no_local_env_defaults_none(self, monkeypatch):
+        monkeypatch.delenv("GITCODE_LOCAL_SOURCE_DIR", raising=False)
+        monkeypatch.delenv("GITCODE_CLONE_DIR", raising=False)
+        with patch.object(cli.service, "load_token_rules",
+                          return_value=[]) as load_mock, \
+                patch.object(cli.service, "scan_changed",
+                             return_value=_scan_result()) as scan_mock:
+            assert cli.main([]) == 0
+            _, kwargs = load_mock.call_args
+            assert kwargs["source_repo_dir"] is None
+            _, kwargs = scan_mock.call_args
+            assert kwargs["source_repo_dir"] is None
+            assert kwargs["clone_root"] is None

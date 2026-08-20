@@ -11,7 +11,7 @@
 import json
 import os
 
-from translator_ci import client
+from translator_ci import client, localgit
 from translator_ci.common import _source_repo, DEFAULT_RULES_PATH, ConfigError
 
 
@@ -46,7 +46,8 @@ def _effective_rules(token_rules):
     ]
 
 
-def load_token_rules(token, rules_path=DEFAULT_RULES_PATH, log=print):
+def load_token_rules(token, rules_path=DEFAULT_RULES_PATH, log=print,
+                     source_repo_dir=None):
     """从译稿权威仓库读取 Token 规则文件并解析为 [{"keyword", "token"}]。
 
     规则文件只保存 keyword → 环境变量名的映射，Token 本体不落任何仓库：
@@ -55,23 +56,34 @@ def load_token_rules(token, rules_path=DEFAULT_RULES_PATH, log=print):
 
     文件不存在（404）时返回空规则——全部仓库使用默认 Token；
     文件存在但 JSON 非法时抛出 ConfigError——权限边界配置损坏不能
-    静默放行。
+    静默放行。source_repo_dir 非空时（本地化模式）从本地克隆读取，
+    否则走 API。
 
     Returns:
         list: [{"keyword": ..., "token": ...}]，无有效规则时为空列表
     """
     owner, repo = _source_repo()
     log(f"正在从来源仓库 {owner}/{repo} 读取规则文件: {rules_path}")
-    repo_info = client.get_repo(owner, repo, token)
-    branch = repo_info.get("default_branch") or "master"
-    try:
-        text = client.get_file_text(
-            owner, repo, rules_path, branch, token)
-    except client.GitCodeError as e:
-        if e.status_code == 404:
-            log(f"来源仓库中不存在规则文件 {rules_path}，全部仓库使用默认 Token")
-            return []
-        raise
+    if source_repo_dir:
+        try:
+            text = localgit.read_file(source_repo_dir, rules_path).decode(
+                "utf-8")
+        except client.GitCodeError as e:
+            if e.status_code == 404:
+                log(f"来源仓库中不存在规则文件 {rules_path}，全部仓库使用默认 Token")
+                return []
+            raise
+    else:
+        repo_info = client.get_repo(owner, repo, token)
+        branch = repo_info.get("default_branch") or "master"
+        try:
+            text = client.get_file_text(
+                owner, repo, rules_path, branch, token)
+        except client.GitCodeError as e:
+            if e.status_code == 404:
+                log(f"来源仓库中不存在规则文件 {rules_path}，全部仓库使用默认 Token")
+                return []
+            raise
     try:
         data = json.loads(text)
     except ValueError as e:

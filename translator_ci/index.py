@@ -115,3 +115,36 @@ def _to_project(path):
         "path": path,
         "is_repo": len(segs) == 4,
     }
+
+
+def _repo_dirs_from_tree(tree):
+    """从本地文件映射（localgit.tree_map，path → blob sha）提取仓库级目录。
+
+    等价于 API 版 _list_subdirs + _collect_dirs，但只占 1 次本地命令。
+    仓库级目录为「组织/版本/产品/仓库」四段路径，去重后排序。
+    """
+    dirs = set()
+    for p in tree:
+        segs = p.split("/")
+        if len(segs) >= 4:
+            dirs.add("/".join(segs[:4]))
+    return sorted(dirs)
+
+
+def _repo_files_from_tree(tree, repo_path):
+    """从本地文件映射提取仓库级目录下的文件（相对路径 + blob sha）。
+
+    路径校验与 _walk_files 一致：拒绝绝对路径与 .. 相对路径。
+    本地映射只含 blob，天然不存在「目录条目缺 sha」的情况，sha 必有值。
+    """
+    prefix = repo_path + "/"
+    files = []
+    for p, sha in tree.items():
+        if not p.startswith(prefix):
+            continue
+        rel = p[len(prefix):]
+        normalized = os.path.normpath(rel).replace("\\", "/")
+        if normalized.startswith("..") or os.path.isabs(rel):
+            raise client.GitCodeError(400, f"非法的文件路径: {rel}")
+        files.append({"path": rel, "sha": sha})
+    return files
