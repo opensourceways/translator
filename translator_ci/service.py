@@ -156,6 +156,8 @@ def load_token_rules(token, rules_path=DEFAULT_RULES_PATH, log=print):
         if not value:
             log(f"  [警告] 规则「{keyword}」对应的环境变量 {env_name} 未配置，已跳过")
             continue
+        # 打印脱敏指纹（前 3 位 + 长度），便于排查参数值配错的问题
+        log(f"  规则「{keyword}」Token 指纹: {value[:3]}***（长度 {len(value)}）")
         resolved.append({"keyword": keyword, "token": value})
 
     if resolved:
