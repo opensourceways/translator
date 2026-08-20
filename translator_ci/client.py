@@ -14,6 +14,7 @@ import requests
 BASE_URL = "https://api.gitcode.com/api/v5"
 MAX_RETRIES = 3
 RETRY_DELAY = 5
+DEFAULT_TIMEOUT = 30          # 单次请求超时（秒），防止连接挂死
 
 
 class GitCodeError(Exception):
@@ -33,11 +34,20 @@ def _headers(token):
     }
 
 
-def _do_request(method, url, token, **kwargs):
-    """发起 HTTP 请求，遇到 429 自动等待后重试（最多 {MAX_RETRIES} 次）。"""
+def _do_request(method, url, token, timeout=None, **kwargs):
+    """发起 HTTP 请求，遇到 429 / GET 5xx 自动等待后重试（最多 {MAX_RETRIES} 次）。
+
+    所有请求统一携带默认超时（可用 timeout 覆盖），避免连接挂死；
+    GET 是幂等的，服务端 5xx（网关/服务异常）时短暂等待后重试更稳。
+    """
     for attempt in range(MAX_RETRIES):
-        r = requests.request(method, url, headers=_headers(token), **kwargs)
+        r = requests.request(method, url, headers=_headers(token),
+                             timeout=timeout or DEFAULT_TIMEOUT, **kwargs)
         if r.status_code == 429 and attempt < MAX_RETRIES - 1:
+            time.sleep(RETRY_DELAY)
+            continue
+        if (method == "GET" and 500 <= r.status_code < 600
+                and attempt < MAX_RETRIES - 1):
             time.sleep(RETRY_DELAY)
             continue
         if not r.ok:
@@ -50,10 +60,33 @@ def get_repo(owner, repo, token):
     return _do_request("GET", f"{BASE_URL}/repos/{owner}/{repo}", token)
 
 
-def list_branches(owner, repo, token):
-    """列出仓库所有分支（每页 100 条，取第一页）。"""
-    return _do_request("GET", f"{BASE_URL}/repos/{owner}/{repo}/branches",
-                       token, params={"per_page": 100})
+def _paginate(url, token, params, per_page=100):
+    """按 page 参数分页拉取全量数组（分支/PR 等列表接口）。
+
+    平台单页上限 100，列表可能超出单页；逐页取到空或不足一整页为止，
+    避免列表被截断导致漏判（如分支不存在、open PR 去重失效）。
+    """
+    items = []
+    page = 1
+    while True:
+        batch = _do_request("GET", url, token,
+                            params={**params, "page": page,
+                                    "per_page": per_page})
+        if not isinstance(batch, list):
+            raise GitCodeError(200, f"分页响应不是数组: {url}")
+        if not batch:
+            break
+        items.extend(batch)
+        if len(batch) < per_page:
+            break
+        page += 1
+    return items
+
+
+def list_branches(owner, repo, token, per_page=100):
+    """列出仓库所有分支（自动分页拉取全量）。"""
+    return _paginate(f"{BASE_URL}/repos/{owner}/{repo}/branches", token,
+                     {}, per_page=per_page)
 
 
 def create_branch(owner, repo, branch_name, refs, token):
@@ -168,15 +201,14 @@ def get_sync_status(owner, repo, token, branch=None):
                        token, params=params)
 
 
-def list_pull_requests(owner, repo, token, state="open"):
-    """列出仓库的 Pull Request（默认仅 open），供提交前去重。
+def list_pull_requests(owner, repo, token, state="open", per_page=100):
+    """列出仓库的 Pull Request（默认仅 open），自动分页拉取全量。
 
     注意：GitCode 服务端不支持 head/base 过滤参数（带了会返回空
     列表），调用方需拉全量 open PR 后自行按 head/base 过滤。
     """
-    params = {"state": state, "per_page": 100}
-    return _do_request("GET", f"{BASE_URL}/repos/{owner}/{repo}/pulls", token,
-                       params=params)
+    return _paginate(f"{BASE_URL}/repos/{owner}/{repo}/pulls", token,
+                     {"state": state}, per_page=per_page)
 
 
 def create_pr(owner, repo, title, head, base, body, token, fork_path=None):

@@ -93,15 +93,20 @@ class TestEndpoints:
 
     def test_list_pull_requests_no_server_filters(self):
         """GitCode 服务端不支持 head/base 过滤（带参返回空），不得传参。"""
-        m = self._call(client.list_pull_requests, "Ascend", "msprof", "tok",
-                       state="open")
+        with patch("translator_ci.client.requests.request",
+                   return_value=make_ok_response([])) as m:
+            client.list_pull_requests("Ascend", "msprof", "tok", state="open")
         assert m.call_args.args[0] == "GET"
         assert m.call_args.args[1].endswith("/repos/Ascend/msprof/pulls")
         params = m.call_args.kwargs["params"]
-        assert params == {"state": "open", "per_page": 100}
+        assert params == {"state": "open", "page": 1, "per_page": 100}
+        assert "head" not in params
+        assert "base" not in params
 
     def test_list_pull_requests_default_open(self):
-        m = self._call(client.list_pull_requests, "Ascend", "msprof", "tok")
+        with patch("translator_ci.client.requests.request",
+                   return_value=make_ok_response([])) as m:
+            client.list_pull_requests("Ascend", "msprof", "tok")
         params = m.call_args.kwargs["params"]
         assert params["state"] == "open"
         assert "head" not in params
@@ -125,10 +130,32 @@ class TestGetContents:
             assert client.get_contents("o", "r", "a.md", "master", "tok") is None
 
     def test_500_raises(self):
+        """持续 500 时重试耗尽后抛出 GitCodeError。"""
         with patch("translator_ci.client.requests.request",
-                   return_value=make_error_response(500)):
+                   return_value=make_error_response(500)), \
+                patch("translator_ci.client.time.sleep"):
             with pytest.raises(GitCodeError):
                 client.get_contents("o", "r", "a.md", "master", "tok")
+
+    def test_500_retries_then_succeeds(self):
+        """GET 5xx 短暂等待后重试，成功返回结果。"""
+        responses = [make_error_response(500), make_ok_response({"sha": "x"})]
+        with patch("translator_ci.client.requests.request",
+                   side_effect=responses), \
+                patch("translator_ci.client.time.sleep") as sleep_mock:
+            result = client.get_contents("o", "r", "a.md", "master", "tok")
+            assert result == {"sha": "x"}
+            sleep_mock.assert_called_once()
+
+    def test_5xx_non_get_not_retried(self):
+        """非 GET 的 5xx 不重试（写操作不能盲目重放）。"""
+        with patch("translator_ci.client.requests.request",
+                   return_value=make_error_response(503)), \
+                patch("translator_ci.client.time.sleep") as sleep_mock:
+            with pytest.raises(GitCodeError):
+                client.create_file("o", "r", "a.md", "m", "YQ==",
+                                   "master", "tok")
+            sleep_mock.assert_not_called()
 
 
 class TestListDir:
@@ -146,3 +173,50 @@ class TestListDir:
                    return_value=make_ok_response([])) as m:
             client.list_dir("o", "r", "", "master", "tok")
             assert m.call_args.args[1].endswith("/repos/o/r/contents")
+
+
+class TestPagination:
+    """列表接口自动分页：超过单页继续拉下一页，直到取空。"""
+
+    def _pages(self, *pages):
+        return [make_ok_response(list(p)) for p in pages]
+
+    def test_branches_multiple_pages(self):
+        responses = self._pages(
+            [{"name": f"b{i}"} for i in range(100)],
+            [{"name": "b100"}], [],  # 第二页不足一页即停止
+        )
+        with patch("translator_ci.client.requests.request",
+                   side_effect=responses) as m:
+            branches = client.list_branches("o", "r", "tok")
+            assert len(branches) == 101
+            # 第一页 page=1，第二页 page=2
+            assert m.call_args_list[0].kwargs["params"]["page"] == 1
+            assert m.call_args_list[1].kwargs["params"]["page"] == 2
+            assert len(m.call_args_list) == 2  # 空页不再请求
+
+    def test_branches_empty_stops(self):
+        with patch("translator_ci.client.requests.request",
+                   return_value=make_ok_response([])) as m:
+            assert client.list_branches("o", "r", "tok") == []
+            assert len(m.call_args_list) == 1
+
+    def test_pull_requests_multiple_pages(self):
+        responses = self._pages(
+            [{"number": i} for i in range(100)],
+            [{"number": 100}],
+        )
+        with patch("translator_ci.client.requests.request",
+                   side_effect=responses) as m:
+            prs = client.list_pull_requests("o", "r", "tok")
+            assert len(prs) == 101
+            params1 = m.call_args_list[0].kwargs["params"]
+            assert params1["state"] == "open" and params1["page"] == 1
+            assert m.call_args_list[1].kwargs["params"]["page"] == 2
+
+    def test_non_array_page_raises(self):
+        with patch("translator_ci.client.requests.request",
+                   return_value=make_ok_response({"error": "boom"})):
+            with pytest.raises(GitCodeError):
+                client.list_branches("o", "r", "tok")
+
