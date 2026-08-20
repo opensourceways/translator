@@ -3,7 +3,7 @@
 sync_source:   来源为 Fork 时，扫描前同步其与上游
 _list_subdirs: 列出指定目录下的子目录名（过滤掉文件）
 _walk_files:   递归列出目录下全部文件（携带来源 blob sha，路径校验前置）
-_collect_dirs: 递归收集所有（子树内）包含文件的目录路径（MAX_DEPTH 截断告警）
+_collect_dirs: 递归收集所有（子树内）包含文件的目录路径（不限制嵌套深度）
 _to_project:   目录路径按固定层级解析为项目描述
 """
 
@@ -12,7 +12,7 @@ import time
 
 from translator_ci import client
 from translator_ci.common import (
-    _source_repo, SOURCE_ORG, SOURCE_REPO, MAX_DEPTH,
+    _source_repo, SOURCE_ORG, SOURCE_REPO,
 )
 
 
@@ -77,11 +77,12 @@ def _walk_files(path, ref, token, prefix=""):
     return files
 
 
-def _collect_dirs(path, ref, token, depth, out, log=print):
+def _collect_dirs(path, ref, token, out, log=print):
     """递归收集目录树中所有（子树内）包含文件的目录路径。
 
-    目录深度超过 MAX_DEPTH 的部分不会递归（避免索引过深），
-    截断时记录告警，便于发现目录树比预期更深导致的遗漏。
+    不限制嵌套深度：权威仓库的译稿目录树深度不固定（当前实测最深 8 级），
+    人为设深限可能漏掉「文件只存在于深层子树」的仓库级目录；目录树规模
+    有限（几十到几百个目录），完整递归即可。
 
     Returns:
         int: 该目录子树内的文件总数（用于判断目录是否有效）。
@@ -90,12 +91,7 @@ def _collect_dirs(path, ref, token, depth, out, log=print):
     count = 0
     for e in entries:
         if e.get("type") == "dir":
-            if depth < MAX_DEPTH:
-                count += _collect_dirs(e["path"], ref, token, depth + 1,
-                                       out, log)
-            else:
-                log(f"  [警告] 目录深度超过上限 {MAX_DEPTH}，跳过其子树: "
-                    f"{e['path']}")
+            count += _collect_dirs(e["path"], ref, token, out, log)
         else:
             count += 1
     if path and count:

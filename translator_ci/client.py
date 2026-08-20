@@ -12,7 +12,7 @@ from urllib.parse import quote
 import requests
 
 BASE_URL = "https://api.gitcode.com/api/v5"
-MAX_RETRIES = 3
+MAX_RETRIES = 4
 RETRY_DELAY = 5
 DEFAULT_TIMEOUT = 30          # 单次请求超时（秒），防止连接挂死
 
@@ -34,21 +34,35 @@ def _headers(token):
     }
 
 
+def _retry_delay(r, attempt):
+    """计算重试前等待时长。
+
+    429 限流按分钟窗口计数：优先按服务端 Retry-After 头等待，否则
+    指数退避（5/10/20/40 秒，跨过一分钟窗口后大概率已重置）；其余
+    （GET 5xx 网关错误）保持固定短间隔即可。
+    """
+    if r.status_code == 429:
+        retry_after = r.headers.get("Retry-After")
+        if retry_after and retry_after.isdigit():
+            return min(int(retry_after), 60)
+        return RETRY_DELAY * (2 ** attempt)
+    return RETRY_DELAY
+
+
 def _do_request(method, url, token, timeout=None, **kwargs):
     """发起 HTTP 请求，遇到 429 / GET 5xx 自动等待后重试（最多 {MAX_RETRIES} 次）。
 
     所有请求统一携带默认超时（可用 timeout 覆盖），避免连接挂死；
-    GET 是幂等的，服务端 5xx（网关/服务异常）时短暂等待后重试更稳。
+    429 按 Retry-After/指数退避等待以跨过限流窗口，GET 5xx 幂等，
+    短暂等待后重试更稳。
     """
     for attempt in range(MAX_RETRIES):
         r = requests.request(method, url, headers=_headers(token),
                              timeout=timeout or DEFAULT_TIMEOUT, **kwargs)
-        if r.status_code == 429 and attempt < MAX_RETRIES - 1:
-            time.sleep(RETRY_DELAY)
-            continue
-        if (method == "GET" and 500 <= r.status_code < 600
-                and attempt < MAX_RETRIES - 1):
-            time.sleep(RETRY_DELAY)
+        if (r.status_code == 429 or
+                (method == "GET" and 500 <= r.status_code < 600)) \
+                and attempt < MAX_RETRIES - 1:
+            time.sleep(_retry_delay(r, attempt))
             continue
         if not r.ok:
             raise GitCodeError(r.status_code, _extract_error(r))

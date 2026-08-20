@@ -40,20 +40,23 @@ def _fetch_repo_files(project, branch, token, log):
     ]}
 
 
-def _compare_files(project, files, cmp_token, source_token, log=print):
+def _compare_files(project, files, cmp_token, source_token, source_branch,
+                   log=print):
     """对比仓库级目录的译稿与目标仓库内容，筛出有变更的文件。
 
-    目标定位：org/repo/branch 取目录第 1/4/2 段。优先用「来源目录条目的
-    blob sha」与目标文件 sha 直接比对，两者一致即未变更，无需下载来源
-    内容（来源条目未携带 sha、或目标 sha 缺失时才下载全文做 blob sha /
-    文本兜底比对）。变更文件按需下载并携带内容，供提交阶段写入使用。
+    目标定位：org/repo/branch 取目录第 1/4/2 段；下载来源内容时使用
+    权威仓库分支 source_branch（与索引/列目录一致，勿混用目标分支）。
+    优先用「来源目录条目的 blob sha」与目标文件 sha 直接比对，两者一致
+    即未变更，无需下载来源内容（来源条目未携带 sha、或目标 sha 缺失时
+    才下载全文做 blob sha / 文本兜底比对）。变更文件按需下载并携带内容，
+    供提交阶段写入使用。
 
     Returns:
         dict: {"status": "changed" | "unchanged" | "skipped", ...}
     """
     org = project["org"]
     repo = project["project"]
-    branch = project["version"]
+    target_branch = project["version"]
 
     try:
         branches = client.list_branches(org, repo, cmp_token)
@@ -63,9 +66,9 @@ def _compare_files(project, files, cmp_token, source_token, log=print):
                     "reason": f"目标仓库 {org}/{repo} 不存在或无权限"}
         raise
     names = {b.get("name") for b in branches}
-    if branch not in names:
+    if target_branch not in names:
         return {"status": "skipped",
-                "reason": f"目标仓库 {org}/{repo} 不存在分支 {branch}"}
+                "reason": f"目标仓库 {org}/{repo} 不存在分支 {target_branch}"}
 
     changed = []
     new_count = 0
@@ -82,9 +85,10 @@ def _compare_files(project, files, cmp_token, source_token, log=print):
         source_path = f"{project['path']}/{rel_path}"
         log(f"  下载译稿: {rel_path}")
         try:
-            # 按字节读取：译稿可能混有图片等二进制文件，不能按文本解码
+            # 按字节读取：译稿可能混有图片等二进制文件，不能按文本解码。
+            # 注意必须用权威仓库分支 source_branch，而非目标分支 target_branch
             content = client.get_file_bytes(
-                *_source_repo(), source_path, branch, source_token)
+                *_source_repo(), source_path, source_branch, source_token)
         except client.GitCodeError as e:
             raise client.GitCodeError(
                 e.status_code, f"下载文件 {source_path} 失败: {e.message}")
@@ -97,7 +101,7 @@ def _compare_files(project, files, cmp_token, source_token, log=print):
 
     for f in files:
         existing = client.get_contents(
-            org, repo, f["target_path"], branch, cmp_token)
+            org, repo, f["target_path"], target_branch, cmp_token)
         if existing is None:
             new_count += 1
             changed.append({
@@ -131,7 +135,7 @@ def _compare_files(project, files, cmp_token, source_token, log=print):
             same = remote_sha == _git_blob_sha(content)
         else:
             remote_bytes = client.get_file_bytes(
-                org, repo, f["target_path"], branch, cmp_token)
+                org, repo, f["target_path"], target_branch, cmp_token)
             same = remote_bytes == content
         if not same:
             update_count += 1
@@ -177,7 +181,7 @@ def scan_changed(keyword="", token="", token_rules=None, log=print):
         top_dirs = _list_subdirs("", branch, token)
         for i, d in enumerate(top_dirs, 1):
             log(f"正在扫描产品目录 ({i}/{len(top_dirs)}): {d}")
-            _collect_dirs(d, branch, token, 1, paths, log)
+            _collect_dirs(d, branch, token, paths, log)
     except client.GitCodeError as e:
         return {"ok": False, "stage": "load_index", "error": str(e)}
 
@@ -214,7 +218,7 @@ def scan_changed(keyword="", token="", token_rules=None, log=print):
             if not fetched["files"]:
                 continue
             cmp_result = _compare_files(project, fetched["files"], cmp_token,
-                                        token, log)
+                                        token, branch, log)
         except client.GitCodeError as e:
             errors.append({"path": project["path"], "error": str(e)})
             continue

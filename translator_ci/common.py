@@ -3,7 +3,7 @@
 rules / index / scan / submit 都从本模块获取共享定义，避免子模块之间
 相互引用造成循环依赖：
 - 仓库与路径常量（SOURCE_ORG / SOURCE_REPO、DEFAULT_RULES_PATH、
-  MAX_TOTAL_SIZE / MAX_DEPTH、AUTO_BRANCH_PREFIX）
+  MAX_TOTAL_SIZE、AUTO_BRANCH_PREFIX）
 - _source_repo：译稿来源仓库的解析（支持 GITCODE_SOURCE_REPO 覆盖）
 - ConfigError：配置损坏异常（权限边界配置不能静默放行）
 - _git_blob_sha：git blob sha 计算（免下载内容对比）
@@ -21,7 +21,6 @@ SOURCE_REPO = "Computing_Ecosystem_Docs-EN"
 
 DEFAULT_RULES_PATH = "token_rules.json"  # 权威仓库根目录下的规则文件
 MAX_TOTAL_SIZE = 5 * 1024 * 1024         # 单次上传累计文件大小上限 5 MB
-MAX_DEPTH = 6                            # 目录索引的最大递归深度
 AUTO_BRANCH_PREFIX = "translator/auto-"  # 自动提交的固定分支名前缀
 
 
