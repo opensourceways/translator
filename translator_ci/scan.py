@@ -62,7 +62,8 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
                    log=print, target_tree=None, source_repo_dir=None):
     """对比仓库级目录的译稿与目标仓库内容，筛出有变更的文件。
 
-    目标定位：org/repo/branch 取目录第 1/4/2 段；下载来源内容时使用
+    目标定位：org/repo/branch 按组织层级取（见 index._to_project，Ascend
+    为第 1/4/2 段，CANN 等为第 1/3/2 段）；下载来源内容时使用
     权威仓库分支 source_branch（与索引/列目录一致，勿混用目标分支）。
     优先用「来源目录条目的 blob sha」与目标文件 sha 直接比对，两者一致
     即未变更，无需下载来源内容（来源条目未携带 sha、或目标 sha 缺失时
