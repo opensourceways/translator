@@ -15,6 +15,20 @@ from translator_ci.common import (
     _source_repo, SOURCE_ORG, SOURCE_REPO,
 )
 
+# 各产品组织在权威仓中的「仓库级目录」段数（org/.../仓库名）：
+#   Ascend: org/版本/产品/仓库 → 4 段（MindStudio 为产品层，msprof 等为仓库名）
+#   CANN:   org/版本/仓库      → 3 段（hccl/sip 等直接是仓库名，与 CANN 交付说明一致）
+# 目标仓库 = 组织/最后一段；目标分支 = 第 2 段（版本）；目标路径 = 仓库级之后。
+# 未登记的组织按默认 3 段（org/版本/仓库）处理。
+REPO_DEPTH_BY_ORG = {"Ascend": 4}
+DEFAULT_REPO_DEPTH = 3
+
+
+def _repo_depth(path):
+    """按路径所属组织返回仓库级目录段数。"""
+    org = path.split("/", 1)[0]
+    return REPO_DEPTH_BY_ORG.get(org, DEFAULT_REPO_DEPTH)
+
 
 def sync_source(token, log=print, attempts=10, interval=2):
     """扫描前同步来源仓库与其上游（来源为 Fork 时使用）。
@@ -100,20 +114,23 @@ def _collect_dirs(path, ref, token, out, log=print):
 
 
 def _to_project(path):
-    """把目录路径按固定层级解析为项目描述。
+    """把目录路径按组织规定的层级解析为项目描述。
 
-    目录规范为「组织/版本/产品/仓库/目标路径」：org/version/product
-    /project 依次取前四段（不足则为空字符串）；is_repo 标记该目录
-    是否为完整的四级（仓库级）目录——只有仓库级目录参与扫描提交。
+    仓库级目录段数由组织决定（REPO_DEPTH_BY_ORG）：Ascend 为
+    org/版本/产品/仓库（4 段），CANN 为 org/版本/仓库（3 段）。
+    org 取第 1 段、版本取第 2 段（即目标分支），仓库名取仓库级最后一段，
+    仓库级之后为目标路径。is_repo 标记是否为完整的仓库级目录——
+    只有仓库级目录参与扫描提交。
     """
     segs = path.split("/")
+    depth = _repo_depth(path)
     return {
-        "org": segs[0],
+        "org": segs[0] if segs else "",
         "version": segs[1] if len(segs) > 1 else "",
-        "product": segs[2] if len(segs) > 2 else "",
-        "project": segs[3] if len(segs) > 3 else "",
+        "product": segs[2] if depth == 4 and len(segs) > 2 else "",
+        "project": segs[depth - 1] if len(segs) >= depth else "",
         "path": path,
-        "is_repo": len(segs) == 4,
+        "is_repo": len(segs) == depth,
     }
 
 
@@ -121,13 +138,16 @@ def _repo_dirs_from_tree(tree):
     """从本地文件映射（localgit.tree_map，path → blob sha）提取仓库级目录。
 
     等价于 API 版 _list_subdirs + _collect_dirs，但只占 1 次本地命令。
-    仓库级目录为「组织/版本/产品/仓库」四段路径，去重后排序。
+    仓库级目录为「组织/.../仓库名」固定段数（由组织决定）；只以「严格深于
+    仓库级」的文件推导目录，避免把 org/版本 下的散文件（如
+    CANN/9.1.0/README.md）误判为仓库。去重后排序。
     """
     dirs = set()
     for p in tree:
         segs = p.split("/")
-        if len(segs) >= 4:
-            dirs.add("/".join(segs[:4]))
+        depth = _repo_depth(p)
+        if len(segs) > depth:
+            dirs.add("/".join(segs[:depth]))
     return sorted(dirs)
 
 

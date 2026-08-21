@@ -37,7 +37,7 @@ def _entry(name, path, entry_type):
     return {"name": name, "path": path, "type": entry_type}
 
 
-# 权威仓库的模拟目录树（固定层级：组织/版本/产品/仓库/目标路径）
+# 权威仓库的模拟目录树（按组织层级：Ascend=组织/版本/产品/仓库，CANN=组织/版本/仓库）
 FAKE_TREE = {
     "": [
         _entry("Ascend", "Ascend", "dir"),
@@ -67,10 +67,9 @@ FAKE_TREE = {
         _entry("test", "Ascend/master/MindStudio/msprof/test", "file"),
     ],
     "CANN": [_entry("9.1.0", "CANN/9.1.0", "dir")],
-    "CANN/9.1.0": [_entry("Toolkit", "CANN/9.1.0/Toolkit", "dir")],
-    "CANN/9.1.0/Toolkit": [_entry("cann", "CANN/9.1.0/Toolkit/cann", "dir")],
-    "CANN/9.1.0/Toolkit/cann": [
-        _entry("README.md", "CANN/9.1.0/Toolkit/cann/README.md", "file"),
+    "CANN/9.1.0": [_entry("cann", "CANN/9.1.0/cann", "dir")],
+    "CANN/9.1.0/cann": [
+        _entry("README.md", "CANN/9.1.0/cann/README.md", "file"),
     ],
 }
 
@@ -79,7 +78,7 @@ REPO_PATHS = [
     "Ascend/26.1.0/MindStudio/msprof",
     "Ascend/26.1.0/MindStudio/mspti",
     "Ascend/master/MindStudio/msprof",
-    "CANN/9.1.0/Toolkit/cann",
+    "CANN/9.1.0/cann",
 ]
 
 
@@ -912,7 +911,7 @@ class TestScanChangedLocalMode:
         "Ascend/26.1.0/MindStudio/msprof/test": "srcsha1",
         "Ascend/26.1.0/MindStudio/mspti/test": "srcsha1",
         "Ascend/master/MindStudio/msprof/test": "srcsha1",
-        "CANN/9.1.0/Toolkit/cann/README.md": "srcsha1",
+        "CANN/9.1.0/cann/README.md": "srcsha1",
         "README.md": "srcsha1",
     }
 
@@ -985,7 +984,7 @@ class TestScanChangedLocalMode:
         assert set(result["unchanged"]) == {
             "Ascend/26.1.0/MindStudio/msprof",
             "Ascend/master/MindStudio/msprof",
-            "CANN/9.1.0/Toolkit/cann",
+            "CANN/9.1.0/cann",
         }
         assert cat_blob_mock.call_count == 1
 
