@@ -27,7 +27,10 @@ pipeline {
             // 只在 main 分支推送时触发（ref 形如 "refs/heads/main"，个别场景
             // 可能只有 "main"）。ref 为空时仍触发：webhook 未按 application/json
             // 发送导致取不到 ref 的兜底，避免整体误停。
-            branchFilter: '^refs/heads/main$|^main$|^$',
+            // 用 regexpFilterText/Expression 而非 branchFilter：当前插件版本
+            // 不支持 branchFilter（较新版本才引入），旧版用这两个参数通用生效。
+            regexpFilterText: '$ref',
+            regexpFilterExpression: '^(refs/heads/main|main|)$',
             causeString: 'GitCode Push: $ref',
             token: 'translator-auto-pr'
         )
