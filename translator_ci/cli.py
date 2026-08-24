@@ -41,6 +41,10 @@ def main(argv=None):
     parser.add_argument("--rules-path", default=service.DEFAULT_RULES_PATH,
                         help="权威仓库中 Token 规则文件的路径"
                              "（默认 %(default)s）")
+    parser.add_argument("--blacklist-path",
+                        default=service.DEFAULT_BLACKLIST_PATH,
+                        help="权威仓库中拉黑名单文件的路径"
+                             "（默认 %(default)s）")
     parser.add_argument("--sync-source", action="store_true",
                         help="来源为 Fork 时，扫描前先同步其与上游")
     args = parser.parse_args(argv)
@@ -72,12 +76,24 @@ def main(argv=None):
         _log(f"错误：读取规则文件失败: {e}")
         return 1
 
+    # ── 加载拉黑名单（权威仓库内的名单文件，命中则跳过不处理）──
+    try:
+        blacklist = service.load_blacklist(
+            token, blacklist_path=args.blacklist_path, log=_log,
+            source_repo_dir=local_source_dir)
+    except service.ConfigError as e:
+        _log(f"错误：{e}")
+        return 1
+    except service.client.GitCodeError as e:
+        _log(f"错误：读取拉黑名单失败: {e}")
+        return 1
+
     # ── 扫描变更 ──
     _log("开始扫描全部译稿仓库..."
          if not args.keyword else f"开始扫描（关键字: {args.keyword}）...")
     result = service.scan_changed(
-        args.keyword, token, token_rules=token_rules, log=_log,
-        source_repo_dir=local_source_dir, clone_root=clone_root)
+        args.keyword, token, token_rules=token_rules, blacklist=blacklist,
+        log=_log, source_repo_dir=local_source_dir, clone_root=clone_root)
     if not result["ok"]:
         _log(f"扫描失败（阶段: {result.get('stage', 'unknown')}）"
              f": {result.get('error', '未知错误')}")

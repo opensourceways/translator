@@ -67,11 +67,23 @@ class TestLoadRules:
     def test_rules_path_passed_through(self):
         with patch.object(cli.service, "load_token_rules",
                           return_value=[]) as load_mock, \
+                patch.object(cli.service, "load_blacklist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()):
             assert cli.main([]) == 0
             _, kwargs = load_mock.call_args
             assert kwargs["rules_path"] == service.DEFAULT_RULES_PATH
+
+    def test_blacklist_path_passed_through(self):
+        with patch.object(cli.service, "load_token_rules",
+                          return_value=[]), \
+                patch.object(cli.service, "load_blacklist",
+                             return_value=[]) as load_mock, \
+                patch.object(cli.service, "scan_changed",
+                             return_value=_scan_result()):
+            assert cli.main([]) == 0
+            _, kwargs = load_mock.call_args
+            assert kwargs["blacklist_path"] == service.DEFAULT_BLACKLIST_PATH
 
 
 class TestScanPhase:
@@ -79,6 +91,7 @@ class TestScanPhase:
 
     def test_scan_failure_returns_1(self):
         with patch.object(cli.service, "load_token_rules", return_value=[]), \
+                patch.object(cli.service, "load_blacklist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value={"ok": False, "stage": "load_index",
                                            "error": "boom"}), \
@@ -88,6 +101,7 @@ class TestScanPhase:
 
     def test_no_changes_returns_0(self):
         with patch.object(cli.service, "load_token_rules", return_value=[]), \
+                patch.object(cli.service, "load_blacklist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()), \
                 patch.object(cli.service, "submit_all") as submit_mock:
@@ -103,6 +117,7 @@ class TestSubmitPhase:
         rules = [{"keyword": "MindStudio", "token": "tokA"}]
         with patch.object(cli.service, "load_token_rules",
                           return_value=rules), \
+                patch.object(cli.service, "load_blacklist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result(changed)) as scan_mock, \
                 patch.object(cli.service, "submit_all",
@@ -161,6 +176,7 @@ class TestSubmitPhase:
         # 上面 _run 固定走 cli.main([])，单独验证 --keyword 透传
         assert code == 0
         with patch.object(cli.service, "load_token_rules", return_value=[]), \
+                patch.object(cli.service, "load_blacklist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()) as sm:
             cli.main(["--keyword", "msprof"])
@@ -171,6 +187,7 @@ class TestSubmitPhase:
         with patch.object(cli.service, "sync_source") as sync_mock, \
                 patch.object(cli.service, "load_token_rules",
                              return_value=[]), \
+                patch.object(cli.service, "load_blacklist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()):
             assert cli.main(["--sync-source"]) == 0
@@ -181,6 +198,7 @@ class TestSubmitPhase:
         with patch.object(cli.service, "sync_source") as sync_mock, \
                 patch.object(cli.service, "load_token_rules",
                              return_value=[]), \
+                patch.object(cli.service, "load_blacklist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()):
             assert cli.main([]) == 0
@@ -195,6 +213,7 @@ class TestLocalModeEnv:
         monkeypatch.setenv("GITCODE_CLONE_DIR", "/clones")
         with patch.object(cli.service, "load_token_rules",
                           return_value=[]) as load_mock, \
+                patch.object(cli.service, "load_blacklist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()) as scan_mock:
             assert cli.main([]) == 0
@@ -209,6 +228,7 @@ class TestLocalModeEnv:
         monkeypatch.delenv("GITCODE_CLONE_DIR", raising=False)
         with patch.object(cli.service, "load_token_rules",
                           return_value=[]) as load_mock, \
+                patch.object(cli.service, "load_blacklist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()) as scan_mock:
             assert cli.main([]) == 0

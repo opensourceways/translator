@@ -14,6 +14,9 @@ scan_changed:      扫描全部（或按关键字过滤的）仓库级目录 →
 读取译稿权威仓库始终使用默认 token；访问目标仓库做对比的 Token
 由 resolve_token 按 token_rules 逐仓路由（权限管控）：配置了有效
 规则时，未命中规则的仓库记入 skipped 不予处理。
+
+拉黑名单（权威仓库 blacklist.json）：目录路径命中名单的仓库直接记入
+skipped，不做任何对比请求（业务侧临时不想处理的仓库用，无需改代码）。
 """
 
 import base64
@@ -239,13 +242,24 @@ def _local_target_tree(project, cmp_token, clone_root, log):
         return None
 
 
-def scan_changed(keyword="", token="", token_rules=None, log=print,
-                 source_repo_dir=None, clone_root=None):
+def _blacklisted(path, blacklist):
+    """判断仓库目录路径是否命中拉黑名单（等于条目或以条目为前缀）。"""
+    for entry in blacklist or []:
+        if path == entry or path.startswith(entry + "/"):
+            return True
+    return False
+
+
+def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
+                 log=print, source_repo_dir=None, clone_root=None):
     """扫描全部（或按关键字过滤的）仓库级目录，找出有变更的译稿仓库。
 
     逐仓下载译稿并与目标仓库同路径文件做内容对比（blob sha 比对），
     仅「有新增或有差异」的仓库进入 changed 清单。单仓失败不中断：
     目标仓库/分支不存在记入 skipped，其余错误记入 errors，扫描继续。
+
+    blacklist 为拉黑名单（权威仓库 blacklist.json 的目录路径列表）：
+    命中名单的仓库直接记入 skipped，不做对比也不建 PR。
 
     本地化模式（source_repo_dir 非空，通常由 Jenkinsfile 克隆权威仓库
     后通过 GITCODE_LOCAL_SOURCE_DIR 注入）：索引与列文件走本地 git，
@@ -300,6 +314,10 @@ def scan_changed(keyword="", token="", token_rules=None, log=print,
     restrict = bool(_effective_rules(token_rules))
     for i, project in enumerate(repos, 1):
         log(f"正在扫描 ({i}/{len(repos)}): {project['path']}")
+        if _blacklisted(project["path"], blacklist):
+            skipped.append({"path": project["path"],
+                            "reason": "在拉黑名单中，业务侧暂不处理"})
+            continue
         cmp_token, rule_keyword = resolve_token(
             project["path"], token_rules, token)
         if restrict and not rule_keyword:

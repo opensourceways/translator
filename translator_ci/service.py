@@ -26,6 +26,8 @@ Ascend/26.1.0/MindStudio/msprof/docs/en/guide.md：
 - Token 规则（权限管控）：规则文件存于译稿权威仓库（默认根目录
   token_rules.json），每次运行时读取；文件不存在视为未配置规则（全部
   使用默认 Token）；配置了有效规则时只处理命中规则的仓库
+- 拉黑名单（范围管控）：名单存于译稿权威仓库（默认根目录
+  blacklist.json），目录路径命中名单的仓库直接跳过，不做对比也不建 PR
 - 来源可替换：默认读取权威仓库，可用 GITCODE_SOURCE_REPO 环境变量
   指向自己的 Fork（无权威仓库管理权限时测试用，Webhook 配在 Fork 上）；
   该模式下可用 sync_source 在扫描前先同步 Fork 与上游
@@ -36,6 +38,7 @@ Ascend/26.1.0/MindStudio/msprof/docs/en/guide.md：
 
 流程函数（入口）：
   load_token_rules: 读取并解析规则文件（JSON 非法抛 ConfigError）
+  load_blacklist:   读取拉黑名单（目录路径列表，JSON 非法抛 ConfigError）
   sync_source:      来源为 Fork 时，扫描前同步其与上游
   scan_changed:     扫描全部仓库级目录 → 与目标仓库对比 → 有变更清单
   submit_repo:      单仓库幂等提交 PR
@@ -47,9 +50,10 @@ Ascend/26.1.0/MindStudio/msprof/docs/en/guide.md：
 from translator_ci import client
 from translator_ci.common import (
     DEFAULT_RULES_PATH,
+    DEFAULT_BLACKLIST_PATH,
     ConfigError,
 )
-from translator_ci.rules import load_token_rules
+from translator_ci.rules import load_token_rules, load_blacklist
 from translator_ci.index import sync_source
 from translator_ci.scan import scan_changed
 from translator_ci.submit import submit_repo, submit_all

@@ -1,8 +1,9 @@
-"""Token 规则：读取、校验与按目录路径路由 Token（权限管控）。
+"""Token 规则与拉黑名单：读取、校验与按目录路径路由（权限/范围管控）。
 
-规则文件存于译稿权威仓库（默认根目录 token_rules.json），每次运行时
-读取；文件不存在视为未配置规则（全部使用默认 Token）；配置了有效
-规则时只处理命中规则的仓库。
+规则文件存于译稿权威仓库（默认根目录 token_rules.json 与 blacklist.json），
+每次运行时读取；Token 规则文件不存在视为未配置规则（全部使用默认 Token），
+拉黑名单不存在视为未拉黑（全部正常处理）；配置了有效规则时只处理命中
+规则的仓库。
 
 规则文件只保存 keyword → 环境变量名（token_env）的映射，Token 本体
 不落任何仓库，运行时从环境变量解析（Jenkins 凭据注入）。
@@ -12,7 +13,9 @@ import json
 import os
 
 from translator_ci import client, localgit
-from translator_ci.common import _source_repo, DEFAULT_RULES_PATH, ConfigError
+from translator_ci.common import (
+    _source_repo, DEFAULT_RULES_PATH, DEFAULT_BLACKLIST_PATH, ConfigError,
+)
 
 
 def resolve_token(path, token_rules, default_token):
@@ -115,3 +118,65 @@ def load_token_rules(token, rules_path=DEFAULT_RULES_PATH, log=print,
     else:
         log("无有效 Token 规则，全部仓库使用默认 Token")
     return resolved
+
+
+def load_blacklist(token, blacklist_path=DEFAULT_BLACKLIST_PATH, log=print,
+                   source_repo_dir=None):
+    """从译稿权威仓库读取拉黑名单（不处理的仓库目录路径列表）。
+
+    黑名单文件与 Token 规则一样存于权威仓库（默认根目录 blacklist.json），
+    业务侧可直接增删条目，无需改动代码。被拉黑的仓库（目录路径等于名单
+    条目或以其为前缀）在扫描阶段直接记入 skipped，不做对比也不建 PR。
+
+    文件不存在（404）时返回空名单——全部仓库正常处理；
+    文件存在但 JSON 非法时抛出 ConfigError——拉黑配置损坏不能静默放行。
+    source_repo_dir 非空时（本地化模式）从本地克隆读取，否则走 API。
+
+    Returns:
+        list: 仓库目录路径字符串（去空格、非空），无名单时为空列表
+    """
+    owner, repo = _source_repo()
+    log(f"正在从来源仓库 {owner}/{repo} 读取拉黑名单: {blacklist_path}")
+    if source_repo_dir:
+        try:
+            text = localgit.read_file(source_repo_dir, blacklist_path).decode(
+                "utf-8")
+        except client.GitCodeError as e:
+            if e.status_code == 404:
+                log(f"来源仓库中不存在拉黑名单 {blacklist_path}，全部仓库正常处理")
+                return []
+            raise
+    else:
+        repo_info = client.get_repo(owner, repo, token)
+        branch = repo_info.get("default_branch") or "master"
+        try:
+            text = client.get_file_text(
+                owner, repo, blacklist_path, branch, token)
+        except client.GitCodeError as e:
+            if e.status_code == 404:
+                log(f"来源仓库中不存在拉黑名单 {blacklist_path}，全部仓库正常处理")
+                return []
+            raise
+    try:
+        data = json.loads(text)
+    except ValueError as e:
+        raise ConfigError(f"拉黑名单文件 {blacklist_path} JSON 解析失败: {e}")
+    entries = data.get("repos") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        raise ConfigError(f"拉黑名单文件 {blacklist_path} 格式非法：缺少 repos 列表")
+
+    blacklist = []
+    for i, entry in enumerate(entries, 1):
+        if not isinstance(entry, str):
+            log(f"  [警告] 第 {i} 条拉黑条目不是字符串，已跳过")
+            continue
+        value = entry.strip().strip("/")
+        if not value:
+            log(f"  [警告] 第 {i} 条拉黑条目为空，已跳过")
+            continue
+        blacklist.append(value)
+    if blacklist:
+        log(f"已加载 {len(blacklist)} 条拉黑名单: {', '.join(blacklist)}")
+    else:
+        log("无有效拉黑名单，全部仓库正常处理")
+    return blacklist
