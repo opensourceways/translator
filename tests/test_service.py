@@ -66,19 +66,35 @@ FAKE_TREE = {
     "Ascend/master/MindStudio/msprof": [
         _entry("test", "Ascend/master/MindStudio/msprof/test", "file"),
     ],
-    "CANN": [_entry("9.1.0", "CANN/9.1.0", "dir")],
+    "CANN": [_entry("9.1.0", "CANN/9.1.0", "dir"),
+             _entry("master", "CANN/master", "dir")],
     "CANN/9.1.0": [_entry("cann", "CANN/9.1.0/cann", "dir")],
     "CANN/9.1.0/cann": [
         _entry("README.md", "CANN/9.1.0/cann/README.md", "file"),
     ],
+    "CANN/master": [
+        _entry("release-management", "CANN/master/release-management", "dir"),
+    ],
+    "CANN/master/release-management": [
+        _entry("en", "CANN/master/release-management/en", "dir"),
+    ],
+    "CANN/master/release-management/en": [
+        _entry("9.1.1", "CANN/master/release-management/en/9.1.1", "dir"),
+    ],
+    "CANN/master/release-management/en/9.1.1": [
+        _entry("release-notes_en.md",
+               "CANN/master/release-management/en/9.1.1/release-notes_en.md",
+               "file"),
+    ],
 }
 
-# 模拟树中的仓库级目录（共 4 个）
+# 模拟树中的仓库级目录（共 5 个）
 REPO_PATHS = [
     "Ascend/26.1.0/MindStudio/msprof",
     "Ascend/26.1.0/MindStudio/mspti",
     "Ascend/master/MindStudio/msprof",
     "CANN/9.1.0/cann",
+    "CANN/master/release-management",
 ]
 
 
@@ -376,10 +392,34 @@ class TestScanChanged:
         client_mock.get_contents.return_value = {"sha": "0" * 40}
         with _patch_scan_client(client_mock):
             result = scan.scan_changed("", "tok", log=SILENT)
-            assert len(result["changed"]) == 4
+            assert len(result["changed"]) == 5
             for c in result["changed"]:
                 assert c["new_count"] == 0
                 assert c["update_count"] == 1
+
+    def test_cann_master_release_management_mapping(self):
+        """CANN master 目录映射到 release-management 仓库的 master 分支。
+
+        release-management 仓库只有 master 分支：译稿放在
+        CANN/master/release-management 下，版本段 master 即目标分支；
+        仓库级目录后的完整相对路径（含 en/ 层级）原样作为目标路径。
+        """
+        client_mock = _make_scan_client_mock()
+        with _patch_scan_client(client_mock):
+            result = scan.scan_changed("release-management", "tok",
+                                       log=SILENT)
+            assert [c["project"]["path"] for c in result["changed"]] == [
+                "CANN/master/release-management",
+            ]
+            entry = result["changed"][0]
+            assert entry["org"] == "CANN"
+            assert entry["repo"] == "release-management"
+            assert entry["branch"] == "master"
+            assert entry["files"][0]["target_path"] == (
+                "en/9.1.1/release-notes_en.md")
+            # 对比目标仓库时使用 master 分支
+            compare_calls = client_mock.get_contents.call_args_list
+            assert {c.args[3] for c in compare_calls} == {"master"}
 
     def test_sha_missing_fallback_content_compare(self):
         """目标文件未返回 sha 时退化为下载全文比对。"""
@@ -392,7 +432,7 @@ class TestScanChanged:
         )
         with _patch_scan_client(client_mock):
             result = scan.scan_changed("", "tok", log=SILENT)
-            assert len(result["changed"]) == 4
+            assert len(result["changed"]) == 5
             assert result["unchanged"] == []
 
     def test_skipped_when_branch_missing(self):
@@ -402,7 +442,7 @@ class TestScanChanged:
         with _patch_scan_client(client_mock):
             result = scan.scan_changed("", "tok", log=SILENT)
             assert result["changed"] == []
-            assert len(result["skipped"]) == 4
+            assert len(result["skipped"]) == 5
             assert "不存在分支" in result["skipped"][0]["reason"]
 
     def test_skipped_when_repo_missing(self):
@@ -412,7 +452,7 @@ class TestScanChanged:
         with _patch_scan_client(client_mock):
             result = scan.scan_changed("", "tok", log=SILENT)
             assert result["changed"] == []
-            assert len(result["skipped"]) == 4
+            assert len(result["skipped"]) == 5
 
     def test_single_repo_error_does_not_abort(self):
         """单仓对比出错记入 errors，其余仓库照常扫描。"""
@@ -427,7 +467,7 @@ class TestScanChanged:
         with _patch_scan_client(client_mock):
             result = scan.scan_changed("", "tok", log=SILENT)
             assert result["ok"] is True
-            assert len(result["changed"]) == 3
+            assert len(result["changed"]) == 4
             assert len(result["errors"]) == 1
             assert "mspti" in result["errors"][0]["path"]
 
@@ -448,7 +488,7 @@ class TestScanChanged:
             result = scan.scan_changed("", "tok", token_rules=rules,
                                           log=SILENT)
             assert [c["repo"] for c in result["changed"]] == ["mspti"]
-            assert len(result["skipped"]) == 3
+            assert len(result["skipped"]) == 4
             assert "未命中 Token 规则" in result["skipped"][0]["reason"]
             # 仅 mspti 与目标仓库做过对比，且使用规则 Token
             compare_calls = client_mock.get_contents.call_args_list
@@ -470,7 +510,7 @@ class TestScanChanged:
         with _patch_scan_client(client_mock):
             result = scan.scan_changed("", "tok", token_rules=rules,
                                           log=SILENT)
-            assert len(result["changed"]) == 4
+            assert len(result["changed"]) == 5
             assert result["skipped"] == []
 
     def test_blacklist_skips_repo(self):
@@ -501,6 +541,7 @@ class TestScanChanged:
             assert [c["project"]["path"] for c in result["changed"]] == [
                 "Ascend/master/MindStudio/msprof",
                 "CANN/9.1.0/cann",
+                "CANN/master/release-management",
             ]
             assert len(result["skipped"]) == 2
             assert all("拉黑名单" in s["reason"] for s in result["skipped"])
@@ -520,12 +561,12 @@ class TestScanChanged:
         client_mock = _make_sha_scan_client_mock(entry_sha="aaa", target_sha="bbb")
         with _patch_scan_client(client_mock):
             result = scan.scan_changed("", "tok", log=SILENT)
-            assert len(result["changed"]) == 4
+            assert len(result["changed"]) == 5
             for c in result["changed"]:
                 assert c["new_count"] == 0
                 assert c["update_count"] == 1
             # 每个仓库各下载 1 个变更文件，且内容带 b64 供提交阶段使用
-            assert client_mock.get_file_bytes.call_count == 4
+            assert client_mock.get_file_bytes.call_count == 5
             assert all(f["content_b64"] for c in result["changed"]
                        for f in c["files"])
 
@@ -540,7 +581,7 @@ class TestScanChanged:
         client_mock.get_file_bytes.return_value = gif
         with _patch_scan_client(client_mock):
             result = scan.scan_changed("", "tok", log=SILENT)
-            assert len(result["changed"]) == 4
+            assert len(result["changed"]) == 5
             for c in result["changed"]:
                 assert c["update_count"] == 1
                 assert base64.b64decode(c["files"][0]["content_b64"]) == gif
@@ -615,7 +656,7 @@ class TestSubmitRepo:
         scan_client.get_file_bytes.return_value = gif
         with _patch_scan_client(scan_client):
             scanned = scan.scan_changed("", "tok", log=SILENT)
-        assert len(scanned["changed"]) == 4
+        assert len(scanned["changed"]) == 5
         gif_entry = scanned["changed"][0]["files"][0]
         assert base64.b64decode(gif_entry["content_b64"]) == gif
 
@@ -989,6 +1030,8 @@ class TestScanChangedLocalMode:
         "Ascend/26.1.0/MindStudio/mspti/test": "srcsha1",
         "Ascend/master/MindStudio/msprof/test": "srcsha1",
         "CANN/9.1.0/cann/README.md": "srcsha1",
+        "CANN/master/release-management/en/9.1.1/release-notes_en.md":
+            "srcsha1",
         "README.md": "srcsha1",
     }
 
@@ -1016,9 +1059,9 @@ class TestScanChangedLocalMode:
         client_mock.get_repo.assert_not_called()
         client_mock.list_dir.assert_not_called()
         client_mock.get_file_bytes.assert_not_called()
-        # 4 个仓库各本地克隆一次；每个变更文件读一次内容
-        assert clone_mock.call_count == 4
-        assert cat_blob_mock.call_count == 4
+        # 5 个仓库各本地克隆一次；每个变更文件读一次内容
+        assert clone_mock.call_count == 5
+        assert cat_blob_mock.call_count == 5
 
     def test_local_unchanged_when_sha_matches(self):
         """本地模式：目标 sha 与来源一致时未变更，不读任何内容。"""
@@ -1027,6 +1070,8 @@ class TestScanChangedLocalMode:
             "Ascend__msprof": {"test": "srcsha1"},
             "Ascend__mspti": {"test": "srcsha1"},
             "CANN__cann": {"README.md": "srcsha1"},
+            "CANN__release-management": {
+                "en/9.1.1/release-notes_en.md": "srcsha1"},
         }
         result, clone_mock, cat_blob_mock = self._run(client_mock, targets)
         assert result["changed"] == []
@@ -1040,9 +1085,11 @@ class TestScanChangedLocalMode:
             "Ascend__msprof": {"test": "tgt-other"},
             "Ascend__mspti": {"test": "tgt-other"},
             "CANN__cann": {"README.md": "tgt-other"},
+            "CANN__release-management": {
+                "en/9.1.1/release-notes_en.md": "tgt-other"},
         }
         result, clone_mock, cat_blob_mock = self._run(client_mock, targets)
-        assert len(result["changed"]) == 4
+        assert len(result["changed"]) == 5
         for c in result["changed"]:
             assert c["new_count"] == 0
             assert c["update_count"] == 1
@@ -1055,6 +1102,8 @@ class TestScanChangedLocalMode:
             "Ascend__msprof": {"test": "srcsha1"},   # 未变更
             "Ascend__mspti": {"test": "tgt-other"},  # 变更
             "CANN__cann": {"README.md": "srcsha1"},  # 未变更
+            "CANN__release-management": {             # 未变更
+                "en/9.1.1/release-notes_en.md": "srcsha1"},
         }
         result, clone_mock, cat_blob_mock = self._run(client_mock, targets)
         assert [c["repo"] for c in result["changed"]] == ["mspti"]
@@ -1062,6 +1111,7 @@ class TestScanChangedLocalMode:
             "Ascend/26.1.0/MindStudio/msprof",
             "Ascend/master/MindStudio/msprof",
             "CANN/9.1.0/cann",
+            "CANN/master/release-management",
         }
         assert cat_blob_mock.call_count == 1
 
@@ -1079,10 +1129,10 @@ class TestScanChangedLocalMode:
                 source_repo_dir="/src", clone_root="/clones")
         # 回退 API：list_branches 正常返回、目标无文件 → 全部记为新增
         assert result["ok"] is True
-        assert len(result["changed"]) == 4
+        assert len(result["changed"]) == 5
         for c in result["changed"]:
             assert c["new_count"] == 1
-        assert client_mock.list_branches.call_count == 4
+        assert client_mock.list_branches.call_count == 5
 
     def test_local_binary_content_via_cat_blob(self):
         """本地模式读内容走 git cat-file，图片/GIF 原始字节直达提交。"""
@@ -1092,6 +1142,8 @@ class TestScanChangedLocalMode:
             "Ascend__msprof": {"test": "tgt-other"},
             "Ascend__mspti": {"test": "tgt-other"},
             "CANN__cann": {"README.md": "tgt-other"},
+            "CANN__release-management": {
+                "en/9.1.1/release-notes_en.md": "tgt-other"},
         }
         patches, clone_mock, cat_blob_mock = _local_mode_mocks(
             self.LOCAL_SOURCE, targets)
@@ -1102,7 +1154,7 @@ class TestScanChangedLocalMode:
             result = scan.scan_changed(
                 "", "tok", log=SILENT,
                 source_repo_dir="/src", clone_root="/clones")
-        assert len(result["changed"]) == 4
+        assert len(result["changed"]) == 5
         for c in result["changed"]:
             assert base64.b64decode(c["files"][0]["content_b64"]) == gif
 
