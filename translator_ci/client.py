@@ -232,13 +232,13 @@ def delete_file(owner, repo, path, message, sha, branch, token):
 
 
 def list_tree(owner, repo, ref, token):
-    """递归列出仓库指定 ref 下全部文件路径（contents API 逐层遍历）。
+    """递归列出仓库指定 ref 下全部文件路径。
 
-    不用 git trees API 的 recursive 参数：实测 GitCode 对该接口会静默
-    返回截断的部分树且不置 truncated 标志，据其做差集清理会误删文件。
-    ref 走查询参数，固定分支名含斜杠（translator/auto-xxx）可直接传。
-    遍历中任一目录查询失败即抛错，由调用方跳过清理——宁可不删，
-    不可误删。
+    .. deprecated::
+        逐目录 contents 遍历目录数多时需上百次请求，触发限流后
+        单仓清点可达 20 分钟（构建 #61 实测）。陈旧文件清理已改用
+        list_pr_files 的 PR diff 差集；本函数保留给无 PR 场景的
+        低频诊断使用。
     """
     paths = set()
     stack = [""]
@@ -300,6 +300,17 @@ def list_pull_requests(owner, repo, token, state="open", per_page=100):
     """
     return _paginate(f"{BASE_URL}/repos/{owner}/{repo}/pulls", token,
                      {"state": state}, per_page=per_page)
+
+
+def list_pr_files(owner, repo, number, token):
+    """列出 PR 的变更文件，自动分页拉取全量。
+
+    返回 [{filename, status, ...}]。status 为 added/removed/renamed/
+    changed 等：added 即「分支上有、上游没有」的文件，供陈旧文件
+    清理做差集，免去逐目录遍历双仓库的上百次请求。
+    """
+    return _paginate(f"{BASE_URL}/repos/{owner}/{repo}/pulls/{number}/files",
+                     token, {})
 
 
 def create_pr(owner, repo, title, head, base, body, token, fork_path=None):

@@ -197,6 +197,20 @@ def _pr_matches(pr, head, branch):
     return head_ok and (not base_ref or base_ref == branch)
 
 
+def _find_open_pr(org, repo, fork_owner, head_branch, branch, token):
+    """查找 fork 固定分支指向目标分支的已开 PR。
+
+    Returns:
+        dict | None: 匹配的 open PR；查不到或查询失败返回 None。
+    """
+    head = f"{fork_owner}:{head_branch}"
+    try:
+        open_prs = client.list_pull_requests(org, repo, token, state="open")
+    except client.GitCodeError:
+        return None
+    return next((p for p in open_prs if _pr_matches(p, head, branch)), None)
+
+
 def submit_repo(org, repo, branch, files, token, log=print, all_paths=None):
     """把一个仓库的变更译稿幂等地提交为目标社区仓库的 Pull Request。
 
@@ -207,9 +221,9 @@ def submit_repo(org, repo, branch, files, token, log=print, all_paths=None):
 
     陈旧文件清理：源目录结构调整（文件改名/搬家）后，固定分支上会
     残留已不在源目录中的旧文件，随 PR 合入会污染目标仓库。清理规则
-    为「分支文件 − 上游文件 − 当前源文件全集（all_paths）」——
-    既不碰上游原有文件，也不删仍有效的译稿。查询失败时跳过清理
-    （宁可不删，不可误删）。
+    为「该分支已开 PR 的 added 文件 − 当前源文件全集（all_paths）」
+    ——added 即「分支上有、上游没有」，一次 PR diff 请求即得差集。
+    查询失败或无已开 PR 时跳过清理（宁可不删，不可误删）。
 
     Args:
         all_paths: 该仓库全部译稿的目标路径列表（scan 阶段产出）。
@@ -348,19 +362,29 @@ def submit_repo(org, repo, branch, files, token, log=print, all_paths=None):
 
     # ── 阶段 3.5：清理陈旧文件（仅复用已有分支且提供全量清单时）──
     # 新建分支等于上游快照，不可能有残留；只处理复用分支的场景。
+    # 陈旧候选 = 该分支已开 PR 的 added 文件 − 当前源文件全集：added 即
+    # 「分支上有、上游没有」，一次 PR diff 请求即可得差集，免去逐目录
+    # 遍历双仓库的上百次请求（#61 实测限流下单仓清点 20 分钟）。
     succeeded = []
     unchanged = []
     deleted = []
     failed = []
     if head_branch in fork_branch_names and all_paths is not None:
-        try:
-            branch_paths = client.list_tree(
-                fork_owner, fork_repo_name, head_branch, token)
-            upstream_paths = client.list_tree(org, repo, branch, token)
-            stale = sorted(branch_paths - upstream_paths - set(all_paths))
-        except client.GitCodeError as e:
-            log(f"陈旧文件检查失败（{e}），跳过清理")
+        existing_pr = _find_open_pr(
+            org, repo, fork_owner, head_branch, branch, token)
+        if existing_pr is None:
+            log("未找到已开的 PR，跳过陈旧文件清理（宁可不删，不可误删）")
             stale = []
+        else:
+            try:
+                pr_files = client.list_pr_files(
+                    org, repo, existing_pr["number"], token)
+                added = {f["filename"] for f in pr_files
+                         if f.get("status") == "added"}
+                stale = sorted(added - set(all_paths))
+            except client.GitCodeError as e:
+                log(f"陈旧文件检查失败（{e}），跳过清理")
+                stale = []
         for i, path in enumerate(stale, 1):
             log(f"正在清理陈旧文件 ({i}/{len(stale)}): {path}")
             try:
