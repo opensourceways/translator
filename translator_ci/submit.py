@@ -2,11 +2,12 @@
 
 submit_repo: 单仓库幂等提交（识别用户/Fork → 校验目标分支 → 同步
              Fork 分支 → 复用或创建固定分支 translator/auto-<目标分支>
-             → 写入文件 → 去重后创建 PR）
+             → 清理陈旧文件 → 写入文件 → 去重后创建 PR）
 submit_all:  批量提交（Token 路由 + 单仓失败不中断）
 
 幂等语义：同一仓库重复运行时，已开 PR 不重复创建，新变更以新 commit
-进入同一 PR；分支内容已是最新时不产生空 commit。
+进入同一 PR；分支内容已是最新时不产生空 commit。源目录中已消失的
+文件在复用分支时自动删除，避免 PR 合入陈旧残留。
 """
 
 import base64
@@ -136,23 +137,30 @@ def _branch_404_hint(error, fork_full, branch):
 def _make_pr_title_body(succeeded):
     """根据已写入文件列表生成 PR 标题和描述。
 
-    单文件时用 "新增/更新 <文件名> 英文版文档" 格式；
-    多文件时合并为 "新增 N 份，更新 M 份 英文版文档"。
-    描述正文按新增/更新分组列出文件路径。
+    单文件时用 "新增/更新/移除 <文件名> 英文版文档" 格式；
+    多文件时合并为 "新增 N 份，更新 M 份，移除 K 份 英文版文档"。
+    描述正文按新增/更新/移除分组列出文件路径。
     """
     created = [f for f in succeeded if f["action"] == "create"]
     updated = [f for f in succeeded if f["action"] == "update"]
+    removed = [f for f in succeeded if f["action"] == "delete"]
 
     if len(succeeded) == 1:
-        action = "新增" if created else "更新"
-        filename = os.path.basename(succeeded[0]["path"])
-        title = f"{action} {filename} 英文版文档"
+        if removed:
+            filename = os.path.basename(removed[0]["path"])
+            title = f"移除 {filename} 英文版文档"
+        else:
+            action = "新增" if created else "更新"
+            filename = os.path.basename(succeeded[0]["path"])
+            title = f"{action} {filename} 英文版文档"
     else:
         parts = []
         if created:
             parts.append(f"新增 {len(created)} 份")
         if updated:
             parts.append(f"更新 {len(updated)} 份")
+        if removed:
+            parts.append(f"移除 {len(removed)} 份")
         title = "，".join(parts) + " 英文版文档"
 
     lines = []
@@ -165,6 +173,12 @@ def _make_pr_title_body(succeeded):
             lines.append("")
         lines.append("## 更新")
         for f in updated:
+            lines.append(f"- `{f['path']}`")
+    if removed:
+        if lines:
+            lines.append("")
+        lines.append("## 移除（源目录已不存在）")
+        for f in removed:
             lines.append(f"- `{f['path']}`")
 
     return title, "\n".join(lines)
@@ -183,16 +197,27 @@ def _pr_matches(pr, head, branch):
     return head_ok and (not base_ref or base_ref == branch)
 
 
-def submit_repo(org, repo, branch, files, token, log=print):
+def submit_repo(org, repo, branch, files, token, log=print, all_paths=None):
     """把一个仓库的变更译稿幂等地提交为目标社区仓库的 Pull Request。
 
     执行阶段：识别用户/Fork → 校验目标分支 → 同步 Fork 分支 →
-    复用或创建固定分支（translator/auto-<目标分支>）→ 写入文件
-    （与分支现有内容相同的跳过）→ 去重后创建 PR。
+    复用或创建固定分支（translator/auto-<目标分支>）→ 清理陈旧文件
+    （复用分支且提供 all_paths 时）→ 写入文件（与分支现有内容相同的
+    跳过）→ 去重后创建 PR。
+
+    陈旧文件清理：源目录结构调整（文件改名/搬家）后，固定分支上会
+    残留已不在源目录中的旧文件，随 PR 合入会污染目标仓库。清理规则
+    为「分支文件 − 上游文件 − 当前源文件全集（all_paths）」——
+    既不碰上游原有文件，也不删仍有效的译稿。查询失败时跳过清理
+    （宁可不删，不可误删）。
+
+    Args:
+        all_paths: 该仓库全部译稿的目标路径列表（scan 阶段产出）。
+                   不传（None）时不做清理，保持向后兼容。
 
     Returns:
         dict with ok, pr_url, pr_number, pr_existed, head_branch,
-        succeeded, unchanged, failed / stage, error
+        succeeded, unchanged, deleted, failed / stage, error
     """
     if not files:
         return {"ok": False, "stage": "validate", "error": "文件清单为空"}
@@ -321,10 +346,38 @@ def submit_repo(org, repo, branch, files, token, log=print):
                 return {"ok": False, "stage": "create_branch",
                         "error": _branch_404_hint(e2, fork_full, branch)}
 
-    # ── 阶段 4：写入文件（与分支现有内容相同的跳过，避免空 commit）──
+    # ── 阶段 3.5：清理陈旧文件（仅复用已有分支且提供全量清单时）──
+    # 新建分支等于上游快照，不可能有残留；只处理复用分支的场景。
     succeeded = []
     unchanged = []
+    deleted = []
     failed = []
+    if head_branch in fork_branch_names and all_paths is not None:
+        try:
+            branch_paths = client.list_tree(
+                fork_owner, fork_repo_name, head_branch, token)
+            upstream_paths = client.list_tree(org, repo, branch, token)
+            stale = sorted(branch_paths - upstream_paths - set(all_paths))
+        except client.GitCodeError as e:
+            log(f"陈旧文件检查失败（{e}），跳过清理")
+            stale = []
+        for i, path in enumerate(stale, 1):
+            log(f"正在清理陈旧文件 ({i}/{len(stale)}): {path}")
+            try:
+                existing = client.get_contents(
+                    fork_owner, fork_repo_name, path, head_branch, token)
+                sha = existing.get("sha") if isinstance(existing, dict) else None
+                if not sha:
+                    raise client.GitCodeError(404, "文件不存在或未返回 sha")
+                client.delete_file(
+                    fork_owner, fork_repo_name, path,
+                    f"移除 {os.path.basename(path)}（源目录已不存在）",
+                    sha, head_branch, token)
+                deleted.append(path)
+            except Exception as e:
+                failed.append({"file": path, "error": f"清理失败: {e}"})
+
+    # ── 阶段 4：写入文件（与分支现有内容相同的跳过，避免空 commit）──
     for i, f in enumerate(files, 1):
         log(f"正在写入文件 ({i}/{len(files)}): {f['target_path']}")
         filename = os.path.basename(f["target_path"])
@@ -366,14 +419,15 @@ def submit_repo(org, repo, branch, files, token, log=print):
         except Exception as e:
             failed.append({"file": f["target_path"], "error": str(e)})
 
-    if not succeeded and not unchanged:
-        # 没有任何文件写入成功且分支上也没有可用内容：不能创建空 PR
+    if not succeeded and not unchanged and not deleted:
+        # 没有任何文件写入/清理成功且分支上也没有可用内容：不能创建空 PR
         return {
             "ok": False,
             "stage": "write",
             "error": "所有文件均写入失败，未创建 PR",
             "head_branch": head_branch,
             "succeeded": succeeded,
+            "deleted": deleted,
             "failed": failed,
         }
     if not succeeded:
@@ -401,12 +455,14 @@ def submit_repo(org, repo, branch, files, token, log=print):
             "head_branch": head_branch,
             "succeeded": succeeded,
             "unchanged": unchanged,
+            "deleted": deleted,
             "failed": failed,
         }
 
     # ── 阶段 6：创建 Pull Request ──
     pr_files = succeeded or [
-        {"path": p, "action": "update"} for p in unchanged]
+        {"path": p, "action": a} for p, a in
+        [(u, "update") for u in unchanged] + [(d, "delete") for d in deleted]]
     pr_title, pr_body = _make_pr_title_body(pr_files)
     marker = "由 Jenkins 自动提交（translator-ci）"
     pr_body = f"{pr_body}\n\n---\n{marker}" if pr_body else marker
@@ -434,6 +490,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
                 "head_branch": head_branch,
                 "succeeded": succeeded,
                 "unchanged": unchanged,
+                "deleted": deleted,
                 "failed": failed,
             }
         return {
@@ -443,6 +500,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
             "head_branch": head_branch,
             "succeeded": succeeded,
             "unchanged": unchanged,
+            "deleted": deleted,
             "failed": failed,
         }
 
@@ -458,6 +516,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
         "head_branch": head_branch,
         "succeeded": succeeded,
         "unchanged": unchanged,
+        "deleted": deleted,
         "failed": failed,
     }
 
@@ -471,7 +530,7 @@ def submit_all(changed, token, token_rules=None, log=print):
 
     Args:
         changed: scan_changed 返回的 changed 清单，
-                 每项含 org/repo/branch/files/project
+                 每项含 org/repo/branch/files/all_paths/project
         token: 默认 GitCode Token（未命中规则时使用）
         token_rules: Token 规则 [{keyword, token}]，按路径关键字匹配
         log: 日志函数
@@ -509,7 +568,7 @@ def submit_all(changed, token, token_rules=None, log=print):
             log(f"  命中 Token 规则「{rule_keyword}」，使用规则 Token 提交")
         result = submit_repo(
             item["org"], item["repo"], item["branch"], item["files"],
-            item_token, log)
+            item_token, log, all_paths=item.get("all_paths"))
         entry = {"path": path, "ok": result["ok"]}
         if result["ok"]:
             submitted += 1

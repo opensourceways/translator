@@ -417,6 +417,8 @@ class TestScanChanged:
             assert entry["branch"] == "master"
             assert entry["files"][0]["target_path"] == (
                 "en/9.1.1/release-notes_en.md")
+            # 全量源文件路径随 changed 条目带出，供提交阶段清理陈旧文件
+            assert entry["all_paths"] == ["en/9.1.1/release-notes_en.md"]
             # 对比目标仓库时使用 master 分支
             compare_calls = client_mock.get_contents.call_args_list
             assert {c.args[3] for c in compare_calls} == {"master"}
@@ -707,6 +709,142 @@ class TestSubmitRepo:
             assert result["ok"] is True
             client_mock.create_branch.assert_not_called()
 
+    def _reused_branch_client_mock(self):
+        """构造「复用固定分支」场景的 mock：Fork 分支带 commit sha。"""
+        client_mock = _make_submit_client_mock()
+
+        def list_branches(owner, repo, token):
+            if owner == "Ascend":
+                return [{"name": "26.1.0", "commit": {"sha": "abc123"}}]
+            return [{"name": "translator/auto-26.1.0",
+                     "commit": {"sha": "deadbee"}}]
+
+        client_mock.list_branches.side_effect = list_branches
+        return client_mock
+
+    def test_reused_branch_cleans_stale_files(self):
+        """复用分支时删除源目录中已消失的陈旧文件（改名/搬家残留）。
+
+        清理规则「分支文件 − 上游文件 − 当前源文件全集」：
+        上游原有文件和仍有效的译稿不动，只删 en/old.md。
+        """
+        client_mock = self._reused_branch_client_mock()
+
+        def list_tree(owner, repo, ref, token):
+            if ref == "translator/auto-26.1.0":
+                # Fork 固定分支：上游文件 + 当前译稿 + 陈旧残留
+                return {"9.0.0/release-notes.md", "docs/en/test", "en/old.md"}
+            return {"9.0.0/release-notes.md"}  # 上游分支
+
+        client_mock.list_tree.side_effect = list_tree
+
+        def get_contents(owner, repo, path, ref, token):
+            if path == "en/old.md":
+                return {"sha": "oldsha"}
+            return {"sha": common._git_blob_sha(b"content")}  # 译稿内容未变
+
+        client_mock.get_contents.side_effect = get_contents
+        # 已有 open PR：删除以新 commit 并入既有 PR
+        client_mock.list_pull_requests.return_value = [{
+            "number": 42, "html_url": "http://x/42",
+            "head": {"label": "bot:translator/auto-26.1.0"},
+            "base": {"ref": "26.1.0"},
+        }]
+        with patch("translator_ci.submit.client", client_mock):
+            result = submit.submit_repo(
+                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT,
+                all_paths=["docs/en/test"])
+            assert result["ok"] is True
+            assert result["pr_existed"] is True
+            assert result["deleted"] == ["en/old.md"]
+            # 仅删除陈旧文件，删除后 sha 以查询结果为准
+            client_mock.delete_file.assert_called_once()
+            call = client_mock.delete_file.call_args
+            assert call.args[2] == "en/old.md"
+            assert call.args[4] == "oldsha"
+            assert "移除" in call.args[3]
+            # 当前译稿内容未变：不写不建
+            client_mock.create_file.assert_not_called()
+            client_mock.update_file.assert_not_called()
+            client_mock.create_pr.assert_not_called()
+
+    def test_new_branch_skips_cleanup(self):
+        """新建分支等于上游快照，即使提供 all_paths 也不做清理。"""
+        client_mock = _make_submit_client_mock()
+        with patch("translator_ci.submit.client", client_mock):
+            result = submit.submit_repo(
+                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT,
+                all_paths=["docs/en/test"])
+            assert result["ok"] is True
+            client_mock.list_tree.assert_not_called()
+            client_mock.delete_file.assert_not_called()
+
+    def test_no_all_paths_skips_cleanup(self):
+        """未提供全量清单（旧调用方式）时不做清理，保持向后兼容。"""
+        client_mock = self._reused_branch_client_mock()
+        with patch("translator_ci.submit.client", client_mock):
+            result = submit.submit_repo(
+                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
+            assert result["ok"] is True
+            client_mock.list_tree.assert_not_called()
+            client_mock.delete_file.assert_not_called()
+
+    def test_cleanup_tree_failure_non_fatal(self):
+        """tree 查询失败时跳过清理，不阻断正常写入与建 PR。"""
+        client_mock = self._reused_branch_client_mock()
+        client_mock.list_tree.side_effect = GitCodeError(500, "boom")
+        with patch("translator_ci.submit.client", client_mock):
+            result = submit.submit_repo(
+                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT,
+                all_paths=["docs/en/test"])
+            assert result["ok"] is True
+            client_mock.delete_file.assert_not_called()
+            client_mock.create_file.assert_called_once()
+
+    def test_deletion_only_creates_pr(self):
+        """仅有清理无写入时也能建 PR，标题体现移除。"""
+        client_mock = self._reused_branch_client_mock()
+
+        def list_tree(owner, repo, ref, token):
+            if ref == "translator/auto-26.1.0":
+                return {"en/old.md"}
+            return set()
+
+        client_mock.list_tree.side_effect = list_tree
+
+        def get_contents(owner, repo, path, ref, token):
+            if path == "en/old.md":
+                return {"sha": "oldsha"}
+            return {"sha": common._git_blob_sha(b"content")}
+
+        client_mock.get_contents.side_effect = get_contents
+        with patch("translator_ci.submit.client", client_mock):
+            result = submit.submit_repo(
+                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT,
+                all_paths=["docs/en/test"])
+            assert result["ok"] is True
+            assert result["pr_existed"] is False
+            assert result["deleted"] == ["en/old.md"]
+            pr_kwargs = client_mock.create_pr.call_args
+            assert "移除 1 份" in pr_kwargs.args[2]
+            assert "## 移除（源目录已不存在）" in pr_kwargs.args[5]
+
+    def test_pr_title_body_with_deletion(self):
+        """PR 标题/描述按新增/更新/移除分组。"""
+        title, body = submit._make_pr_title_body([
+            {"path": "a.md", "action": "create"},
+            {"path": "b.md", "action": "update"},
+            {"path": "en/old.md", "action": "delete"},
+        ])
+        assert title == "新增 1 份，更新 1 份，移除 1 份 英文版文档"
+        assert "## 新增" in body and "## 更新" in body
+        assert "## 移除（源目录已不存在）" in body
+        assert "`en/old.md`" in body
+
+        title, _ = submit._make_pr_title_body(
+            [{"path": "en/old.md", "action": "delete"}])
+        assert title == "移除 old.md 英文版文档"
+
     def test_identical_content_skipped_no_empty_commit(self):
         """分支现有文件内容相同则跳过写入（blob sha 比对）。"""
         client_mock = _make_submit_client_mock()
@@ -885,6 +1023,48 @@ class TestSubmitRepo:
             # 等到了分支才继续（睡了 2 次），且没再查同步状态接口
             assert sleep_mock.call_count == 2
             client_mock.get_sync_status.assert_not_called()
+
+
+class TestListTree:
+    """list_tree 用 contents API 逐层遍历（git trees recursive 有静默截断问题）。"""
+
+    def test_walks_contents_recursively(self):
+        """从根目录出发递归收集全部文件路径，目录不入结果。"""
+        from translator_ci import client as client_mod
+
+        dirs = {
+            "": [
+                {"type": "dir", "path": "en"},
+                {"type": "file", "path": "README.md"},
+            ],
+            "en": [
+                {"type": "dir", "path": "en/9.1.0"},
+                {"type": "file", "path": "en/release-notes.md"},
+            ],
+            "en/9.1.0": [
+                {"type": "file", "path": "en/9.1.0/release-notes.md"},
+            ],
+        }
+        with patch.object(client_mod, "list_dir",
+                          side_effect=lambda o, r, p, ref, t: dirs[p]):
+            paths = client_mod.list_tree(
+                "cann", "release-management", "translator/auto-master", "t")
+        assert paths == {
+            "README.md", "en/release-notes.md", "en/9.1.0/release-notes.md",
+        }
+
+    def test_walk_failure_propagates(self):
+        """任一目录查询失败即抛错，由调用方跳过清理（宁可不删，不可误删）。"""
+        from translator_ci import client as client_mod
+
+        def list_dir(owner, repo, path, ref, token):
+            if path == "en":
+                raise GitCodeError(500, "boom")
+            return [{"type": "dir", "path": "en"}]
+
+        with patch.object(client_mod, "list_dir", side_effect=list_dir):
+            with pytest.raises(GitCodeError):
+                client_mod.list_tree("cann", "release-management", "master", "t")
 
 
 class TestSubmitAll:

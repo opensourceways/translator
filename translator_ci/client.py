@@ -220,6 +220,38 @@ def update_file(owner, repo, path, message, content_b64, sha, branch, token):
                        })
 
 
+def delete_file(owner, repo, path, message, sha, branch, token):
+    """删除指定分支上的文件，需提供当前文件的 sha 以防并发误删。"""
+    return _do_request("DELETE",
+                       f"{BASE_URL}/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
+                       token, json={
+                           "message": message,
+                           "sha": sha,
+                           "branch": branch,
+                       })
+
+
+def list_tree(owner, repo, ref, token):
+    """递归列出仓库指定 ref 下全部文件路径（contents API 逐层遍历）。
+
+    不用 git trees API 的 recursive 参数：实测 GitCode 对该接口会静默
+    返回截断的部分树且不置 truncated 标志，据其做差集清理会误删文件。
+    ref 走查询参数，固定分支名含斜杠（translator/auto-xxx）可直接传。
+    遍历中任一目录查询失败即抛错，由调用方跳过清理——宁可不删，
+    不可误删。
+    """
+    paths = set()
+    stack = [""]
+    while stack:
+        path = stack.pop()
+        for entry in list_dir(owner, repo, path, ref, token):
+            if entry.get("type") == "dir":
+                stack.append(entry["path"])
+            elif entry.get("type") == "file":
+                paths.add(entry["path"])
+    return paths
+
+
 def get_user(token):
     """获取当前 token 对应的用户信息，用于确定 fork 目标账号。"""
     return _do_request("GET", f"{BASE_URL}/user", token)
