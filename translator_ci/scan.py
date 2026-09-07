@@ -251,7 +251,8 @@ def _blacklisted(path, blacklist):
 
 
 def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
-                 log=print, source_repo_dir=None, clone_root=None):
+                 log=print, source_repo_dir=None, clone_root=None,
+                 diff_before=None, diff_after=None):
     """扫描全部（或按关键字过滤的）仓库级目录，找出有变更的译稿仓库。
 
     逐仓下载译稿并与目标仓库同路径文件做内容对比（blob sha 比对），
@@ -266,6 +267,15 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
     目标仓库按需浅克隆（clone_root 指定目录）后本地对比，彻底绕开 API
     限流；clone_root 未设置时仅索引本地化、对比回退 API。
 
+    增量模式（diff_before/diff_after 均非空，来自 push webhook 的
+    before/after sha，仅本地化模式支持）：用 git diff 算出本次推送的
+    变更路径，只处理「变更路径落在其目录下」的仓库——非译稿文件
+    （根目录 README 等）的变更不触发任何仓库处理；翻译团队未提交
+    新译稿的仓库（上游单方面维护导致内容差异）也不会被无关推送
+    再次触发。回退全量的场景：diff 失败（sha 不可达等）、变更路径
+    命中根目录配置文件（blacklist.json / token_rules.json，配置变更
+    影响全局，需全量补扫）。
+
     Returns:
         dict with:
         - ok: bool
@@ -276,6 +286,7 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
         - unchanged: [无变更的仓库路径...]
         - skipped: [{path, reason}]
         - errors: [{path, error}]
+        - incremental: bool（实际是否按增量模式运行）
     """
     keyword = (keyword or "").strip().lower()
     token = (token or "").strip()
@@ -283,6 +294,29 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
         return {"ok": False, "stage": "validate", "error": "默认 Token 不能为空"}
 
     local_mode = bool(source_repo_dir)
+    # 根目录配置文件：变更影响全局，命中即回退全量扫描
+    CONFIG_FILES = ("blacklist.json", "token_rules.json", "README.md")
+
+    incremental = False
+    changed_paths = set()
+    if diff_before and diff_after and local_mode:
+        try:
+            localgit.fetch_commit(source_repo_dir, diff_before)
+            changed_paths = localgit.diff_paths(
+                source_repo_dir, diff_before, diff_after)
+            incremental = True
+            log(f"增量模式：本次推送变更 {len(changed_paths)} 个路径")
+            if changed_paths & set(CONFIG_FILES):
+                log("  变更命中根目录配置文件，回退全量扫描")
+                incremental = False
+                changed_paths = set()
+        except client.GitCodeError as e:
+            log(f"增量 diff 失败（{e}），回退全量扫描")
+            incremental = False
+            changed_paths = set()
+    elif diff_before and diff_after:
+        log("增量参数需要本地化模式（GITCODE_LOCAL_SOURCE_DIR），忽略")
+
     log("正在读取译稿权威仓库目录索引...")
     try:
         if local_mode:
@@ -307,6 +341,17 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
         p for p in projects
         if p["is_repo"] and (not keyword or keyword in p["path"].lower())
     ]
+
+    if incremental:
+        # 只保留「本次推送变更路径落在其目录下」的仓库。
+        # 仓库目录本身的直接变更（目录更名等）不算命中——目录结构由
+        # _to_project 解析，改名后是另一个仓库路径，按新路径正常处理。
+        repos = [
+            p for p in repos
+            if any(cp == p["path"] or cp.startswith(p["path"] + "/")
+                   for cp in changed_paths)
+        ]
+        log(f"增量过滤：{len(repos)} 个仓库目录命中本次推送变更")
 
     changed = []
     unchanged = []
@@ -375,4 +420,5 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
         "unchanged": unchanged,
         "skipped": skipped,
         "errors": errors,
+        "incremental": incremental,
     }

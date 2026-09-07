@@ -22,7 +22,12 @@ pipeline {
     triggers {
         GenericTrigger(
             genericVariables: [
-                [key: 'ref', value: '$.ref']
+                [key: 'ref', value: '$.ref'],
+                // push 事件的前后 sha：scan 用 git diff before..after 算出
+                // 本次推送的变更路径，只处理命中的仓库目录（增量模式）。
+                // 手动构建时两者为空 → 自动全量扫描（兜底重试手段）。
+                [key: 'GIT_PUSH_BEFORE', value: '$.before'],
+                [key: 'GIT_PUSH_AFTER', value: '$.after']
             ],
             // 只在 main 分支推送时触发（ref 形如 "refs/heads/main"，个别场景
             // 可能只有 "main"）。ref 为空时仍触发：webhook 未按 application/json

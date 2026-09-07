@@ -1175,6 +1175,23 @@ def _local_mode_mocks(source_tree, target_trees, source_dir="/src"):
     return patches, clone_mock, cat_blob_mock
 
 
+def _incremental_mocks(changed_paths, error=None):
+    """构造增量模式的 localgit 依赖 mock（fetch_commit + diff_paths）。
+
+    changed_paths: diff_paths 返回的变更路径集合
+    error: 非 None 时 diff_paths 抛 GitCodeError（模拟 sha 不可达）
+    返回 (patches 列表, fetch_mock, diff_mock)。
+    """
+    fetch_mock = MagicMock(return_value="before-sha")
+    diff_mock = MagicMock(
+        side_effect=error) if error else MagicMock(return_value=changed_paths)
+    patches = [
+        patch("translator_ci.localgit.fetch_commit", fetch_mock),
+        patch("translator_ci.localgit.diff_paths", diff_mock),
+    ]
+    return patches, fetch_mock, diff_mock
+
+
 class TestIndexLocalTree:
     """从本地 git 文件映射提取仓库级目录与文件。"""
 
@@ -1232,8 +1249,9 @@ class TestScanChangedLocalMode:
     def _run(self, client_mock, target_trees, **kwargs):
         patches, clone_mock, cat_blob_mock = _local_mode_mocks(
             self.LOCAL_SOURCE, target_trees)
+        extra_patches = kwargs.pop("_extra_patches", [])
         with _patch_scan_client(client_mock), ExitStack() as stack:
-            for p in patches:
+            for p in patches + extra_patches:
                 stack.enter_context(p)
             result = scan.scan_changed(
                 "", "tok", log=SILENT,
@@ -1351,6 +1369,128 @@ class TestScanChangedLocalMode:
         assert len(result["changed"]) == 5
         for c in result["changed"]:
             assert base64.b64decode(c["files"][0]["content_b64"]) == gif
+
+
+class TestScanChangedIncremental:
+    """增量模式：push 的 before/after diff 只处理命中的仓库目录。
+
+    依托本地化模式（LOCAL_SOURCE 同 TestScanChangedLocalMode），
+    额外 mock fetch_commit / diff_paths 验证增量过滤行为。
+    """
+
+    SOURCE_TREE = TestScanChangedLocalMode.LOCAL_SOURCE
+
+    def _run(self, client_mock, target_trees, changed_paths,
+             diff_error=None, **kwargs):
+        patches, clone_mock, cat_blob_mock = _local_mode_mocks(
+            self.SOURCE_TREE, target_trees)
+        inc_patches, fetch_mock, diff_mock = _incremental_mocks(
+            changed_paths, error=diff_error)
+        with _patch_scan_client(client_mock), ExitStack() as stack:
+            for p in patches + inc_patches:
+                stack.enter_context(p)
+            result = scan.scan_changed(
+                "", "tok", log=SILENT, source_repo_dir="/src",
+                clone_root="/clones", **kwargs)
+        return result, clone_mock, cat_blob_mock, fetch_mock, diff_mock
+
+    def test_incremental_filters_unrelated_repos(self):
+        """只有变更路径命中的仓库被处理，其余仓库完全不碰（不克隆）。"""
+        client_mock = _make_scan_client_mock()
+        result, clone_mock, cat_blob_mock, fetch_mock, diff_mock = self._run(
+            client_mock, {},
+            changed_paths={"CANN/9.1.0/cann/README.md"},
+            diff_before="b-sha", diff_after="a-sha")
+        assert result["ok"] is True
+        assert result["incremental"] is True
+        assert [c["project"]["path"] for c in result["changed"]] == [
+            "CANN/9.1.0/cann"]
+        # 只有命中的仓库被克隆对比
+        assert clone_mock.call_count == 1
+        # 其余仓库不属于 changed/unchanged——增量模式下未处理
+        assert result["unchanged"] == []
+
+    def test_incremental_root_file_change_skips_all(self):
+        """根目录非配置文件变更（如 LICENSE）不触发任何仓库处理。"""
+        client_mock = _make_scan_client_mock()
+        result, clone_mock, *_ = self._run(
+            client_mock, {},
+            changed_paths={"LICENSE"},
+            diff_before="b-sha", diff_after="a-sha")
+        assert result["ok"] is True
+        assert result["incremental"] is True
+        assert result["changed"] == []
+        assert result["unchanged"] == []
+        assert clone_mock.call_count == 0
+
+    def test_incremental_config_change_falls_back_to_full(self):
+        """变更命中根目录配置文件（blacklist.json 等）回退全量扫描。"""
+        client_mock = _make_scan_client_mock()
+        result, clone_mock, *_ = self._run(
+            client_mock, {},
+            changed_paths={"blacklist.json", "CANN/9.1.0/cann/README.md"},
+            diff_before="b-sha", diff_after="a-sha")
+        assert result["ok"] is True
+        assert result["incremental"] is False
+        # 全量：5 个仓库全部处理
+        assert len(result["changed"]) == 5
+        assert clone_mock.call_count == 5
+
+    def test_incremental_diff_failure_falls_back_to_full(self):
+        """diff 失败（before sha 不可达等）回退全量，宁多勿漏。"""
+        client_mock = _make_scan_client_mock()
+        result, clone_mock, *_ = self._run(
+            client_mock, {},
+            changed_paths=None,
+            diff_error=GitCodeError(200, "bad object b-sha"),
+            diff_before="b-sha", diff_after="a-sha")
+        assert result["ok"] is True
+        assert result["incremental"] is False
+        assert len(result["changed"]) == 5
+
+    def test_incremental_requires_local_mode(self):
+        """非本地化模式传增量参数：忽略并按全量跑（webhook 兜底）。"""
+        client_mock = _make_scan_client_mock()
+        with _patch_scan_client(client_mock):
+            result = scan.scan_changed(
+                "", "tok", log=SILENT,
+                diff_before="b-sha", diff_after="a-sha")
+        assert result["ok"] is True
+        assert result["incremental"] is False
+
+    def test_incremental_directory_move_detected(self):
+        """仓库目录整体搬家：新旧路径都命中时两个仓库都处理。"""
+        client_mock = _make_scan_client_mock()
+        result, clone_mock, *_ = self._run(
+            client_mock, {},
+            changed_paths={
+                "CANN/master/release-management/en/9.1.1/release-notes_en.md",
+                "Ascend/master/MindStudio/msprof/test",
+            },
+            diff_before="b-sha", diff_after="a-sha")
+        assert result["ok"] is True
+        assert result["incremental"] is True
+        assert sorted(c["project"]["path"] for c in result["changed"]) == [
+            "Ascend/master/MindStudio/msprof",
+            "CANN/master/release-management",
+        ]
+        assert clone_mock.call_count == 2
+
+    def test_no_incremental_params_is_full(self):
+        """不传增量参数：普通全量（含 unchanged 归档）。"""
+        client_mock = _make_scan_client_mock()
+        targets = {
+            "Ascend__msprof": {"test": "srcsha1"},
+            "Ascend__mspti": {"test": "srcsha1"},
+            "CANN__cann": {"README.md": "srcsha1"},
+            "CANN__release-management": {
+                "en/9.1.1/release-notes_en.md": "srcsha1"},
+        }
+        result, *_ = self._run(
+            client_mock, targets, changed_paths=set())
+        assert result["ok"] is True
+        assert result["incremental"] is False
+        assert result["unchanged"] == REPO_PATHS
 
 
 class TestLoadTokenRulesLocal:

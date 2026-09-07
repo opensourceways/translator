@@ -47,6 +47,14 @@ def main(argv=None):
                              "（默认 %(default)s）")
     parser.add_argument("--sync-source", action="store_true",
                         help="来源为 Fork 时，扫描前先同步其与上游")
+    parser.add_argument("--diff-before", default=os.environ.get("GIT_PUSH_BEFORE", ""),
+                        help="增量模式：本次推送的 before sha（默认读环境"
+                             "变量 GIT_PUSH_BEFORE，由 webhook 注入）")
+    parser.add_argument("--diff-after", default=os.environ.get("GIT_PUSH_AFTER", ""),
+                        help="增量模式：本次推送的 after sha（默认读环境"
+                             "变量 GIT_PUSH_AFTER，由 webhook 注入）")
+    parser.add_argument("--full-scan", action="store_true",
+                        help="强制全量扫描（忽略增量参数，手动构建重试用）")
     args = parser.parse_args(argv)
 
     token = os.environ.get("GITCODE_TOKEN", "").strip()
@@ -91,16 +99,20 @@ def main(argv=None):
     # ── 扫描变更 ──
     _log("开始扫描全部译稿仓库..."
          if not args.keyword else f"开始扫描（关键字: {args.keyword}）...")
+    diff_before = None if args.full_scan else (args.diff_before or "").strip() or None
+    diff_after = None if args.full_scan else (args.diff_after or "").strip() or None
     result = service.scan_changed(
         args.keyword, token, token_rules=token_rules, blacklist=blacklist,
-        log=_log, source_repo_dir=local_source_dir, clone_root=clone_root)
+        log=_log, source_repo_dir=local_source_dir, clone_root=clone_root,
+        diff_before=diff_before, diff_after=diff_after)
     if not result["ok"]:
         _log(f"扫描失败（阶段: {result.get('stage', 'unknown')}）"
              f": {result.get('error', '未知错误')}")
         return 1
 
     changed = result["changed"]
-    _log(f"扫描完成：{len(changed)} 个仓库有变更，"
+    mode = "增量" if result.get("incremental") else "全量"
+    _log(f"扫描完成（{mode}）：{len(changed)} 个仓库有变更，"
          f"{len(result['unchanged'])} 个无变更。")
     for s in result["skipped"]:
         _log(f"  [跳过] {s['path']}: {s['reason']}")
