@@ -23,7 +23,8 @@ import base64
 import os
 
 from translator_ci import client, localgit
-from translator_ci.common import _source_repo, MAX_TOTAL_SIZE, _git_blob_sha
+from translator_ci.common import (
+    _source_repo, MAX_FILE_SIZE, MAX_TOTAL_SIZE, _git_blob_sha)
 from translator_ci.index import (
     _list_subdirs, _collect_dirs, _to_project, _walk_files,
     _repo_dirs_from_tree, _repo_files_from_tree,
@@ -90,11 +91,12 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
     total_size = 0
 
     def download(rel_path, sha=None):
-        """按需获取来源仓库单个文件内容（累计大小受 MAX_TOTAL_SIZE 约束）。
+        """按需获取来源仓库单个文件内容（单文件与累计大小受约束）。
 
         来源仓库始终用默认 Token 读取（与扫描一致），规则 Token 只用于
         访问目标仓库。本地化模式下从本地克隆按 sha 读取（git cat-file，
-        部分克隆时按需补取 blob），否则走 API。
+        部分克隆时按需补取 blob），否则走 API。单文件超 MAX_FILE_SIZE
+        立即拦截；累计超 MAX_TOTAL_SIZE 拦截整批。
         """
         nonlocal total_size
         source_path = f"{project['path']}/{rel_path}"
@@ -118,6 +120,10 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
             except client.GitCodeError as e:
                 raise client.GitCodeError(
                     e.status_code, f"下载文件 {source_path} 失败: {e.message}")
+        if len(content) > MAX_FILE_SIZE:
+            raise client.GitCodeError(
+                200, f"文件 {rel_path} 大小 {len(content) / 1024 / 1024:.1f} MB "
+                     f"超过单文件上限 {MAX_FILE_SIZE / 1024 / 1024:.0f} MB")
         total_size += len(content)
         if total_size > MAX_TOTAL_SIZE:
             raise client.GitCodeError(

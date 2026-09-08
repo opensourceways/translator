@@ -1290,6 +1290,51 @@ class TestScanChangedLocalMode:
         assert result["unchanged"] == REPO_PATHS
         assert cat_blob_mock.call_count == 0
 
+    def test_single_file_size_limit(self):
+        """单文件超 MAX_FILE_SIZE 时该仓库记为失败，不影响其他仓库。"""
+        client_mock = _make_scan_client_mock()
+        big = b"x" * (common.MAX_FILE_SIZE + 1)
+        patches, clone_mock, cat_blob_mock = _local_mode_mocks(
+            self.LOCAL_SOURCE, {})
+        cat_blob_mock.return_value = big
+        with _patch_scan_client(client_mock), ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            result = scan.scan_changed(
+                "", "tok", log=SILENT,
+                source_repo_dir="/src", clone_root="/clones")
+        assert result["ok"] is True
+        # 第一个仓库(msprof)单文件超限 → 全部 5 个仓库都失败
+        assert result["changed"] == []
+        assert len(result["errors"]) == 5
+        assert "单文件上限" in result["errors"][0]["error"]
+
+    def test_total_size_limit_accumulates(self):
+        """累计大小在同一仓库内跨文件累加，超限报累计上限错误。"""
+        client_mock = _make_scan_client_mock()
+        # 单仓库 3 个文件各 15MB：单个 < 50MB 不拦，累计 45MB > 40MB 拦截
+        source_tree = {
+            "CANN/9.1.0/cann/a.md": "sha-a",
+            "CANN/9.1.0/cann/b.md": "sha-b",
+            "CANN/9.1.0/cann/c.md": "sha-c",
+        }
+        big = b"x" * (15 * 1024 * 1024)
+        patches, clone_mock, cat_blob_mock = _local_mode_mocks(
+            source_tree, {})
+        cat_blob_mock.return_value = big
+        with patch("translator_ci.scan.MAX_TOTAL_SIZE", 40 * 1024 * 1024), \
+                _patch_scan_client(client_mock), ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            result = scan.scan_changed(
+                "", "tok", log=SILENT,
+                source_repo_dir="/src", clone_root="/clones")
+        assert result["ok"] is True
+        assert result["changed"] == []
+        assert len(result["errors"]) == 1
+        assert "累计文件大小" in result["errors"][0]["error"]
+        assert "上限" in result["errors"][0]["error"]
+
     def test_local_changed_when_sha_differs(self):
         """本地模式：sha 不一致记为更新，内容走 git cat-file。"""
         client_mock = _make_scan_client_mock()

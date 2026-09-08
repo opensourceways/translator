@@ -22,7 +22,8 @@ GIT_HOST = "https://gitcode.com"  # git 协议仓库地址（API 用 client.BASE
 
 DEFAULT_RULES_PATH = "token_rules.json"  # 权威仓库根目录下的规则文件
 DEFAULT_BLACKLIST_PATH = "blacklist.json"  # 权威仓库根目录下的拉黑名单文件
-MAX_TOTAL_SIZE = 5 * 1024 * 1024         # 单次上传累计文件大小上限 5 MB
+MAX_FILE_SIZE = 50 * 1024 * 1024         # 单文件大小上限 50 MB（防误传大文件）
+MAX_TOTAL_SIZE = 100 * 1024 * 1024       # 单次上传累计文件大小上限 100 MB
 AUTO_BRANCH_PREFIX = "translator/auto-"  # 自动提交的固定分支名前缀
 
 
