@@ -68,6 +68,7 @@ class TestLoadRules:
         with patch.object(cli.service, "load_token_rules",
                           return_value=[]) as load_mock, \
                 patch.object(cli.service, "load_blacklist", return_value=[]), \
+                patch.object(cli.service, "load_whitelist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()):
             assert cli.main([]) == 0
@@ -79,11 +80,41 @@ class TestLoadRules:
                           return_value=[]), \
                 patch.object(cli.service, "load_blacklist",
                              return_value=[]) as load_mock, \
+                patch.object(cli.service, "load_whitelist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()):
             assert cli.main([]) == 0
             _, kwargs = load_mock.call_args
             assert kwargs["blacklist_path"] == service.DEFAULT_BLACKLIST_PATH
+
+    def test_whitelist_path_passed_through(self):
+        with patch.object(cli.service, "load_token_rules",
+                          return_value=[]), \
+                patch.object(cli.service, "load_blacklist", return_value=[]), \
+                patch.object(cli.service, "load_whitelist",
+                             return_value=[]) as load_mock, \
+                patch.object(cli.service, "scan_changed",
+                             return_value=_scan_result()):
+            assert cli.main([]) == 0
+            _, kwargs = load_mock.call_args
+            assert kwargs["whitelist_path"] == service.DEFAULT_WHITELIST_PATH
+
+    def test_whitelist_passed_to_scan(self):
+        with patch.object(cli.service, "load_token_rules", return_value=[]), \
+                patch.object(cli.service, "load_blacklist", return_value=[]), \
+                patch.object(cli.service, "load_whitelist",
+                             return_value=["CANN/9.1.0/sip"]), \
+                patch.object(cli.service, "scan_changed",
+                             return_value=_scan_result()) as scan_mock:
+            assert cli.main([]) == 0
+            assert scan_mock.call_args.kwargs["whitelist"] == ["CANN/9.1.0/sip"]
+
+    def test_whitelist_config_error_returns_1(self):
+        with patch.object(cli.service, "load_token_rules", return_value=[]), \
+                patch.object(cli.service, "load_blacklist", return_value=[]), \
+                patch.object(cli.service, "load_whitelist",
+                             side_effect=service.ConfigError("bad json")):
+            assert cli.main([]) == 1
 
 
 class TestScanPhase:
@@ -92,6 +123,7 @@ class TestScanPhase:
     def test_scan_failure_returns_1(self):
         with patch.object(cli.service, "load_token_rules", return_value=[]), \
                 patch.object(cli.service, "load_blacklist", return_value=[]), \
+                patch.object(cli.service, "load_whitelist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value={"ok": False, "stage": "load_index",
                                            "error": "boom"}), \
@@ -102,6 +134,7 @@ class TestScanPhase:
     def test_no_changes_returns_0(self):
         with patch.object(cli.service, "load_token_rules", return_value=[]), \
                 patch.object(cli.service, "load_blacklist", return_value=[]), \
+                patch.object(cli.service, "load_whitelist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()), \
                 patch.object(cli.service, "submit_all") as submit_mock:
@@ -118,6 +151,7 @@ class TestSubmitPhase:
         with patch.object(cli.service, "load_token_rules",
                           return_value=rules), \
                 patch.object(cli.service, "load_blacklist", return_value=[]), \
+                patch.object(cli.service, "load_whitelist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result(changed)) as scan_mock, \
                 patch.object(cli.service, "submit_all",
@@ -177,6 +211,7 @@ class TestSubmitPhase:
         assert code == 0
         with patch.object(cli.service, "load_token_rules", return_value=[]), \
                 patch.object(cli.service, "load_blacklist", return_value=[]), \
+                patch.object(cli.service, "load_whitelist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()) as sm:
             cli.main(["--keyword", "msprof"])
@@ -188,6 +223,7 @@ class TestSubmitPhase:
                 patch.object(cli.service, "load_token_rules",
                              return_value=[]), \
                 patch.object(cli.service, "load_blacklist", return_value=[]), \
+                patch.object(cli.service, "load_whitelist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()):
             assert cli.main(["--sync-source"]) == 0
@@ -199,6 +235,7 @@ class TestSubmitPhase:
                 patch.object(cli.service, "load_token_rules",
                              return_value=[]), \
                 patch.object(cli.service, "load_blacklist", return_value=[]), \
+                patch.object(cli.service, "load_whitelist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()):
             assert cli.main([]) == 0
@@ -214,6 +251,7 @@ class TestLocalModeEnv:
         with patch.object(cli.service, "load_token_rules",
                           return_value=[]) as load_mock, \
                 patch.object(cli.service, "load_blacklist", return_value=[]), \
+                patch.object(cli.service, "load_whitelist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()) as scan_mock:
             assert cli.main([]) == 0
@@ -229,6 +267,7 @@ class TestLocalModeEnv:
         with patch.object(cli.service, "load_token_rules",
                           return_value=[]) as load_mock, \
                 patch.object(cli.service, "load_blacklist", return_value=[]), \
+                patch.object(cli.service, "load_whitelist", return_value=[]), \
                 patch.object(cli.service, "scan_changed",
                              return_value=_scan_result()) as scan_mock:
             assert cli.main([]) == 0

@@ -289,6 +289,50 @@ class TestBlacklist:
                 rules.load_blacklist("tok", log=SILENT)
 
 
+class TestWhitelist:
+    """开放白名单：从权威仓库读取目录路径列表，损坏配置抛 ConfigError。"""
+
+    def _mock_with_whitelist(self, text):
+        client_mock = _make_client_mock()
+        client_mock.get_file_text.return_value = text
+        return client_mock
+
+    def test_file_missing_returns_empty(self):
+        """白名单缺失视为不限制开放范围（与黑名单缺失一致，不报错）。"""
+        client_mock = _make_client_mock()
+        client_mock.get_file_text.side_effect = GitCodeError(404, "Not Found")
+        with patch("translator_ci.rules.client", client_mock):
+            loaded = rules.load_whitelist("tok", log=SILENT)
+            assert loaded == []
+
+    def test_valid_whitelist_loaded(self):
+        text = json.dumps({"repos": ["CANN/9.1.0/sip"]})
+        with patch("translator_ci.rules.client",
+                   self._mock_with_whitelist(text)):
+            loaded = rules.load_whitelist("tok", log=SILENT)
+            assert loaded == ["CANN/9.1.0/sip"]
+
+    def test_empty_or_blank_entries_skipped(self):
+        text = json.dumps({"repos": ["CANN/9.1.0/sip", "", "  "]})
+        with patch("translator_ci.rules.client",
+                   self._mock_with_whitelist(text)):
+            loaded = rules.load_whitelist("tok", log=SILENT)
+            assert loaded == ["CANN/9.1.0/sip"]
+
+    def test_invalid_json_raises_config_error(self):
+        """配置损坏不能静默放行（否则可能意外放开全部仓库）。"""
+        with patch("translator_ci.rules.client",
+                   self._mock_with_whitelist("{not json")):
+            with pytest.raises(common.ConfigError):
+                rules.load_whitelist("tok", log=SILENT)
+
+    def test_missing_repos_key_raises_config_error(self):
+        with patch("translator_ci.rules.client",
+                   self._mock_with_whitelist(json.dumps({"foo": []}))):
+            with pytest.raises(common.ConfigError):
+                rules.load_whitelist("tok", log=SILENT)
+
+
 class TestSourceRepoOverride:
     """来源仓库可用 GITCODE_SOURCE_REPO 覆盖为自己的 Fork。"""
 
@@ -547,6 +591,58 @@ class TestScanChanged:
             ]
             assert len(result["skipped"]) == 2
             assert all("拉黑名单" in s["reason"] for s in result["skipped"])
+
+    def test_whitelist_restricts_open_scope(self):
+        """白名单非空时只处理命中的仓库，名单外直接跳过且无任何对比请求。
+
+        对应「整个功能先只对 sip 仓库开放」：配置白名单后其余仓库即使
+        内容有差异也不会被提交。
+        """
+        client_mock = _make_scan_client_mock()
+        with _patch_scan_client(client_mock):
+            result = scan.scan_changed(
+                "", "tok", whitelist=["CANN/9.1.0/cann"], log=SILENT)
+            assert [c["project"]["path"] for c in result["changed"]] == [
+                "CANN/9.1.0/cann"]
+            assert len(result["skipped"]) == len(REPO_PATHS) - 1
+            assert all("不在开放白名单中" in s["reason"]
+                       for s in result["skipped"])
+            # 名单外的仓库未发起任何目标仓库对比请求
+            assert {c.args[1] for c in client_mock.get_contents.call_args_list} \
+                == {"cann"}
+
+    def test_empty_whitelist_means_no_restriction(self):
+        """白名单为空（未配置）时不限制开放范围，全部仓库照常处理。"""
+        client_mock = _make_scan_client_mock()
+        with _patch_scan_client(client_mock):
+            result = scan.scan_changed("", "tok", whitelist=[], log=SILENT)
+            assert len(result["changed"]) == 5
+            assert result["skipped"] == []
+
+    def test_whitelist_prefix_matches(self):
+        """白名单按前缀命中：开放高层目录则其下所有仓库级目录都放行。"""
+        client_mock = _make_scan_client_mock()
+        with _patch_scan_client(client_mock):
+            result = scan.scan_changed(
+                "", "tok",
+                whitelist=["Ascend/26.1.0", "CANN/9.1.0/cann"], log=SILENT)
+            assert sorted(c["project"]["path"] for c in result["changed"]) == [
+                "Ascend/26.1.0/MindStudio/msprof",
+                "Ascend/26.1.0/MindStudio/mspti",
+                "CANN/9.1.0/cann",
+            ]
+            assert len(result["skipped"]) == 2
+
+    def test_whitelist_and_blacklist_combined(self):
+        """同时配置时：名单外跳过，名单内被拉黑的仍跳过（拉黑优先）。"""
+        client_mock = _make_scan_client_mock()
+        with _patch_scan_client(client_mock):
+            result = scan.scan_changed(
+                "", "tok", whitelist=["CANN/9.1.0/cann"],
+                blacklist=["CANN/9.1.0/cann"], log=SILENT)
+            assert result["changed"] == []
+            assert len(result["skipped"]) == len(REPO_PATHS)
+            assert any("拉黑名单" in s["reason"] for s in result["skipped"])
 
     def test_unchanged_with_source_sha_skips_download(self):
         """来源目录条目 sha 与目标 sha 一致时，不做任何内容下载即判未变更。"""
@@ -1481,6 +1577,17 @@ class TestScanChangedIncremental:
         assert len(result["changed"]) == 5
         assert clone_mock.call_count == 5
 
+    def test_incremental_whitelist_change_falls_back_to_full(self):
+        """变更命中 whitelist.json（范围配置）同样回退全量扫描。"""
+        client_mock = _make_scan_client_mock()
+        result, clone_mock, *_ = self._run(
+            client_mock, {},
+            changed_paths={"whitelist.json"},
+            diff_before="b-sha", diff_after="a-sha")
+        assert result["ok"] is True
+        assert result["incremental"] is False
+        assert len(result["changed"]) == 5
+
     def test_incremental_diff_failure_falls_back_to_full(self):
         """diff 失败（before sha 不可达等）回退全量，宁多勿漏。"""
         client_mock = _make_scan_client_mock()
@@ -1598,4 +1705,30 @@ class TestLoadBlacklistLocal:
                    return_value=b"{not json"):
             with pytest.raises(common.ConfigError):
                 rules.load_blacklist("tok", log=SILENT,
+                                     source_repo_dir="/src")
+
+
+class TestLoadWhitelistLocal:
+    """本地化模式：开放白名单从本地克隆读取（git show），失败路径同 API。"""
+
+    def test_reads_from_local_clone(self):
+        with patch("translator_ci.localgit.read_file",
+                   return_value=b'{"repos": ["CANN/9.1.0/sip"]}') as read_mock:
+            loaded = rules.load_whitelist("tok", log=SILENT,
+                                          source_repo_dir="/src")
+            assert loaded == ["CANN/9.1.0/sip"]
+            read_mock.assert_called_once_with("/src", "whitelist.json")
+
+    def test_missing_file_returns_empty(self):
+        with patch("translator_ci.localgit.read_file",
+                   side_effect=GitCodeError(404, "missing")):
+            loaded = rules.load_whitelist("tok", log=SILENT,
+                                          source_repo_dir="/src")
+            assert loaded == []
+
+    def test_invalid_json_raises_config_error(self):
+        with patch("translator_ci.localgit.read_file",
+                   return_value=b"{not json"):
+            with pytest.raises(common.ConfigError):
+                rules.load_whitelist("tok", log=SILENT,
                                      source_repo_dir="/src")

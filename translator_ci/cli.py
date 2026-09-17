@@ -45,6 +45,10 @@ def main(argv=None):
                         default=service.DEFAULT_BLACKLIST_PATH,
                         help="权威仓库中拉黑名单文件的路径"
                              "（默认 %(default)s）")
+    parser.add_argument("--whitelist-path",
+                        default=service.DEFAULT_WHITELIST_PATH,
+                        help="权威仓库中开放白名单文件的路径"
+                             "（默认 %(default)s）")
     parser.add_argument("--sync-source", action="store_true",
                         help="来源为 Fork 时，扫描前先同步其与上游")
     parser.add_argument("--diff-before", default=os.environ.get("GIT_PUSH_BEFORE", ""),
@@ -96,6 +100,18 @@ def main(argv=None):
         _log(f"错误：读取拉黑名单失败: {e}")
         return 1
 
+    # ── 加载开放白名单（权威仓库内的名单文件，非空时只处理命中的仓库）──
+    try:
+        whitelist = service.load_whitelist(
+            token, whitelist_path=args.whitelist_path, log=_log,
+            source_repo_dir=local_source_dir)
+    except service.ConfigError as e:
+        _log(f"错误：{e}")
+        return 1
+    except service.client.GitCodeError as e:
+        _log(f"错误：读取开放白名单失败: {e}")
+        return 1
+
     # ── 扫描变更 ──
     _log("开始扫描全部译稿仓库..."
          if not args.keyword else f"开始扫描（关键字: {args.keyword}）...")
@@ -103,8 +119,8 @@ def main(argv=None):
     diff_after = None if args.full_scan else (args.diff_after or "").strip() or None
     result = service.scan_changed(
         args.keyword, token, token_rules=token_rules, blacklist=blacklist,
-        log=_log, source_repo_dir=local_source_dir, clone_root=clone_root,
-        diff_before=diff_before, diff_after=diff_after)
+        whitelist=whitelist, log=_log, source_repo_dir=local_source_dir,
+        clone_root=clone_root, diff_before=diff_before, diff_after=diff_after)
     if not result["ok"]:
         _log(f"扫描失败（阶段: {result.get('stage', 'unknown')}）"
              f": {result.get('error', '未知错误')}")

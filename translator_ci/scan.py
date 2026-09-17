@@ -17,6 +17,10 @@ scan_changed:      扫描全部（或按关键字过滤的）仓库级目录 →
 
 拉黑名单（权威仓库 blacklist.json）：目录路径命中名单的仓库直接记入
 skipped，不做任何对比请求（业务侧临时不想处理的仓库用，无需改代码）。
+
+开放白名单（权威仓库 whitelist.json）：名单非空时只处理命中的仓库，
+名单外的一律记入 skipped，不做任何对比请求（范围管控，如「功能先只对
+某仓库开放」）；名单为空时不限制开放范围。
 """
 
 import base64
@@ -248,17 +252,22 @@ def _local_target_tree(project, cmp_token, clone_root, log):
         return None
 
 
-def _blacklisted(path, blacklist):
-    """判断仓库目录路径是否命中拉黑名单（等于条目或以条目为前缀）。"""
-    for entry in blacklist or []:
+def _path_matched(path, entries):
+    """判断仓库目录路径是否命中名单（等于条目或以条目为前缀）。
+
+    黑/白名单共用同一套目录树匹配：条目为仓库级目录（如
+    CANN/9.1.0/sip）时精确命中，条目为高层目录（如 CANN/9.1.0）时
+    其下所有仓库级目录都命中。
+    """
+    for entry in entries or []:
         if path == entry or path.startswith(entry + "/"):
             return True
     return False
 
 
 def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
-                 log=print, source_repo_dir=None, clone_root=None,
-                 diff_before=None, diff_after=None):
+                 whitelist=None, log=print, source_repo_dir=None,
+                 clone_root=None, diff_before=None, diff_after=None):
     """扫描全部（或按关键字过滤的）仓库级目录，找出有变更的译稿仓库。
 
     逐仓下载译稿并与目标仓库同路径文件做内容对比（blob sha 比对），
@@ -267,6 +276,11 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
 
     blacklist 为拉黑名单（权威仓库 blacklist.json 的目录路径列表）：
     命中名单的仓库直接记入 skipped，不做对比也不建 PR。
+
+    whitelist 为开放白名单（权威仓库 whitelist.json 的目录路径列表）：
+    非空时只处理命中名单的仓库，名单外的直接记入 skipped（范围管控，
+    如「功能先只对某仓库开放」）；为空时不限制开放范围。拉黑优先——
+    名单外跳过，名单内但被拉黑的仍跳过。
 
     本地化模式（source_repo_dir 非空，通常由 Jenkinsfile 克隆权威仓库
     后通过 GITCODE_LOCAL_SOURCE_DIR 注入）：索引与列文件走本地 git，
@@ -279,8 +293,8 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
     （根目录 README 等）的变更不触发任何仓库处理；翻译团队未提交
     新译稿的仓库（上游单方面维护导致内容差异）也不会被无关推送
     再次触发。回退全量的场景：diff 失败（sha 不可达等）、变更路径
-    命中根目录配置文件（blacklist.json / token_rules.json，配置变更
-    影响全局，需全量补扫）。
+    命中根目录配置文件（blacklist.json / token_rules.json /
+    whitelist.json，配置变更影响全局，需全量补扫）。
 
     Returns:
         dict with:
@@ -301,7 +315,8 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
 
     local_mode = bool(source_repo_dir)
     # 根目录配置文件：变更影响全局，命中即回退全量扫描
-    CONFIG_FILES = ("blacklist.json", "token_rules.json", "README.md")
+    CONFIG_FILES = ("blacklist.json", "token_rules.json", "whitelist.json",
+                    "README.md")
 
     incremental = False
     changed_paths = set()
@@ -367,7 +382,11 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
     restrict = bool(_effective_rules(token_rules))
     for i, project in enumerate(repos, 1):
         log(f"正在扫描 ({i}/{len(repos)}): {project['path']}")
-        if _blacklisted(project["path"], blacklist):
+        if whitelist and not _path_matched(project["path"], whitelist):
+            skipped.append({"path": project["path"],
+                            "reason": "不在开放白名单中，暂不处理"})
+            continue
+        if _path_matched(project["path"], blacklist):
             skipped.append({"path": project["path"],
                             "reason": "在拉黑名单中，业务侧暂不处理"})
             continue
