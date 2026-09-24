@@ -31,7 +31,7 @@ from translator_ci.common import (
     _source_repo, MAX_FILE_SIZE, MAX_TOTAL_SIZE, _git_blob_sha)
 from translator_ci.index import (
     _list_subdirs, _collect_dirs, _to_project, _walk_files,
-    _repo_dirs_from_tree, _repo_files_from_tree,
+    _repo_dirs_from_tree, _repo_files_from_tree, _target_rel_path,
 )
 from translator_ci.rules import resolve_token, _effective_rules
 
@@ -39,14 +39,16 @@ from translator_ci.rules import resolve_token, _effective_rules
 def _fetch_repo_files(project, branch, token, log, tree=None):
     """列出仓库级目录的全部译稿文件（携带来源 blob sha，不下载内容）。
 
-    目标路径为仓库级目录内的相对路径（即目标仓库中的真实存放路径）；
+    每个文件带两个路径：path 为仓库级目录内的来源相对路径（下载译稿
+    时拼接 project['path'] 用）；target_path 为目标仓库中的真实存放
+    路径，按 index.TARGET_PATH_RULES 改写（未登记的仓库直连）。
     路径校验已在 _walk_files / _repo_files_from_tree 阶段前置完成。
     文件内容推迟到「确认有变更」后再按需下载（见 _compare_files），
     避免为无变更文件做无谓传输。tree 非空时从本地文件映射提取
     （本地化模式），否则走 API 逐目录列举。
 
     Returns:
-        dict: {"ok": bool, "files": [{target_path, sha}], "error": ...}
+        dict: {"ok": bool, "files": [{path, target_path, sha}], "error": ...}
     """
     log(f"正在列出文件: {project['path']}")
     try:
@@ -61,8 +63,11 @@ def _fetch_repo_files(project, branch, token, log, tree=None):
         return {"ok": False, "stage": "list_files", "error": str(e)}
     if not rel_files:
         return {"ok": True, "files": []}
+    org, repo = project["org"], project["project"]
     return {"ok": True, "files": [
-        {"target_path": f["path"], "sha": f.get("sha")} for f in rel_files
+        {"path": f["path"],
+         "target_path": _target_rel_path(org, repo, f["path"]),
+         "sha": f.get("sha")} for f in rel_files
     ]}
 
 
@@ -71,7 +76,9 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
     """对比仓库级目录的译稿与目标仓库内容，筛出有变更的文件。
 
     目标定位：org/repo/branch 按组织层级取（见 index._to_project，Ascend
-    为第 1/4/2 段，CANN 等为第 1/3/2 段）；下载来源内容时使用
+    为第 1/4/2 段，CANN 等为第 1/3/2 段）；目标路径取 target_path
+    （按 index.TARGET_PATH_RULES 改写后的真实存放路径），下载来源内容
+    用 path（仓库级目录内相对路径）拼接源目录。下载来源内容时使用
     权威仓库分支 source_branch（与索引/列目录一致，勿混用目标分支）。
     优先用「来源目录条目的 blob sha」与目标文件 sha 直接比对，两者一致
     即未变更，无需下载来源内容（来源条目未携带 sha、或目标 sha 缺失时
@@ -146,7 +153,7 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
                 new_count += 1
                 changed.append({
                     "target_path": f["target_path"],
-                    "content_b64": download(f["target_path"], f.get("sha")),
+                    "content_b64": download(f["path"], f.get("sha")),
                 })
                 continue
             if remote_sha == f.get("sha"):
@@ -154,7 +161,7 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
             update_count += 1
             changed.append({
                 "target_path": f["target_path"],
-                "content_b64": download(f["target_path"], f.get("sha")),
+                "content_b64": download(f["path"], f.get("sha")),
             })
         if not changed:
             return {"status": "unchanged"}
@@ -185,7 +192,7 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
             new_count += 1
             changed.append({
                 "target_path": f["target_path"],
-                "content_b64": download(f["target_path"], f.get("sha")),
+                "content_b64": download(f["path"], f.get("sha")),
             })
             continue
         if isinstance(existing, list):
@@ -193,7 +200,7 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
             update_count += 1
             changed.append({
                 "target_path": f["target_path"],
-                "content_b64": download(f["target_path"], f.get("sha")),
+                "content_b64": download(f["path"], f.get("sha")),
             })
             continue
         remote_sha = existing.get("sha")
@@ -204,11 +211,11 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
             update_count += 1
             changed.append({
                 "target_path": f["target_path"],
-                "content_b64": download(f["target_path"], f.get("sha")),
+                "content_b64": download(f["path"], f.get("sha")),
             })
             continue
         # 任一 sha 缺失：下载来源内容做 blob sha / 文本兜底比对
-        b64 = download(f["target_path"], f.get("sha"))
+        b64 = download(f["path"], f.get("sha"))
         content = base64.b64decode(b64)
         if remote_sha:
             same = remote_sha == _git_blob_sha(content)

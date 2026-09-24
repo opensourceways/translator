@@ -1,10 +1,11 @@
 """来源仓库（译稿权威仓库 / Fork）的同步与目录索引。
 
-sync_source:   来源为 Fork 时，扫描前同步其与上游
-_list_subdirs: 列出指定目录下的子目录名（过滤掉文件）
-_walk_files:   递归列出目录下全部文件（携带来源 blob sha，路径校验前置）
-_collect_dirs: 递归收集所有（子树内）包含文件的目录路径（不限制嵌套深度）
-_to_project:   目录路径按固定层级解析为项目描述
+sync_source:       来源为 Fork 时，扫描前同步其与上游
+_list_subdirs:     列出指定目录下的子目录名（过滤掉文件）
+_walk_files:       递归列出目录下全部文件（携带来源 blob sha，路径校验前置）
+_collect_dirs:     递归收集所有（子树内）包含文件的目录路径（不限制嵌套深度）
+_to_project:       目录路径按固定层级解析为项目描述
+_target_rel_path:  仓库级目录下相对路径 → 目标仓库内路径（按仓库规则改写）
 """
 
 import os
@@ -23,11 +24,44 @@ from translator_ci.common import (
 REPO_DEPTH_BY_ORG = {"Ascend": 4}
 DEFAULT_REPO_DEPTH = 3
 
+# 各目标仓库「仓库级目录下相对路径 → 仓库内目标路径」的改写规则
+# （按 org/repo 匹配，与版本无关）。未登记的仓库直连——源目录结构与
+# 目标仓库内容根结构一致（如 sip/hccl 的 docs/en/... 原样透传）。
+#   prepend:  目标路径前缀。CANN/docs 仓内容根为 docs/（按 docs/zh、
+#             docs/en 分语言），源目录缺该层，需补前缀。
+#   en_flat:  拍平首段 en/ 语言目录。CANN/release-management 仓只有
+#             master 分支（版本号是文件夹而非分支），无语言目录，英文
+#             以 <版本>/<文件>_en.md 与中文并存：剥离 en/ 并在扩展名前
+#             补 _en（文件名已带 _en 则不重复）；不在 en/ 下的原样透传。
+TARGET_PATH_RULES = {
+    "CANN/docs": {"prepend": "docs/"},
+    "CANN/release-management": {"en_flat": True},
+}
+
 
 def _repo_depth(path):
     """按路径所属组织返回仓库级目录段数。"""
     org = path.split("/", 1)[0]
     return REPO_DEPTH_BY_ORG.get(org, DEFAULT_REPO_DEPTH)
+
+
+def _target_rel_path(org, repo, rel):
+    """把仓库级目录下的来源相对路径改写为目标仓库内路径。
+
+    未登记 org/repo 的仓库直连（rel 原样返回）；登记的按
+    TARGET_PATH_RULES 改写（见规则表注释）。
+    """
+    rule = TARGET_PATH_RULES.get(f"{org}/{repo}", {})
+    path = rel
+    if rule.get("en_flat") and path.startswith("en/"):
+        path = path[len("en/"):]
+        stem, dot, ext = path.rpartition(".")
+        if dot and not stem.endswith("_en"):
+            path = f"{stem}_en.{ext}"
+    prefix = rule.get("prepend")
+    if prefix:
+        path = prefix + path
+    return path
 
 
 def sync_source(token, log=print, attempts=10, interval=2):

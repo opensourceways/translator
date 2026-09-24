@@ -444,9 +444,11 @@ class TestScanChanged:
     def test_cann_master_release_management_mapping(self):
         """CANN master 目录映射到 release-management 仓库的 master 分支。
 
-        release-management 仓库只有 master 分支：译稿放在
-        CANN/master/release-management 下，版本段 master 即目标分支；
-        仓库级目录后的完整相对路径（含 en/ 层级）原样作为目标路径。
+        release-management 仓库只有 master 分支（版本号是文件夹而非
+        分支）：译稿放在 CANN/master/release-management 下，版本段
+        master 即目标分支；en/ 语言目录拍平——目标路径剥离 en/，
+        文件名在扩展名前补 _en（已带 _en 则不重复），与目标仓
+        <版本>/<文件>_en.md 的中英并存约定对齐。
         """
         client_mock = _make_scan_client_mock()
         with _patch_scan_client(client_mock):
@@ -460,9 +462,9 @@ class TestScanChanged:
             assert entry["repo"] == "release-management"
             assert entry["branch"] == "master"
             assert entry["files"][0]["target_path"] == (
-                "en/9.1.1/release-notes_en.md")
-            # 全量源文件路径随 changed 条目带出，供提交阶段清理陈旧文件
-            assert entry["all_paths"] == ["en/9.1.1/release-notes_en.md"]
+                "9.1.1/release-notes_en.md")
+            # 全量目标路径随 changed 条目带出，供提交阶段清理陈旧文件
+            assert entry["all_paths"] == ["9.1.1/release-notes_en.md"]
             # 对比目标仓库时使用 master 分支
             compare_calls = client_mock.get_contents.call_args_list
             assert {c.args[3] for c in compare_calls} == {"master"}
@@ -1288,6 +1290,54 @@ def _incremental_mocks(changed_paths, error=None):
     return patches, fetch_mock, diff_mock
 
 
+class TestTargetRelPath:
+    """仓库级目录下相对路径 → 目标仓库内路径的改写规则。"""
+
+    def test_unregistered_repo_passthrough(self):
+        """未登记的仓库直连：相对路径原样作为目标路径（sip/hccl）。"""
+        assert index._target_rel_path(
+            "CANN", "sip", "docs/en/context/infra-faqs.md"
+        ) == "docs/en/context/infra-faqs.md"
+        assert index._target_rel_path(
+            "CANN", "hccl", "docs/en/api_ref/README.md"
+        ) == "docs/en/api_ref/README.md"
+        assert index._target_rel_path(
+            "Ascend", "msprof", "docs/en/a.md") == "docs/en/a.md"
+
+    def test_cann_docs_prepend_docs_prefix(self):
+        """CANN/docs 仓内容根为 docs/：目标路径补 docs/ 前缀。"""
+        assert index._target_rel_path(
+            "CANN", "docs",
+            "en/fusion-patterns/Graph_Fusion_Patterns/AABiasaddConvFusion.md"
+        ) == "docs/en/fusion-patterns/Graph_Fusion_Patterns/" \
+           "AABiasaddConvFusion.md"
+
+    def test_release_management_flattens_en_dir(self):
+        """release-management：剥离 en/，扩展名前补 _en（未带时）。"""
+        assert index._target_rel_path(
+            "CANN", "release-management",
+            "en/9.1.0/release-notes.md"
+        ) == "9.1.0/release-notes_en.md"
+
+    def test_release_management_no_double_suffix(self):
+        """release-management：文件名已带 _en 时不重复追加。"""
+        assert index._target_rel_path(
+            "CANN", "release-management",
+            "en/9.1.1/release-notes_en.md"
+        ) == "9.1.1/release-notes_en.md"
+
+    def test_release_management_keeps_multi_dot_name(self):
+        """release-management：多级扩展名只在最后一个扩展名前补 _en。"""
+        assert index._target_rel_path(
+            "CANN", "release-management", "en/9.1.0/a.b.md"
+        ) == "9.1.0/a.b_en.md"
+
+    def test_release_management_passthrough_outside_en(self):
+        """release-management：不在 en/ 下的文件原样透传（不覆盖中文）。"""
+        assert index._target_rel_path(
+            "CANN", "release-management", "README.md") == "README.md"
+
+
 class TestIndexLocalTree:
     """从本地 git 文件映射提取仓库级目录与文件。"""
 
@@ -1379,7 +1429,7 @@ class TestScanChangedLocalMode:
             "Ascend__mspti": {"test": "srcsha1"},
             "CANN__cann": {"README.md": "srcsha1"},
             "CANN__release-management": {
-                "en/9.1.1/release-notes_en.md": "srcsha1"},
+                "9.1.1/release-notes_en.md": "srcsha1"},
         }
         result, clone_mock, cat_blob_mock = self._run(client_mock, targets)
         assert result["changed"] == []
@@ -1439,7 +1489,7 @@ class TestScanChangedLocalMode:
             "Ascend__mspti": {"test": "tgt-other"},
             "CANN__cann": {"README.md": "tgt-other"},
             "CANN__release-management": {
-                "en/9.1.1/release-notes_en.md": "tgt-other"},
+                "9.1.1/release-notes_en.md": "tgt-other"},
         }
         result, clone_mock, cat_blob_mock = self._run(client_mock, targets)
         assert len(result["changed"]) == 5
@@ -1456,7 +1506,7 @@ class TestScanChangedLocalMode:
             "Ascend__mspti": {"test": "tgt-other"},  # 变更
             "CANN__cann": {"README.md": "srcsha1"},  # 未变更
             "CANN__release-management": {             # 未变更
-                "en/9.1.1/release-notes_en.md": "srcsha1"},
+                "9.1.1/release-notes_en.md": "srcsha1"},
         }
         result, clone_mock, cat_blob_mock = self._run(client_mock, targets)
         assert [c["repo"] for c in result["changed"]] == ["mspti"]
@@ -1496,7 +1546,7 @@ class TestScanChangedLocalMode:
             "Ascend__mspti": {"test": "tgt-other"},
             "CANN__cann": {"README.md": "tgt-other"},
             "CANN__release-management": {
-                "en/9.1.1/release-notes_en.md": "tgt-other"},
+                "9.1.1/release-notes_en.md": "tgt-other"},
         }
         patches, clone_mock, cat_blob_mock = _local_mode_mocks(
             self.LOCAL_SOURCE, targets)
@@ -1636,7 +1686,7 @@ class TestScanChangedIncremental:
             "Ascend__mspti": {"test": "srcsha1"},
             "CANN__cann": {"README.md": "srcsha1"},
             "CANN__release-management": {
-                "en/9.1.1/release-notes_en.md": "srcsha1"},
+                "9.1.1/release-notes_en.md": "srcsha1"},
         }
         result, *_ = self._run(
             client_mock, targets, changed_paths=set())
