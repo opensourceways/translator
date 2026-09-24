@@ -20,6 +20,11 @@ flowchart LR
 - **幂等提交**：同一仓库使用固定分支 `translator/auto-<目标分支>`；
   与分支现有内容相同的文件跳过写入（不产生空 commit）；目标仓库已存在
   同一 head/base 的未合并 PR 时不重复创建，新变更以新 commit 并入该 PR
+- **目标路径按仓改写**：个别目标仓库的内容根与源目录结构不同，按
+  `index.py` 中的 `TARGET_PATH_RULES` 改写（`CANN/docs` 补 `docs/` 前缀；
+  `CANN/release-management` 只有 master 分支、版本号是文件夹，拍平
+  `en/` 语言目录并在扩展名前补 `_en` 与中文并存）；未登记的仓库源路径
+  原样透传。对比、写入、清理均用改写后的路径，下载译稿仍用源路径
 - **Token 规则（权限管控）**：规则文件放在**译稿权威仓库**根目录
   `token_rules.json`，每次运行时读取；配置规则后只处理命中的仓库，
   未配置时全部使用默认 Token
