@@ -129,9 +129,13 @@ def _paginate(url, token, params, per_page=100):
 
     平台单页上限 100，列表可能超出单页；逐页取到空或不足一整页为止，
     避免列表被截断导致漏判（如分支不存在、open PR 去重失效）。
+    兜底：个别接口（如 PR files）忽略 page 参数，每页都返回同一份全量
+    ——返回条数超过 per_page、或与上一页首条相同即终止，否则会以
+    限流速率无限打请求（#80 卡死一小时无任何日志）。
     """
     items = []
     page = 1
+    prev_first = None
     while True:
         batch = _do_request("GET", url, token,
                             params={**params, "page": page,
@@ -140,6 +144,14 @@ def _paginate(url, token, params, per_page=100):
             raise GitCodeError(200, f"分页响应不是数组: {url}")
         if not batch:
             break
+        if len(batch) > per_page:
+            # 服务端忽略 per_page、一次性返回全量：该批即全集
+            return batch
+        first = batch[0]
+        if first == prev_first:
+            # page 参数被忽略，每页内容相同：避免重复计入与死循环
+            break
+        prev_first = first
         items.extend(batch)
         if len(batch) < per_page:
             break

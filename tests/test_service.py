@@ -1828,3 +1828,45 @@ class TestNetworkErrorRetry:
             client.create_pr("cann", "docs", "t", "u:br", "master", "b", "tok",
                              fork_path="u/docs")
         assert req_mock.call_args.kwargs["timeout"] == client.SLOW_TIMEOUT
+
+
+class TestPaginateBrokenPaging:
+    """GitCode 部分接口（PR files）忽略分页参数，每页都返回同一份全量，
+    _paginate 必须终止，否则以限流速率无限打请求（#80 卡死一小时）。"""
+
+    @staticmethod
+    def _file_entry(i):
+        return {"filename": f"docs/en/f{i}.md", "status": "added"}
+
+    def test_full_page_each_time_returns_batch_once(self):
+        """返回条数 > per_page：服务端一次性返回全量，直接返回该批。"""
+        full = [self._file_entry(i) for i in range(120)]
+        with patch("translator_ci.client._throttle"), \
+                patch("translator_ci.client.requests.request",
+                      side_effect=lambda *a, **k: _ok_response(full)) as req:
+            result = client._paginate("http://api/files", "tok", {})
+        assert len(result) == 120
+        assert req.call_count == 1
+
+    def test_same_first_item_each_page_stops_loop(self):
+        """返回条数 == per_page 但 page 参数被忽略（每页内容相同）：
+        第二页首条与第一页相同时终止，不重复计入。"""
+        same_page = [self._file_entry(i) for i in range(100)]
+        with patch("translator_ci.client._throttle"), \
+                patch("translator_ci.client.requests.request",
+                      side_effect=lambda *a, **k: _ok_response(same_page)) as req:
+            result = client._paginate("http://api/files", "tok", {})
+        assert len(result) == 100
+        assert req.call_count == 2
+
+    def test_normal_multi_page_pagination_still_works(self):
+        """常规分页不受影响：逐页取到不足一整页为止。
+        （平台单页上限 100，合法分页响应不会超过 per_page。）"""
+        pages = [[self._file_entry(i) for i in range(100)],
+                 [self._file_entry(i) for i in range(100, 140)]]
+        with patch("translator_ci.client._throttle"), \
+                patch("translator_ci.client.requests.request",
+                      side_effect=[_ok_response(p) for p in pages]) as req:
+            result = client._paginate("http://api/branches", "tok", {})
+        assert len(result) == 140
+        assert req.call_count == 2
