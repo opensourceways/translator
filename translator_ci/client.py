@@ -17,6 +17,8 @@ BASE_URL = "https://api.gitcode.com/api/v5"
 MAX_RETRIES = 4
 RETRY_DELAY = 5
 DEFAULT_TIMEOUT = 30          # 单次请求超时（秒），防止连接挂死
+SLOW_TIMEOUT = 120            # 慢操作超时（秒）：创建大 PR 时服务端需逐文件
+                              # 计算变更，文件量大时响应远超普通接口
 
 # 进程级限流：GitCode 单账号 50 次/分钟，而默认 Token 与规则 Token 属于
 # 同一账号，全部请求共享同一配额。把任意 60 秒窗口内的请求数压在上限
@@ -94,8 +96,19 @@ def _do_request(method, url, token, timeout=None, **kwargs):
     """
     for attempt in range(MAX_RETRIES):
         _throttle()
-        r = requests.request(method, url, headers=_headers(token),
-                             timeout=timeout or DEFAULT_TIMEOUT, **kwargs)
+        try:
+            r = requests.request(method, url, headers=_headers(token),
+                                 timeout=timeout or DEFAULT_TIMEOUT, **kwargs)
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError) as e:
+            # 网络层异常（读超时/断连）多为瞬时故障：等待后重试。写操作若
+            # 首次实际已在服务端成功，重试会收到 409，由上层按幂等口径
+            # 处理。重试耗尽仍失败时包装为 GitCodeError 抛出，让单仓
+            # 失败不中断整个批次（此前裸 requests 异常会直接炸掉全程）。
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY * (2 ** attempt))
+                continue
+            raise GitCodeError(0, f"网络错误（已重试 {MAX_RETRIES} 次）: {e}") from e
         if (r.status_code == 429 or
                 (method == "GET" and 500 <= r.status_code < 600)) \
                 and attempt < MAX_RETRIES - 1:
@@ -329,7 +342,7 @@ def create_pr(owner, repo, title, head, base, body, token, fork_path=None):
     if fork_path:
         payload["fork_path"] = fork_path
     return _do_request("POST", f"{BASE_URL}/repos/{owner}/{repo}/pulls", token,
-                       json=payload)
+                       timeout=SLOW_TIMEOUT, json=payload)
 
 
 def _extract_error(r):

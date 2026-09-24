@@ -13,8 +13,9 @@ from contextlib import ExitStack, contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
-from translator_ci import common, index, rules, scan, submit
+from translator_ci import client, common, index, rules, scan, submit
 from translator_ci.client import GitCodeError
 
 SILENT = lambda msg: None  # 测试中静默日志
@@ -1782,3 +1783,48 @@ class TestLoadWhitelistLocal:
             with pytest.raises(common.ConfigError):
                 rules.load_whitelist("tok", log=SILENT,
                                      source_repo_dir="/src")
+
+
+def _ok_response(payload=None):
+    """构造一个 200 响应的 MagicMock（_do_request 返回 r.json()）。"""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.ok = True
+    resp.json.return_value = payload or {}
+    return resp
+
+
+class TestNetworkErrorRetry:
+    """网络层异常（读超时/断连）在 _do_request 内重试，耗尽后包装为
+    GitCodeError（status_code=0），让单仓失败不中断整个批次。"""
+
+    def test_retry_then_success(self):
+        ok = _ok_response({"id": 1})
+        with patch("translator_ci.client._throttle"), \
+                patch("translator_ci.client.time.sleep") as sleep_mock, \
+                patch("translator_ci.client.requests.request",
+                      side_effect=[requests.exceptions.ReadTimeout("t"), ok]) \
+                as req_mock:
+            result = client._do_request("POST", "http://api/pulls", "tok")
+        assert result == {"id": 1}
+        assert req_mock.call_count == 2
+        sleep_mock.assert_called_once()
+
+    def test_retry_exhausted_raises_gitcode_error(self):
+        with patch("translator_ci.client._throttle"), \
+                patch("translator_ci.client.time.sleep"), \
+                patch("translator_ci.client.requests.request",
+                      side_effect=requests.exceptions.ConnectionError("down")):
+            with pytest.raises(GitCodeError) as ei:
+                client._do_request("POST", "http://api/pulls", "tok")
+        assert "网络错误" in str(ei.value)
+
+    def test_create_pr_uses_slow_timeout(self):
+        """创建 PR 属慢操作（服务端逐文件计算大 PR 变更），用 SLOW_TIMEOUT。"""
+        ok = _ok_response({"number": 1})
+        with patch("translator_ci.client._throttle"), \
+                patch("translator_ci.client.requests.request",
+                      return_value=ok) as req_mock:
+            client.create_pr("cann", "docs", "t", "u:br", "master", "b", "tok",
+                             fork_path="u/docs")
+        assert req_mock.call_args.kwargs["timeout"] == client.SLOW_TIMEOUT
