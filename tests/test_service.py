@@ -9,13 +9,16 @@
 import base64
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 from contextlib import ExitStack, contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
-from translator_ci import client, common, index, rules, scan, submit
+from translator_ci import client, common, index, localgit, rules, scan, submit
 from translator_ci.client import GitCodeError
 
 SILENT = lambda msg: None  # 测试中静默日志
@@ -464,8 +467,6 @@ class TestScanChanged:
             assert entry["branch"] == "master"
             assert entry["files"][0]["target_path"] == (
                 "9.1.1/release-notes_en.md")
-            # 全量目标路径随 changed 条目带出，供提交阶段清理陈旧文件
-            assert entry["all_paths"] == ["9.1.1/release-notes_en.md"]
             # 对比目标仓库时使用 master 分支
             compare_calls = client_mock.get_contents.call_args_list
             assert {c.args[3] for c in compare_calls} == {"master"}
@@ -721,8 +722,7 @@ def _make_files():
 def _make_submit_client_mock():
     """构造走通整个 submit_repo 流程的 mock 客户端。
 
-    已有 Fork；目标分支 26.1.0 存在（sha abc123）；Fork 上无固定分支；
-    目标路径无同名文件；无已开 PR。
+    已有 Fork；目标分支 26.1.0 存在（sha abc123）；无已开 PR。
     """
     client_mock = MagicMock()
     client_mock.GitCodeError = GitCodeError
@@ -739,18 +739,28 @@ def _make_submit_client_mock():
     client_mock.list_branches.side_effect = list_branches
     client_mock.sync_repo.return_value = {}
     client_mock.get_sync_status.return_value = {"repo_sync_result": True}
-    client_mock.get_contents.return_value = None
-    client_mock.create_file.return_value = {}
     client_mock.list_pull_requests.return_value = []
     client_mock.create_pr.return_value = {"number": 1, "html_url": "http://x/1"}
     return client_mock
 
 
+def _make_localgit_mock(pushed=True, written=None):
+    """构造 localgit mock：rebuild_branch 默认推送单 commit 并写入一个文件。"""
+    localgit_mock = MagicMock()
+    localgit_mock.rebuild_branch.return_value = {
+        "pushed": pushed,
+        "written": (written if written is not None
+                    else [{"path": "docs/en/test", "action": "create"}]),
+        "reason": "重建完成" if pushed else "远端已是最新单 commit",
+    }
+    return localgit_mock
+
+
 class TestSubmitRepo:
-    """幂等提交：固定分支复用、相同内容跳过、open PR 去重。"""
+    """幂等提交：单 commit 重建、内容未变跳过、open PR 去重。"""
 
     def test_binary_gif_flows_through_submit(self):
-        """图片/GIF 全流程适配：扫描按字节下载、提交按 base64 写入不解码。"""
+        """图片/GIF 全流程适配：扫描按字节下载、提交原样传给重建（不解码）。"""
         gif = b"GIF89a\x01\x00\x02\x00\xf7\x00\x80\x00\x00\xff\xff\xff\x00"
         # 扫描：源/目标 sha 不同 → 按字节下载 GIF，content_b64 为原始字节
         scan_client = _make_sha_scan_client_mock(entry_sha="aaa", target_sha="bbb")
@@ -761,30 +771,35 @@ class TestSubmitRepo:
         gif_entry = scanned["changed"][0]["files"][0]
         assert base64.b64decode(gif_entry["content_b64"]) == gif
 
-        # 提交：目标已有同名文件 → 走 update_file，写回同样的 GIF 字节
+        # 提交：files 原样传给 rebuild_branch（base64 字节流不解码不重编码）
         submit_client = _make_submit_client_mock()
-        submit_client.get_contents.return_value = {"sha": "targetsha"}
-        with patch("translator_ci.submit.client", submit_client):
+        localgit_mock = _make_localgit_mock()
+        with patch("translator_ci.submit.client", submit_client), \
+                patch("translator_ci.submit.localgit", localgit_mock):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", [gif_entry], "tok", log=SILENT)
         assert result["ok"] is True
-        assert submit_client.create_file.call_count == 0
-        update_kwargs = submit_client.update_file.call_args
-        assert base64.b64decode(update_kwargs.args[4]) == gif
-        assert update_kwargs.args[5] == "targetsha"
+        rb_args = localgit_mock.rebuild_branch.call_args.args
+        assert rb_args[5] is gif_entry or \
+            base64.b64decode(rb_args[5][0]["content_b64"]) == gif
 
-    def test_success_creates_fixed_branch_and_pr(self):
+    def test_success_rebuilds_branch_and_creates_pr(self):
         client_mock = _make_submit_client_mock()
-        with patch("translator_ci.submit.client", client_mock):
+        localgit_mock = _make_localgit_mock()
+        with patch("translator_ci.submit.client", client_mock), \
+                patch("translator_ci.submit.localgit", localgit_mock):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
             assert result["pr_existed"] is False
             assert result["pr_url"] == "http://x/1"
-            # 固定分支名，refs 优先用上游分支的 commit sha
-            client_mock.create_branch.assert_called_once_with(
-                "bot", "MindStudio-Profiler",
-                "translator/auto-26.1.0", "abc123", "tok")
+            # 重建固定分支：以目标分支为基点，files 原样传入
+            rb_args = localgit_mock.rebuild_branch.call_args.args
+            assert rb_args[0] == "bot"  # Fork owner
+            assert rb_args[1] == "MindStudio-Profiler"  # Fork 仓库名
+            assert rb_args[3] == "26.1.0"  # 基点 = 目标分支
+            assert rb_args[4] == "translator/auto-26.1.0"  # 固定分支
+            assert rb_args[5] == _make_files()
             # 跨仓 PR 带 fork_path，head 为 用户:固定分支
             pr_kwargs = client_mock.create_pr.call_args
             assert pr_kwargs.args[3] == "bot:translator/auto-26.1.0"
@@ -792,185 +807,62 @@ class TestSubmitRepo:
             assert pr_kwargs.kwargs["fork_path"] == "bot/MindStudio-Profiler"
             assert "Jenkins" in pr_kwargs.args[5]
 
-    def test_existing_fixed_branch_reused(self):
-        """Fork 上已存在固定分支时不再创建。"""
+    def test_legacy_history_rewrite_reported_as_push(self):
+        """存量碎 commit 分支的历史压缩：rebuild 返回 pushed=True、written 空，
+        且已有 open PR 时只并入既有 PR（PR diff 自动变为单 commit）。"""
         client_mock = _make_submit_client_mock()
-
-        def list_branches(owner, repo, token):
-            if owner == "Ascend":
-                return [{"name": "26.1.0", "commit": {"sha": "abc123"}}]
-            return [{"name": "translator/auto-26.1.0"}]
-
-        client_mock.list_branches.side_effect = list_branches
-        with patch("translator_ci.submit.client", client_mock):
+        # 重建只压缩了历史（written 为空）但已强推
+        localgit_mock = _make_localgit_mock(pushed=True, written=[])
+        client_mock.list_pull_requests.return_value = [{
+            "number": 42, "html_url": "http://x/42",
+            "head": {"label": "bot:translator/auto-26.1.0"},
+            "base": {"ref": "26.1.0"},
+        }]
+        with patch("translator_ci.submit.client", client_mock), \
+                patch("translator_ci.submit.localgit", localgit_mock):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
-            client_mock.create_branch.assert_not_called()
-
-    def _reused_branch_client_mock(self):
-        """构造「复用固定分支」场景的 mock：Fork 分支带 commit sha。"""
-        client_mock = _make_submit_client_mock()
-
-        def list_branches(owner, repo, token):
-            if owner == "Ascend":
-                return [{"name": "26.1.0", "commit": {"sha": "abc123"}}]
-            return [{"name": "translator/auto-26.1.0",
-                     "commit": {"sha": "deadbee"}}]
-
-        client_mock.list_branches.side_effect = list_branches
-        return client_mock
-
-    def test_reused_branch_cleans_stale_files(self):
-        """复用分支时删除源目录中已消失的陈旧文件（改名/搬家残留）。
-
-        清理规则「该分支已开 PR 的 added 文件 − 当前源文件全集」：
-        仍有效的译稿（docs/en/test）不动，只删 en/old.md。
-        """
-        client_mock = self._reused_branch_client_mock()
-        # 已有 open PR：删除以新 commit 并入既有 PR
-        client_mock.list_pull_requests.return_value = [{
-            "number": 42, "html_url": "http://x/42",
-            "head": {"label": "bot:translator/auto-26.1.0"},
-            "base": {"ref": "26.1.0"},
-        }]
-        # PR diff：当前译稿 + 陈旧残留均为 added
-        client_mock.list_pr_files.return_value = [
-            {"filename": "docs/en/test", "status": "added"},
-            {"filename": "en/old.md", "status": "added"},
-            {"filename": "9.0.0/release-notes.md", "status": "changed"},
-        ]
-
-        def get_contents(owner, repo, path, ref, token):
-            if path == "en/old.md":
-                return {"sha": "oldsha"}
-            return {"sha": common._git_blob_sha(b"content")}  # 译稿内容未变
-
-        client_mock.get_contents.side_effect = get_contents
-        with patch("translator_ci.submit.client", client_mock):
-            result = submit.submit_repo(
-                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT,
-                all_paths=["docs/en/test"])
-            assert result["ok"] is True
             assert result["pr_existed"] is True
-            assert result["deleted"] == ["en/old.md"]
-            # 仅删除陈旧文件，删除后 sha 以查询结果为准
-            client_mock.delete_file.assert_called_once()
-            call = client_mock.delete_file.call_args
-            assert call.args[2] == "en/old.md"
-            assert call.args[4] == "oldsha"
-            assert "移除" in call.args[3]
-            # 当前译稿内容未变：不写不建
-            client_mock.create_file.assert_not_called()
-            client_mock.update_file.assert_not_called()
             client_mock.create_pr.assert_not_called()
 
-    def test_new_branch_skips_cleanup(self):
-        """新建分支等于上游快照，即使提供 all_paths 也不做清理。"""
+    def test_legacy_history_rewrite_without_pr_is_noop(self):
+        """历史压缩后无已开 PR：没有可展示的 diff，不创建空 PR。"""
         client_mock = _make_submit_client_mock()
-        with patch("translator_ci.submit.client", client_mock):
-            result = submit.submit_repo(
-                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT,
-                all_paths=["docs/en/test"])
-            assert result["ok"] is True
-            client_mock.list_pr_files.assert_not_called()
-            client_mock.delete_file.assert_not_called()
-
-    def test_no_all_paths_skips_cleanup(self):
-        """未提供全量清单（旧调用方式）时不做清理，保持向后兼容。"""
-        client_mock = self._reused_branch_client_mock()
-        with patch("translator_ci.submit.client", client_mock):
+        localgit_mock = _make_localgit_mock(pushed=True, written=[])
+        with patch("translator_ci.submit.client", client_mock), \
+                patch("translator_ci.submit.localgit", localgit_mock):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
-            client_mock.list_pr_files.assert_not_called()
-            client_mock.delete_file.assert_not_called()
-
-    def test_cleanup_no_open_pr_skipped(self):
-        """复用分支但无已开 PR 时跳过清理（差集无从计算，宁可不删）。"""
-        client_mock = self._reused_branch_client_mock()
-        client_mock.list_pull_requests.return_value = []
-        with patch("translator_ci.submit.client", client_mock):
-            result = submit.submit_repo(
-                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT,
-                all_paths=["docs/en/test"])
-            assert result["ok"] is True
-            client_mock.list_pr_files.assert_not_called()
-            client_mock.delete_file.assert_not_called()
-
-    def test_cleanup_pr_files_failure_non_fatal(self):
-        """PR diff 查询失败时跳过清理，不阻断正常写入与建 PR。"""
-        client_mock = self._reused_branch_client_mock()
-        client_mock.list_pull_requests.return_value = [{
-            "number": 42, "html_url": "http://x/42",
-            "head": {"label": "bot:translator/auto-26.1.0"},
-            "base": {"ref": "26.1.0"},
-        }]
-        client_mock.list_pr_files.side_effect = GitCodeError(500, "boom")
-        with patch("translator_ci.submit.client", client_mock):
-            result = submit.submit_repo(
-                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT,
-                all_paths=["docs/en/test"])
-            assert result["ok"] is True
-            client_mock.delete_file.assert_not_called()
-            client_mock.create_file.assert_called_once()
-
-    def test_deletion_only_merges_into_existing_pr(self):
-        """仅有清理、无写入（内容均未变）时删除仍并入既有 PR。"""
-        client_mock = self._reused_branch_client_mock()
-        client_mock.list_pull_requests.return_value = [{
-            "number": 42, "html_url": "http://x/42",
-            "head": {"label": "bot:translator/auto-26.1.0"},
-            "base": {"ref": "26.1.0"},
-        }]
-        client_mock.list_pr_files.return_value = [
-            {"filename": "en/old.md", "status": "added"},
-        ]
-
-        def get_contents(owner, repo, path, ref, token):
-            if path == "en/old.md":
-                return {"sha": "oldsha"}
-            return {"sha": common._git_blob_sha(b"content")}
-
-        client_mock.get_contents.side_effect = get_contents
-        with patch("translator_ci.submit.client", client_mock):
-            result = submit.submit_repo(
-                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT,
-                all_paths=["docs/en/test"])
-            assert result["ok"] is True
-            assert result["pr_existed"] is True
-            assert result["deleted"] == ["en/old.md"]
+            assert result.get("noop") is True
             client_mock.create_pr.assert_not_called()
 
-    def test_pr_title_body_with_deletion(self):
-        """PR 标题/描述按新增/更新/移除分组。"""
+    def test_pr_title_body_groups_create_update(self):
+        """PR 标题/描述按新增/更新分组。"""
         title, body = submit._make_pr_title_body([
             {"path": "a.md", "action": "create"},
             {"path": "b.md", "action": "update"},
-            {"path": "en/old.md", "action": "delete"},
         ])
-        assert title == "新增 1 份，更新 1 份，移除 1 份 英文版文档"
+        assert title == "新增 1 份，更新 1 份 英文版文档"
         assert "## 新增" in body and "## 更新" in body
-        assert "## 移除（源目录已不存在）" in body
-        assert "`en/old.md`" in body
+        assert "`a.md`" in body and "`b.md`" in body
 
         title, _ = submit._make_pr_title_body(
-            [{"path": "en/old.md", "action": "delete"}])
-        assert title == "移除 old.md 英文版文档"
+            [{"path": "b.md", "action": "update"}])
+        assert title == "更新 b.md 英文版文档"
 
-    def test_identical_content_skipped_no_empty_commit(self):
-        """分支现有文件内容相同则跳过写入（blob sha 比对）。"""
+    def test_identical_content_skipped_no_push(self):
+        """分支内容已是最新（rebuild 未推送）且无 PR：纯幂等空转。"""
         client_mock = _make_submit_client_mock()
-        client_mock.get_contents.return_value = {
-            "sha": common._git_blob_sha(b"content"),
-        }
-        with patch("translator_ci.submit.client", client_mock):
+        localgit_mock = _make_localgit_mock(pushed=False, written=[])
+        with patch("translator_ci.submit.client", client_mock), \
+                patch("translator_ci.submit.localgit", localgit_mock):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
-            client_mock.update_file.assert_not_called()
-            client_mock.create_file.assert_not_called()
-            assert result["unchanged"] == ["docs/en/test"]
+            assert result.get("noop") is True
+            client_mock.create_pr.assert_not_called()
 
     def test_open_pr_dedup(self):
         """已存在同一 head/base 的 open PR 时不重复创建，返回已有 PR。"""
@@ -983,7 +875,8 @@ class TestSubmitRepo:
                      "ref": "translator/auto-26.1.0"},
             "base": {"ref": "26.1.0"},
         }]
-        with patch("translator_ci.submit.client", client_mock):
+        with patch("translator_ci.submit.client", client_mock), \
+                patch("translator_ci.submit.localgit", _make_localgit_mock()):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
@@ -1005,31 +898,29 @@ class TestSubmitRepo:
             "head": {"label": "bot:translator/auto-master"},
             "base": {"ref": "master"},
         }]
-        with patch("translator_ci.submit.client", client_mock):
+        with patch("translator_ci.submit.client", client_mock), \
+                patch("translator_ci.submit.localgit", _make_localgit_mock()):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["pr_existed"] is False
             client_mock.create_pr.assert_called_once()
 
     def test_identical_content_with_open_pr_is_noop(self):
-        """内容未变且已有 open PR：不写文件、不建 PR，纯幂等空转。"""
+        """内容未变（rebuild 未推送）且已有 open PR：不建 PR，纯幂等空转。"""
         client_mock = _make_submit_client_mock()
-        client_mock.get_contents.return_value = {
-            "sha": common._git_blob_sha(b"content"),
-        }
         client_mock.list_pull_requests.return_value = [{
             "number": 42,
             "html_url": "http://x/42",
             "head": {"label": "bot:translator/auto-26.1.0"},
             "base": {"ref": "26.1.0"},
         }]
-        with patch("translator_ci.submit.client", client_mock):
+        with patch("translator_ci.submit.client", client_mock), \
+                patch("translator_ci.submit.localgit",
+                      _make_localgit_mock(pushed=False, written=[])):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
             assert result["pr_existed"] is True
-            client_mock.create_file.assert_not_called()
-            client_mock.update_file.assert_not_called()
             client_mock.create_pr.assert_not_called()
 
     def test_create_pr_409_treated_as_existing(self):
@@ -1038,7 +929,8 @@ class TestSubmitRepo:
         client_mock.create_pr.side_effect = GitCodeError(
             409, '{"error_code":409,"error_message":"Another open merge '
                  'request already exists for this source branch: !443"}')
-        with patch("translator_ci.submit.client", client_mock):
+        with patch("translator_ci.submit.client", client_mock), \
+                patch("translator_ci.submit.localgit", _make_localgit_mock()):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
@@ -1052,32 +944,21 @@ class TestSubmitRepo:
         client_mock.list_branches.side_effect = (
             lambda owner, repo, token: [{"name": "master"}]
         )
-        with patch("translator_ci.submit.client", client_mock):
+        with patch("translator_ci.submit.client", client_mock), \
+                patch("translator_ci.submit.localgit", _make_localgit_mock()):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is False
             assert result["stage"] == "check_branch"
 
-    def test_create_branch_sha_404_falls_back_to_name(self):
-        """上游 sha 在 Fork 上 404 时退化为分支名建分支。"""
+    def test_rebuild_failure_no_pr(self):
+        """分支重建失败（如 Fork 缺目标分支/推送失败）时不创建 PR。"""
         client_mock = _make_submit_client_mock()
-        client_mock.create_branch.side_effect = [
-            GitCodeError(404, "not found"),
-            {},
-        ]
-        with patch("translator_ci.submit.client", client_mock):
-            result = submit.submit_repo(
-                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
-            assert result["ok"] is True
-            calls = client_mock.create_branch.call_args_list
-            assert calls[0].args[3] == "abc123"
-            assert calls[1].args[3] == "26.1.0"
-
-    def test_all_files_fail_no_pr(self):
-        """所有文件写入失败时不创建 PR。"""
-        client_mock = _make_submit_client_mock()
-        client_mock.get_contents.side_effect = GitCodeError(500, "boom")
-        with patch("translator_ci.submit.client", client_mock):
+        localgit_mock = _make_localgit_mock()
+        localgit_mock.rebuild_branch.side_effect = GitCodeError(
+            200, "git checkout -B 失败: 分支不存在")
+        with patch("translator_ci.submit.client", client_mock), \
+                patch("translator_ci.submit.localgit", localgit_mock):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is False
@@ -1087,7 +968,8 @@ class TestSubmitRepo:
     def test_get_user_failure(self):
         client_mock = _make_submit_client_mock()
         client_mock.get_user.side_effect = GitCodeError(401, "Unauthorized")
-        with patch("translator_ci.submit.client", client_mock):
+        with patch("translator_ci.submit.client", client_mock), \
+                patch("translator_ci.submit.localgit", _make_localgit_mock()):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is False
@@ -1103,7 +985,8 @@ class TestSubmitRepo:
         # 全量同步后目标分支立即出现在 Fork 上（免于轮询等待）
         client_mock.list_branches.side_effect = lambda owner, repo, token: [
             {"name": "26.1.0", "commit": {"sha": "abc123"}}]
-        with patch("translator_ci.submit.client", client_mock):
+        with patch("translator_ci.submit.client", client_mock), \
+                patch("translator_ci.submit.localgit", _make_localgit_mock()):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
@@ -1112,7 +995,7 @@ class TestSubmitRepo:
             assert second.kwargs == {}
 
     def test_full_sync_waits_for_branch_to_appear(self):
-        """全量同步是异步的：轮询 Fork 分支列表，等目标分支出现再建分支。"""
+        """全量同步是异步的：轮询 Fork 分支列表，等目标分支出现再重建。"""
         client_mock = _make_submit_client_mock()
         client_mock.sync_repo.side_effect = [
             GitCodeError(400, "26.1.0 branch or tag not found"),
@@ -1129,6 +1012,7 @@ class TestSubmitRepo:
 
         client_mock.list_branches.side_effect = list_branches
         with patch("translator_ci.submit.client", client_mock), \
+                patch("translator_ci.submit.localgit", _make_localgit_mock()), \
                 patch("translator_ci.submit.time.sleep") as sleep_mock:
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
@@ -1136,6 +1020,177 @@ class TestSubmitRepo:
             # 等到了分支才继续（睡了 2 次），且没再查同步状态接口
             assert sleep_mock.call_count == 2
             client_mock.get_sync_status.assert_not_called()
+
+
+class TestRebuildBranch:
+    """rebuild_branch 真实 git 离线测试：本地 bare 仓库模拟 Fork，不触网。
+
+    覆盖：首建单 commit、幂等跳过、更新强推、存量碎 commit 强制压缩、
+    二进制字节精确提交。
+    """
+
+    HEAD = "translator/auto-master"
+
+    def _git(self, *args, cwd=None):
+        subprocess.run(["git", *args], cwd=cwd, check=True,
+                        capture_output=True)
+
+    @pytest.fixture()
+    def fork_bare(self, tmp_path):
+        """创建 bare「Fork」：master 分支带一个基础文件。"""
+        seed = tmp_path / "seed"
+        seed.mkdir()
+        self._git("init", "-b", "master", cwd=str(seed))
+        (seed / "README.md").write_bytes(b"hello\n")
+        self._git("add", "-A", cwd=str(seed))
+        self._git("-C", str(seed), "-c", "user.name=t", "-c",
+                  "user.email=t@t", "commit", "-m", "base init")
+        bare = tmp_path / "fork.git"
+        self._git("clone", "--bare", str(seed), str(bare))
+        return bare
+
+    def _pr_commit_count(self, bare):
+        """PR 范围（master..固定分支）的 commit 数，即 PR 实际包含的 commit 数。"""
+        out = subprocess.run(
+            ["git", "-C", str(bare), "rev-list", "--count",
+             f"master..{self.HEAD}"], capture_output=True, text=True)
+        return int(out.stdout.strip())
+
+    def _rebuild(self, bare, spec):
+        """对本地 bare 仓库执行 rebuild_branch，返回 (结果, 克隆目录)。"""
+        dest = os.path.join(tempfile.gettempdir(),
+                            f"rebuild-test-{id(spec)}-{os.getpid()}")
+        with patch.object(localgit, "_auth_url", lambda *a: str(bare)):
+            result = localgit.rebuild_branch(
+                "u", "r", "tok", "master", self.HEAD,
+                [{"target_path": p,
+                  "content_b64": base64.b64encode(c).decode()}
+                 for p, c in spec.items()],
+                dest, log=SILENT)
+        return result, dest
+
+    def _cleanup(self, dest):
+        shutil.rmtree(dest, ignore_errors=True)
+
+    def test_first_rebuild_single_commit(self, fork_bare):
+        """首次重建：全部写入合并为单个 commit。"""
+        spec = {"a.md": b"A", "d/b.md": b"B"}
+        result, dest = self._rebuild(fork_bare, spec)
+        try:
+            assert result["pushed"] is True
+            acts = {w["path"]: w["action"] for w in result["written"]}
+            assert acts == {"a.md": "create", "d/b.md": "create"}
+            assert self._pr_commit_count(fork_bare) == 1
+        finally:
+            self._cleanup(dest)
+
+    def test_unchanged_rerun_skips_push(self, fork_bare):
+        """重复运行内容不变：不推送（远端已是本工具单 commit）。"""
+        spec = {"a.md": b"A"}
+        _, dest = self._rebuild(fork_bare, spec)
+        self._cleanup(dest)
+        result, dest = self._rebuild(fork_bare, spec)
+        try:
+            assert result["pushed"] is False
+            assert self._pr_commit_count(fork_bare) == 1
+        finally:
+            self._cleanup(dest)
+
+    def test_update_still_single_commit(self, fork_bare):
+        """译稿更新：强推后 PR 范围仍单 commit，动作相对目标分支基点。"""
+        result, dest = self._rebuild(fork_bare, {"a.md": b"A"})
+        self._cleanup(dest)
+        result, dest = self._rebuild(fork_bare, {"a.md": b"A2"})
+        try:
+            assert result["pushed"] is True
+            # 基点（master）上没有 a.md → PR 语义为新增
+            acts = {w["path"]: w["action"] for w in result["written"]}
+            assert acts == {"a.md": "create"}
+            assert self._pr_commit_count(fork_bare) == 1
+        finally:
+            self._cleanup(dest)
+
+    def test_legacy_fragmented_history_compacted(self, fork_bare):
+        """存量碎 commit 分支：树相同时仍强推，把 PR 历史压缩为单 commit。"""
+        result, dest = self._rebuild(fork_bare, {"a.md": b"A"})
+        self._cleanup(dest)
+        # 手工在固定分支上追加 5 个碎 commit（模拟旧实现逐文件写入）
+        work = tempfile.mkdtemp(prefix="legacy-")
+        try:
+            self._git("clone", str(fork_bare), work)
+            self._git("checkout", self.HEAD, cwd=work)
+            for i in range(5):
+                with open(os.path.join(work, "a.md"), "ab") as fh:
+                    fh.write(b"x")
+                self._git("add", "-A", cwd=work)
+                self._git("-C", work, "-c", "user.name=t", "-c",
+                          "user.email=t@t", "commit",
+                          "-m", f"新增 f{i}.md 英文版文档")
+            self._git("push", cwd=work)
+            assert self._pr_commit_count(fork_bare) == 6
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        # 重建回正确内容：树与碎 commit 版不同 → 强推压缩
+        result, dest = self._rebuild(fork_bare, {"a.md": b"A"})
+        try:
+            assert result["pushed"] is True
+            assert self._pr_commit_count(fork_bare) == 1
+        finally:
+            self._cleanup(dest)
+        # 再次运行：树相同且已是本工具单 commit → 幂等跳过
+        result, dest = self._rebuild(fork_bare, {"a.md": b"A"})
+        try:
+            assert result["pushed"] is False
+        finally:
+            self._cleanup(dest)
+
+    def test_legacy_same_tree_still_compacted(self, fork_bare):
+        """树与期望一致但历史是旧碎 commit：仍强推压缩（空 commit 重建历史）。"""
+        result, dest = self._rebuild(fork_bare, {"a.md": b"A"})
+        self._cleanup(dest)
+        # 手工追加碎 commit 后把内容改回期望值：树相同、历史多 commit
+        work = tempfile.mkdtemp(prefix="legacy2-")
+        try:
+            self._git("clone", str(fork_bare), work)
+            self._git("checkout", self.HEAD, cwd=work)
+            for i in range(3):
+                with open(os.path.join(work, f"f{i}.md"), "wb") as fh:
+                    fh.write(b"x")
+                self._git("add", "-A", cwd=work)
+                self._git("-C", work, "-c", "user.name=t", "-c",
+                          "user.email=t@t", "commit",
+                          "-m", f"新增 f{i}.md 英文版文档")
+            # 撤销碎文件：树回到与期望一致，但 HEAD 是旧格式 message
+            for i in range(3):
+                os.remove(os.path.join(work, f"f{i}.md"))
+            self._git("add", "-A", cwd=work)
+            self._git("-C", work, "-c", "user.name=t", "-c",
+                      "user.email=t@t", "commit", "-m", "新增 back.md 英文版文档")
+            self._git("push", cwd=work)
+            assert self._pr_commit_count(fork_bare) == 5
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        # 树与远端相同但历史非本工具单 commit → 仍强推压缩
+        #（written 相对目标分支基点，故 a.md 仍计为新增）
+        result, dest = self._rebuild(fork_bare, {"a.md": b"A"})
+        try:
+            assert result["pushed"] is True
+            assert self._pr_commit_count(fork_bare) == 1
+        finally:
+            self._cleanup(dest)
+
+    def test_binary_bytes_exact(self, fork_bare):
+        """二进制/CRLF 文件按原始字节提交，不被行尾规范化改写。"""
+        gif = b"GIF89a\x01\x00\xf7\r\n"
+        result, dest = self._rebuild(fork_bare, {"a.md": b"A", "g.gif": gif})
+        try:
+            assert result["pushed"] is True
+            out = subprocess.run(
+                ["git", "-C", str(fork_bare), "show", f"{self.HEAD}:g.gif"],
+                capture_output=True)
+            assert out.stdout == gif
+        finally:
+            self._cleanup(dest)
 
 
 class TestListTree:

@@ -306,10 +306,8 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
     Returns:
         dict with:
         - ok: bool
-        - changed: [{project, org, repo, branch, files, all_paths,
-                     new_count, update_count}]（仅 ok=True；
-                     all_paths 为该仓库全部译稿的目标路径，
-                     供提交阶段清理陈旧文件使用）
+        - changed: [{project, org, repo, branch, files,
+                     new_count, update_count}]（仅 ok=True）
         - unchanged: [无变更的仓库路径...]
         - skipped: [{path, reason}]
         - errors: [{path, error}]
@@ -436,7 +434,6 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
                 "repo": project["project"],
                 "branch": project["version"],
                 "files": cmp_result["files"],
-                "all_paths": [f["target_path"] for f in fetched["files"]],
                 "new_count": cmp_result["new_count"],
                 "update_count": cmp_result["update_count"],
             })

@@ -165,15 +165,9 @@ def list_branches(owner, repo, token, per_page=100):
                      {}, per_page=per_page)
 
 
-def create_branch(owner, repo, branch_name, refs, token):
-    """在指定 ref（分支名或 commit SHA）上创建新分支。"""
-    return _do_request("POST", f"{BASE_URL}/repos/{owner}/{repo}/branches", token,
-                       json={"refs": refs, "branch_name": branch_name})
-
-
 def get_contents(owner, repo, path, ref, token):
-    """查询指定路径上文件是否存在，存在则返回文件元信息（含 sha），
-    供后续 update_file 使用；返回 None 表示文件不存在（404）。"""
+    """查询指定路径上文件是否存在，存在则返回文件元信息（含 sha）；
+    返回 None 表示文件不存在（404）。"""
     try:
         return _do_request("GET",
                            f"{BASE_URL}/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
@@ -222,48 +216,12 @@ def get_file_text(owner, repo, path, ref, token):
     return get_file_bytes(owner, repo, path, ref, token).decode("utf-8")
 
 
-def create_file(owner, repo, path, message, content_b64, branch, token):
-    """在指定分支上创建新文件，content 需为 base64 编码。"""
-    return _do_request("POST",
-                       f"{BASE_URL}/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
-                       token, json={
-                           "message": message,
-                           "content": content_b64,
-                           "branch": branch,
-                       })
-
-
-def update_file(owner, repo, path, message, content_b64, sha, branch, token):
-    """更新已有文件，需提供当前文件的 sha 以防止并发覆盖。"""
-    return _do_request("PUT",
-                       f"{BASE_URL}/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
-                       token, json={
-                           "message": message,
-                           "content": content_b64,
-                           "sha": sha,
-                           "branch": branch,
-                       })
-
-
-def delete_file(owner, repo, path, message, sha, branch, token):
-    """删除指定分支上的文件，需提供当前文件的 sha 以防并发误删。"""
-    return _do_request("DELETE",
-                       f"{BASE_URL}/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
-                       token, json={
-                           "message": message,
-                           "sha": sha,
-                           "branch": branch,
-                       })
-
-
 def list_tree(owner, repo, ref, token):
     """递归列出仓库指定 ref 下全部文件路径。
 
     .. deprecated::
         逐目录 contents 遍历目录数多时需上百次请求，触发限流后
-        单仓清点可达 20 分钟（构建 #61 实测）。陈旧文件清理已改用
-        list_pr_files 的 PR diff 差集；本函数保留给无 PR 场景的
-        低频诊断使用。
+        单仓清点可达 20 分钟（构建 #61 实测）。仅保留给低频诊断使用。
     """
     paths = set()
     stack = [""]
@@ -325,17 +283,6 @@ def list_pull_requests(owner, repo, token, state="open", per_page=100):
     """
     return _paginate(f"{BASE_URL}/repos/{owner}/{repo}/pulls", token,
                      {"state": state}, per_page=per_page)
-
-
-def list_pr_files(owner, repo, number, token):
-    """列出 PR 的变更文件，自动分页拉取全量。
-
-    返回 [{filename, status, ...}]。status 为 added/removed/renamed/
-    changed 等：added 即「分支上有、上游没有」的文件，供陈旧文件
-    清理做差集，免去逐目录遍历双仓库的上百次请求。
-    """
-    return _paginate(f"{BASE_URL}/repos/{owner}/{repo}/pulls/{number}/files",
-                     token, {})
 
 
 def create_pr(owner, repo, title, head, base, body, token, fork_path=None):

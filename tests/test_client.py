@@ -74,13 +74,6 @@ class TestEndpoints:
         assert m.call_args.args[0] == "GET"
         assert m.call_args.kwargs["params"] == {"branch": "26.1.0"}
 
-    def test_create_branch_payload(self):
-        m = self._call(client.create_branch, "user", "repo",
-                       "translator/auto-26.1.0", "abc123", "tok")
-        assert m.call_args.kwargs["json"] == {
-            "refs": "abc123", "branch_name": "translator/auto-26.1.0",
-        }
-
     def test_create_pr_with_fork_path(self):
         m = self._call(client.create_pr, "Ascend", "msprof", "title",
                        "user:translator/auto-26.1.0", "26.1.0", "body",
@@ -111,14 +104,6 @@ class TestEndpoints:
         assert params["state"] == "open"
         assert "head" not in params
         assert "base" not in params
-
-    def test_update_file_carries_sha(self):
-        m = self._call(client.update_file, "user", "repo", "a.md", "msg",
-                       "YQ==", "sha1", "translator/auto-26.1.0", "tok")
-        assert m.call_args.args[0] == "PUT"
-        payload = m.call_args.kwargs["json"]
-        assert payload["sha"] == "sha1"
-        assert payload["branch"] == "translator/auto-26.1.0"
 
 
 class TestGetContents:
@@ -153,8 +138,7 @@ class TestGetContents:
                    return_value=make_error_response(503)), \
                 patch("translator_ci.client.time.sleep") as sleep_mock:
             with pytest.raises(GitCodeError):
-                client.create_file("o", "r", "a.md", "m", "YQ==",
-                                   "master", "tok")
+                client.sync_repo("o", "r", "tok")
             sleep_mock.assert_not_called()
 
 

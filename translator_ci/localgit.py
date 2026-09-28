@@ -17,6 +17,7 @@ git 命令全部走 subprocess，不在进程内解析 git 对象库格式；失
 抛 client.GitCodeError，与 API 路径的错误口径一致。
 """
 
+import base64
 import os
 import shutil
 import subprocess
@@ -60,6 +61,120 @@ def clone(owner, repo, ref, token, dest_dir, log=print, blobs=False):
             200, f"克隆 {owner}/{repo}@{ref or '默认分支'} 失败: "
                  f"{e.stderr.strip() or e.stdout.strip()}")
     return dest_dir
+
+
+# 单 commit 重建的提交标题前缀：既是对人类的说明，也是幂等判定标记——
+# 远端固定分支 HEAD 的标题以此开头即视为「本工具生成的单 commit」
+SYNC_COMMIT_PREFIX = "sync: 同步英文译稿"
+
+
+def rebuild_branch(owner, repo, token, base_branch, head_branch, files,
+                   dest_dir, log=print):
+    """以目标分支为基点重建固定分支：全部变更一次写入、单个 commit、按需强推。
+
+    背景：旧实现逐文件调 contents API 写入，一个 PR 动辄几百个 commit，
+    且逐文件请求在限流下耗时极长。改为本地 git 批量写入后天然满足
+    「一个 PR 一个 commit」：每次都从目标分支基点重建固定分支，写入
+    全部变更译稿后只产生一个 commit，force push 覆盖远端固定分支
+    （分支为工具独占，重建安全）。重建语义同时自愈了陈旧文件残留——
+    基点是目标分支，不在源目录中的旧 added 文件自然消失，无需清理逻辑。
+
+    幂等判定（避免每次运行都强推制造 PR 噪音）：
+    - 新树 == 远端固定分支树，且远端 HEAD 标题带本工具前缀 → 不推送；
+    - 树相同但远端是历史遗留的多 commit 分支（存量碎 commit）→ 仍强推，
+      把 PR 历史强制压缩为单个 commit。
+
+    Args:
+        owner/repo: Fork 仓库（写入目标）
+        base_branch: 目标分支名（重建基点，须已存在于 Fork）
+        head_branch: 固定分支名 translator/auto-<目标分支>
+        files: [{"target_path", "content_b64"}] 变更译稿清单
+        dest_dir: 本地克隆目录（自动覆盖重建）
+
+    Returns:
+        dict: {"pushed": bool, "written": [{"path", "action"}...],
+               "reason": str}
+        written 的 action 为 create/update（按 git name-status 换算）。
+    """
+    # ── 1. 克隆 Fork：浅、全分支头、带 blob（重建工作树需要完整内容）──
+    if os.path.isdir(dest_dir):
+        shutil.rmtree(dest_dir)
+    parent = os.path.dirname(dest_dir)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    url = _auth_url(owner, repo, token)
+    try:
+        subprocess.run(
+            ["git", "clone", "--depth=1", "--no-checkout",
+             "--no-single-branch", url, dest_dir],
+            check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        raise client.GitCodeError(
+            200, f"克隆 Fork {owner}/{repo} 失败: "
+                 f"{e.stderr.strip() or e.stdout.strip()}")
+
+    # 禁止行尾/编码规范化：译稿按原始字节提交，避免 .gitattributes 意外改写
+    _run_git(dest_dir, "config", "core.autocrlf", "false")
+    attrs = os.path.join(dest_dir, ".git", "info", "attributes")
+    with open(attrs, "w", encoding="utf-8") as fh:
+        fh.write("* -text\n")
+
+    # ── 2. 以目标分支为基点检出固定分支（目标分支不在 Fork 上时失败）──
+    log(f"正在重建固定分支（单 commit）: {head_branch}")
+    _run_git(dest_dir, "checkout", "-B", head_branch,
+             f"origin/{base_branch}")
+
+    # ── 3. 记录远端固定分支现状（幂等与存量判定）──
+    remote_ref = f"origin/{head_branch}"
+    remote_exists = True
+    try:
+        remote_tree = _run_git(
+            dest_dir, "rev-parse", remote_ref + "^{tree}").strip()
+        remote_subject = _run_git(
+            dest_dir, "log", "-1", "--format=%s", remote_ref).strip()
+    except client.GitCodeError:
+        remote_exists = False
+        remote_tree = remote_subject = None
+
+    # ── 4. 批量写入译稿（base64 解码后按原始字节落盘）──
+    for f in files:
+        path = os.path.join(dest_dir, f["target_path"])
+        parent_dir = os.path.dirname(path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(base64.b64decode(f["content_b64"]))
+    _run_git(dest_dir, "add", "-A")
+    status = _run_git(dest_dir, "diff", "--cached", "--name-status")
+    action_map = {"A": "create", "M": "update"}
+    written = []
+    for line in status.splitlines():
+        fields = line.split("\t", 1)
+        if len(fields) == 2 and fields[0] in action_map:
+            written.append({"path": fields[1], "action": action_map[fields[0]]})
+
+    # ── 5. 单个 commit（无变更时仅在需要压缩存量历史时生成空 commit）──
+    if written:
+        msg = f"{SYNC_COMMIT_PREFIX}（{len(written)} 个文件）"
+        _run_git(dest_dir, "commit", "-m", msg)
+    elif remote_exists and not remote_subject.startswith(SYNC_COMMIT_PREFIX):
+        # 树与基点一致但远端是旧碎 commit 历史：空 commit 强推压缩历史
+        _run_git(dest_dir, "commit", "--allow-empty", "-m", SYNC_COMMIT_PREFIX)
+    else:
+        return {"pushed": False, "written": [],
+                "reason": "分支内容已是最新"}
+
+    # ── 6. 幂等判定：树相同且远端已是本工具单 commit → 不推送 ──
+    new_tree = _run_git(dest_dir, "rev-parse", "HEAD^{tree}").strip()
+    if (remote_exists and new_tree == remote_tree
+            and remote_subject.startswith(SYNC_COMMIT_PREFIX)):
+        return {"pushed": False, "written": [],
+                "reason": "远端已是最新单 commit"}
+
+    # ── 7. 强推（重建历史必须 force；分支为工具独占，安全）──
+    _run_git(dest_dir, "push", "--force", "origin", head_branch)
+    log(f"已推送单 commit（{len(written)} 个文件变更）: {head_branch}")
+    return {"pushed": True, "written": written, "reason": "重建完成"}
 
 
 def tree_map(repo_dir, ref="HEAD"):
