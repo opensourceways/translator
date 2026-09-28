@@ -119,6 +119,12 @@ def rebuild_branch(owner, repo, token, base_branch, head_branch, files,
     with open(attrs, "w", encoding="utf-8") as fh:
         fh.write("* -text\n")
 
+    # 提交者身份：Jenkins agent 未必有全局 git 配置（缺省会报
+    # Author identity unknown），仓库级显式配置，作者即 Fork 账号
+    _run_git(dest_dir, "config", "user.name", owner)
+    _run_git(dest_dir, "config", "user.email",
+             f"{owner}@noreply.gitcode.com")
+
     # ── 2. 以目标分支为基点检出固定分支（目标分支不在 Fork 上时失败）──
     log(f"正在重建固定分支（单 commit）: {head_branch}")
     _run_git(dest_dir, "checkout", "-B", head_branch,

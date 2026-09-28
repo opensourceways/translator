@@ -1179,6 +1179,27 @@ class TestRebuildBranch:
         finally:
             self._cleanup(dest)
 
+    def test_commit_without_global_identity(self, fork_bare, monkeypatch):
+        """无全局 git 身份（如 Jenkins agent）时仍能 commit（仓库级配置兜底）。"""
+        fake_home = tempfile.mkdtemp(prefix="no-identity-")
+        monkeypatch.setenv("HOME", fake_home)
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL",
+                           os.path.join(fake_home, "gitconfig-empty"))
+        spec = {"a.md": b"A"}
+        try:
+            result, dest = self._rebuild(fork_bare, spec)
+            assert result["pushed"] is True
+            assert self._pr_commit_count(fork_bare) == 1
+            # 提交作者为 Fork 账号
+            out = subprocess.run(
+                ["git", "-C", str(fork_bare), "log", "-1",
+                 "--format=%an %ae", self.HEAD],
+                capture_output=True, text=True)
+            assert out.stdout.strip() == "u u@noreply.gitcode.com"
+        finally:
+            self._cleanup(dest)
+            shutil.rmtree(fake_home, ignore_errors=True)
+
     def test_binary_bytes_exact(self, fork_bare):
         """二进制/CRLF 文件按原始字节提交，不被行尾规范化改写。"""
         gif = b"GIF89a\x01\x00\xf7\r\n"
