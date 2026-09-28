@@ -198,6 +198,8 @@ def submit_repo(org, repo, branch, files, token, log=print):
         fork_owner = user_info.get("login") or user_info.get("username")
         if not fork_owner:
             return {"ok": False, "stage": "get_user", "error": "无法从 token 获取用户名"}
+        # 账号绑定邮箱：commit 作者邮箱需与 CLA 签署邮箱一致
+        author_email = user_info.get("email") or None
     except client.GitCodeError as e:
         return {"ok": False, "stage": "get_user", "error": str(e)}
 
@@ -294,7 +296,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
     try:
         result = localgit.rebuild_branch(
             fork_owner, fork_repo_name, token, branch, head_branch,
-            files, dest_dir, log)
+            files, dest_dir, log, author_email=author_email)
     except client.GitCodeError as e:
         return {"ok": False, "stage": "write", "error": str(e),
                 "head_branch": head_branch}

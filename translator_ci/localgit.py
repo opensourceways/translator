@@ -69,7 +69,7 @@ SYNC_COMMIT_PREFIX = "sync: 同步英文译稿"
 
 
 def rebuild_branch(owner, repo, token, base_branch, head_branch, files,
-                   dest_dir, log=print):
+                   dest_dir, log=print, author_email=None):
     """以目标分支为基点重建固定分支：全部变更一次写入、单个 commit、按需强推。
 
     背景：旧实现逐文件调 contents API 写入，一个 PR 动辄几百个 commit，
@@ -120,10 +120,12 @@ def rebuild_branch(owner, repo, token, base_branch, head_branch, files,
         fh.write("* -text\n")
 
     # 提交者身份：Jenkins agent 未必有全局 git 配置（缺省会报
-    # Author identity unknown），仓库级显式配置，作者即 Fork 账号
+    # Author identity unknown），仓库级显式配置。邮箱用账号真实绑定
+    # 邮箱——CLA 检查按 commit 作者邮箱校验签署记录，编造的 noreply
+    # 地址会未通过；账号未暴露邮箱时才退化为 noreply 地址
     _run_git(dest_dir, "config", "user.name", owner)
     _run_git(dest_dir, "config", "user.email",
-             f"{owner}@noreply.gitcode.com")
+             author_email or f"{owner}@noreply.gitcode.com")
 
     # ── 2. 以目标分支为基点检出固定分支（目标分支不在 Fork 上时失败）──
     log(f"正在重建固定分支（单 commit）: {head_branch}")

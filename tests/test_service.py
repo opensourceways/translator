@@ -726,7 +726,8 @@ def _make_submit_client_mock():
     """
     client_mock = MagicMock()
     client_mock.GitCodeError = GitCodeError
-    client_mock.get_user.return_value = {"login": "bot"}
+    client_mock.get_user.return_value = {"login": "bot",
+                                         "email": "bot@huawei.com"}
     client_mock.list_repo_forks.return_value = [
         {"full_name": "bot/MindStudio-Profiler", "owner": {"login": "bot"}},
     ]
@@ -800,6 +801,9 @@ class TestSubmitRepo:
             assert rb_args[3] == "26.1.0"  # 基点 = 目标分支
             assert rb_args[4] == "translator/auto-26.1.0"  # 固定分支
             assert rb_args[5] == _make_files()
+            # commit 作者邮箱 = 账号绑定邮箱（CLA 按 commit 作者邮箱校验）
+            assert localgit_mock.rebuild_branch.call_args.kwargs.get(
+                "author_email") == "bot@huawei.com"
             # 跨仓 PR 带 fork_path，head 为 用户:固定分支
             pr_kwargs = client_mock.create_pr.call_args
             assert pr_kwargs.args[3] == "bot:translator/auto-26.1.0"
@@ -1180,24 +1184,40 @@ class TestRebuildBranch:
             self._cleanup(dest)
 
     def test_commit_without_global_identity(self, fork_bare, monkeypatch):
-        """无全局 git 身份（如 Jenkins agent）时仍能 commit（仓库级配置兜底）。"""
+        """无全局 git 身份（如 Jenkins agent）时仍能 commit（仓库级配置兜底），
+        作者邮箱优先用账号绑定邮箱（CLA 校验依据），缺省退化为 noreply。"""
         fake_home = tempfile.mkdtemp(prefix="no-identity-")
         monkeypatch.setenv("HOME", fake_home)
         monkeypatch.setenv("GIT_CONFIG_GLOBAL",
                            os.path.join(fake_home, "gitconfig-empty"))
-        spec = {"a.md": b"A"}
         try:
-            result, dest = self._rebuild(fork_bare, spec)
+            # 显式传入账号绑定邮箱
+            with patch.object(localgit, "_auth_url", lambda *a: str(fork_bare)):
+                result = localgit.rebuild_branch(
+                    "u", "r", "tok", "master", self.HEAD,
+                    [{"target_path": "a.md",
+                      "content_b64": base64.b64encode(b"A").decode()}],
+                    os.path.join(tempfile.gettempdir(),
+                                 f"rebuild-id-{os.getpid()}"),
+                    log=SILENT, author_email="u@huawei.com")
             assert result["pushed"] is True
             assert self._pr_commit_count(fork_bare) == 1
-            # 提交作者为 Fork 账号
             out = subprocess.run(
                 ["git", "-C", str(fork_bare), "log", "-1",
                  "--format=%an %ae", self.HEAD],
                 capture_output=True, text=True)
-            assert out.stdout.strip() == "u u@noreply.gitcode.com"
-        finally:
+            assert out.stdout.strip() == "u u@huawei.com"
+            self._cleanup(os.path.join(tempfile.gettempdir(),
+                                       f"rebuild-id-{os.getpid()}"))
+            # 未传邮箱：退化为 noreply 地址（换内容强制重建出新 commit）
+            result, dest = self._rebuild(fork_bare, {"a.md": b"A2"})
             self._cleanup(dest)
+            out = subprocess.run(
+                ["git", "-C", str(fork_bare), "log", "-1",
+                 "--format=%ae", self.HEAD],
+                capture_output=True, text=True)
+            assert out.stdout.strip() == "u@noreply.gitcode.com"
+        finally:
             shutil.rmtree(fake_home, ignore_errors=True)
 
     def test_binary_bytes_exact(self, fork_bare):
