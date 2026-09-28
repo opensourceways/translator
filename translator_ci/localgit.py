@@ -140,9 +140,13 @@ def rebuild_branch(owner, repo, token, base_branch, head_branch, files,
             dest_dir, "rev-parse", remote_ref + "^{tree}").strip()
         remote_subject = _run_git(
             dest_dir, "log", "-1", "--format=%s", remote_ref).strip()
+        remote_author = _run_git(
+            dest_dir, "log", "-1", "--format=%ae", remote_ref).strip()
     except client.GitCodeError:
         remote_exists = False
-        remote_tree = remote_subject = None
+        remote_tree = remote_subject = remote_author = None
+    # 期望的 commit 作者邮箱（与上面 user.email 配置一致）
+    expect_author = author_email or f"{owner}@noreply.gitcode.com"
 
     # ── 4. 批量写入译稿（base64 解码后按原始字节落盘）──
     for f in files:
@@ -161,12 +165,20 @@ def rebuild_branch(owner, repo, token, base_branch, head_branch, files,
         if len(fields) == 2 and fields[0] in action_map:
             written.append({"path": fields[1], "action": action_map[fields[0]]})
 
-    # ── 5. 单个 commit（无变更时仅在需要压缩存量历史时生成空 commit）──
+    # 远端固定分支是否已是「本工具生成的、作者正确的单 commit」：
+    # 三者都满足才可跳过推送——作者邮箱不对（如旧版本用 noreply 地址
+    # 提交导致 CLA 检查不通过）时即使树相同也要重写
+    remote_is_synced = (remote_exists
+                        and remote_subject.startswith(SYNC_COMMIT_PREFIX)
+                        and remote_author == expect_author)
+
+    # ── 5. 单个 commit（无变更时仅在需要修正远端历史时生成空 commit）──
     if written:
         msg = f"{SYNC_COMMIT_PREFIX}（{len(written)} 个文件）"
         _run_git(dest_dir, "commit", "-m", msg)
-    elif remote_exists and not remote_subject.startswith(SYNC_COMMIT_PREFIX):
-        # 树与基点一致但远端是旧碎 commit 历史：空 commit 强推压缩历史
+    elif remote_exists and not remote_is_synced:
+        # 树与期望一致但远端不是本工具单 commit（旧碎 commit 历史或
+        # 作者邮箱不对）：空 commit 重建历史后强推
         _run_git(dest_dir, "commit", "--allow-empty", "-m", SYNC_COMMIT_PREFIX)
     else:
         return {"pushed": False, "written": [],
@@ -174,8 +186,7 @@ def rebuild_branch(owner, repo, token, base_branch, head_branch, files,
 
     # ── 6. 幂等判定：树相同且远端已是本工具单 commit → 不推送 ──
     new_tree = _run_git(dest_dir, "rev-parse", "HEAD^{tree}").strip()
-    if (remote_exists and new_tree == remote_tree
-            and remote_subject.startswith(SYNC_COMMIT_PREFIX)):
+    if remote_is_synced and new_tree == remote_tree:
         return {"pushed": False, "written": [],
                 "reason": "远端已是最新单 commit"}
 

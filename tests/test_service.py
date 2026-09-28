@@ -1060,7 +1060,7 @@ class TestRebuildBranch:
              f"master..{self.HEAD}"], capture_output=True, text=True)
         return int(out.stdout.strip())
 
-    def _rebuild(self, bare, spec):
+    def _rebuild(self, bare, spec, author_email="u@huawei.com"):
         """对本地 bare 仓库执行 rebuild_branch，返回 (结果, 克隆目录)。"""
         dest = os.path.join(tempfile.gettempdir(),
                             f"rebuild-test-{id(spec)}-{os.getpid()}")
@@ -1070,7 +1070,7 @@ class TestRebuildBranch:
                 [{"target_path": p,
                   "content_b64": base64.b64encode(c).decode()}
                  for p, c in spec.items()],
-                dest, log=SILENT)
+                dest, log=SILENT, author_email=author_email)
         return result, dest
 
     def _cleanup(self, dest):
@@ -1210,7 +1210,8 @@ class TestRebuildBranch:
             self._cleanup(os.path.join(tempfile.gettempdir(),
                                        f"rebuild-id-{os.getpid()}"))
             # 未传邮箱：退化为 noreply 地址（换内容强制重建出新 commit）
-            result, dest = self._rebuild(fork_bare, {"a.md": b"A2"})
+            result, dest = self._rebuild(fork_bare, {"a.md": b"A2"},
+                                         author_email=None)
             self._cleanup(dest)
             out = subprocess.run(
                 ["git", "-C", str(fork_bare), "log", "-1",
@@ -1219,6 +1220,37 @@ class TestRebuildBranch:
             assert out.stdout.strip() == "u@noreply.gitcode.com"
         finally:
             shutil.rmtree(fake_home, ignore_errors=True)
+
+    def test_wrong_author_email_still_rewritten(self, fork_bare):
+        """树相同但远端 commit 作者邮箱不对（如旧版 noreply 导致 CLA
+        不通过）：即使内容无变化也强推重写，刷新作者邮箱。"""
+        spec = {"a.md": b"A"}
+        # 先用 noreply 邮箱建远端（模拟修复前的错误状态）
+        result, dest = self._rebuild(fork_bare, spec, author_email=None)
+        self._cleanup(dest)
+        out = subprocess.run(
+            ["git", "-C", str(fork_bare), "log", "-1", "--format=%ae",
+             self.HEAD], capture_output=True, text=True)
+        assert out.stdout.strip() == "u@noreply.gitcode.com"
+        # 同内容、传正确邮箱：树相同但作者不对 → 强推重写
+        result, dest = self._rebuild(fork_bare, spec,
+                                     author_email="u@huawei.com")
+        try:
+            assert result["pushed"] is True
+            assert self._pr_commit_count(fork_bare) == 1
+            out = subprocess.run(
+                ["git", "-C", str(fork_bare), "log", "-1", "--format=%ae",
+                 self.HEAD], capture_output=True, text=True)
+            assert out.stdout.strip() == "u@huawei.com"
+        finally:
+            self._cleanup(dest)
+        # 作者已正确后再跑：幂等跳过
+        result, dest = self._rebuild(fork_bare, spec,
+                                     author_email="u@huawei.com")
+        try:
+            assert result["pushed"] is False
+        finally:
+            self._cleanup(dest)
 
     def test_binary_bytes_exact(self, fork_bare):
         """二进制/CRLF 文件按原始字节提交，不被行尾规范化改写。"""
