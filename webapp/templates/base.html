@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}translator-ci{% endblock %}</title>
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f6f8; color: #24292f; }
+nav { background: #1f2937; padding: 10px 20px; display: flex; gap: 18px; align-items: center; }
+nav a { color: #cbd5e1; text-decoration: none; font-size: 14px; }
+nav a:hover { color: #fff; }
+nav .brand { font-weight: 600; color: #fff; }
+nav .badge { margin-left: auto; }
+main { max-width: 1100px; margin: 20px auto; padding: 0 16px; }
+h1 { font-size: 20px; }
+h2 { font-size: 16px; margin-top: 24px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; background: #e2e8f0; color: #334155; vertical-align: middle; }
+.badge.shadow { background: #fef3c7; color: #92400e; }
+.badge.success, .badge.submit_ok { background: #dcfce7; color: #166534; }
+.badge.failed, .badge.error, .badge.submit_failed { background: #fee2e2; color: #991b1b; }
+.badge.running { background: #dbeafe; color: #1e40af; }
+.badge.partial, .badge.interrupted, .badge.would_submit, .badge.changed { background: #ffedd5; color: #9a3412; }
+.badge.open { background: #dbeafe; color: #1e40af; }
+.badge.merged { background: #ede9fe; color: #5b21b6; }
+.badge.closed { background: #e2e8f0; color: #475569; }
+.cards { display: flex; flex-wrap: wrap; gap: 12px; }
+.card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px 18px; min-width: 130px; }
+.card .num { font-size: 24px; font-weight: 600; }
+.card .label { color: #6b7280; font-size: 12px; }
+table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
+th, td { padding: 8px 12px; text-align: left; font-size: 13px; border-bottom: 1px solid #eef0f2; }
+th { background: #f9fafb; color: #6b7280; font-weight: 600; }
+tr:last-child td { border-bottom: none; }
+a { color: #2563eb; text-decoration: none; }
+pre.log { background: #0f172a; color: #e2e8f0; padding: 14px; border-radius: 8px; overflow: auto; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.muted { color: #6b7280; }
+dl.meta { display: grid; grid-template-columns: 150px 1fr; gap: 6px 12px; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px 18px; font-size: 13px; }
+dl.meta dt { color: #6b7280; }
+dl.meta dd { margin: 0; }
+</style>
+</head>
+<body>
+<nav>
+  <span class="brand">translator-ci</span>
+  <a href="/" data-link>概览</a>
+  <a href="/runs" data-link>Runs</a>
+  <a href="/prs" data-link>PR</a>
+  {% if shadow %}<span class="badge shadow">影子模式</span>{% endif %}
+</nav>
+<main>
+{% block content %}{% endblock %}
+</main>
+<script>
+// dash token 透传：配置 TC_DASH_TOKEN 后页面经 ?token= 访问，
+// 页面内 fetch 与链接统一经 withToken 带上该参数
+const DASH_TOKEN = new URLSearchParams(location.search).get('token') || '';
+function withToken(url) {
+  if (!DASH_TOKEN) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(DASH_TOKEN);
+}
+document.querySelectorAll('a[data-link]').forEach(a => {
+  a.href = withToken(a.getAttribute('href'));
+});
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}
+function fmtTs(s) {
+  if (!s) return '-';
+  const d = new Date(s);
+  return isNaN(d) ? s : d.toLocaleString();
+}
+</script>
+{% block script %}{% endblock %}
+</body>
+</html>

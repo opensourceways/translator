@@ -17,7 +17,20 @@ translator-ci = "translator_ci.cli:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    "httpx>=0.27",
 ]
+services = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "jinja2>=3.1",
+]
+
+# 显式列出两个顶层包（webapp 与 translator_ci 平级），并打包 Dashboard 模板
+[tool.setuptools]
+packages = ["translator_ci", "webapp"]
+
+[tool.setuptools.package-data]
+webapp = ["templates/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

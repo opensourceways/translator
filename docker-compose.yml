@@ -1,0 +1,11 @@
+services:
+  translator-ci:
+    build: .
+    container_name: translator-ci
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      # SQLite 库与 run 工作目录持久化（TC_DATA_DIR=/data）
+      - ./data:/data
+    restart: unless-stopped

@@ -285,6 +285,15 @@ def list_pull_requests(owner, repo, token, state="open", per_page=100):
                      {"state": state}, per_page=per_page)
 
 
+def get_pull_request(owner, repo, number, token):
+    """查询单个 Pull Request 的详情（state/merged_at/mergeable 等）。
+
+    供后台轮询 PR 状态用：确认是否已合入或关闭、以及合并结果。
+    """
+    return _do_request("GET",
+                       f"{BASE_URL}/repos/{owner}/{repo}/pulls/{number}", token)
+
+
 def create_pr(owner, repo, title, head, base, body, token, fork_path=None):
     """创建 Pull Request。
 

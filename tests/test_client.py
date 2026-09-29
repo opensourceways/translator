@@ -105,6 +105,19 @@ class TestEndpoints:
         assert "head" not in params
         assert "base" not in params
 
+    def test_get_pull_request_method_url_auth(self):
+        m = self._call(client.get_pull_request, "Ascend", "msprof", 42, "tok")
+        assert m.call_args.args[0] == "GET"
+        assert m.call_args.args[1].endswith("/repos/Ascend/msprof/pulls/42")
+        assert m.call_args.kwargs["headers"]["Authorization"] == "Bearer tok"
+
+    def test_get_pull_request_returns_json(self):
+        """返回的 PR 详情 JSON 原样透传。"""
+        detail = {"number": 42, "state": "closed", "merged_at": "2026-01-01"}
+        with patch("translator_ci.client.requests.request",
+                   return_value=make_ok_response(detail)):
+            assert client.get_pull_request("o", "r", 42, "tok") == detail
+
 
 class TestGetContents:
     """get_contents 的 404 语义：文件不存在返回 None，其余错误抛出。"""

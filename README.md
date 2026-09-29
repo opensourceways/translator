@@ -150,15 +150,97 @@ python -m pytest -v                     # 运行测试（全部 mock，不触网
 | 1 | 运行失败：Token 缺失、规则文件损坏、扫描失败等 |
 | 2 | 扫描成功但部分仓库提交失败（Jenkins 判红，逐仓错误见日志） |
 
+## 服务化部署（Docker，替换 Jenkins）
+
+常驻服务模式：GitCode Webhook 直接打到本服务，内存队列合并入队后由唯一
+Worker 线程执行扫描/提交，SQLite 落库，自带 Dashboard 监控页面。
+默认**影子模式**（只记录、不提 PR），验证通过后运行时切换。
+
+### 快速开始
+
+```bash
+cp .env.example .env
+# 编辑 .env：至少填 GITCODE_TOKEN、TC_WEBHOOK_TOKEN、TC_ADMIN_TOKEN
+docker compose up -d --build
+curl http://localhost:8000/healthz   # {"status":"ok","shadow":true,...}
+```
+
+### GitCode Webhook 配置
+
+译稿权威仓库 → 设置 → WebHooks → 添加（勾选 Push 事件）：
+
+```
+http://<服务地址>:8000/webhook/gitcode?token=<TC_WEBHOOK_TOKEN 的值>
+```
+
+### 单实例约束（硬性）
+
+内存队列 + 全局唯一 Worker + 单 SQLite 连接决定了：
+
+- uvicorn 必须 `workers=1`（Dockerfile CMD 已固定，勿改）
+- **不可多副本/水平扩展**，compose 里也不要加 `deploy.replicas`
+- 进程崩溃靠 `restart: unless-stopped` + 启动恢复（僵尸 run 标记
+  interrupted、比对远端 HEAD 自动补全量扫描）兜底
+
+### 影子模式与切换流程
+
+- 默认 `TC_SHADOW=1`：run 照常克隆、扫描、落库，结果记为
+  `would_submit` 而不实际提 PR，用于与 Jenkins 并行验证
+- 切换为实际提交（影子开关持久化在 SQLite，重启不丢）：
+
+```bash
+curl -X POST http://localhost:8000/api/config/shadow \
+  -H "X-Admin-Token: <TC_ADMIN_TOKEN 的值>" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'
+```
+
+切换时**同时禁用 Jenkins job**（引擎幂等，短暂双跑会收敛），确认稳定后
+再删除 GitCode 上的 Jenkins webhook 并归档 Jenkins job。
+
+### Dashboard 与 API
+
+- 浏览器打开 `http://localhost:8000/`：汇总页；`/runs`、`/runs/{id}`、
+  `/prs` 为运行记录与 PR 状态页
+- 只读 JSON：`/api/summary`、`/api/runs`、`/api/runs/{id}`、
+  `/api/runs/{id}/log`、`/api/prs`
+- 配置 `TC_DASH_TOKEN` 后页面与只读 API 都需鉴权；留空则放开（默认
+  部署在内网/反代后）
+- 手动触发（Build Now 替代）：
+
+```bash
+curl -X POST http://localhost:8000/api/runs \
+  -H "X-Admin-Token: <TC_ADMIN_TOKEN 的值>" \
+  -H "Content-Type: application/json" \
+  -d '{"full_scan": true}'
+```
+
+### 规则 Token 运维
+
+`token_rules.json` 加一行规则后，`.env` 加同名变量（变量名必须与规则的
+`token_env` 一致），然后 `docker compose up -d --build` 重建容器——env
+进程级固定，不热加载。缺失的规则 token 只会告警跳过该规则，不会放大权限。
+
 ## 项目结构
 
 ```
 translator-ci/
+├── Dockerfile             # python:3.12-slim + git，uvicorn 工厂模式（workers=1）
+├── docker-compose.yml     # env_file + ./data:/data 持久化
+├── .env.example           # 全部配置项模板（token 本体不落仓库）
 ├── Jenkinsfile            # 声明式流水线（Webhook 触发，禁止并发构建）
 ├── translator_ci/
 │   ├── cli.py             # 命令行入口（参数、退出码、stdout 日志）
 │   ├── service.py         # 业务编排：规则加载/扫描对比/幂等提交/Token 路由
 │   └── client.py          # GitCode REST API v5 客户端
+├── webapp/                # 常驻服务（FastAPI）
+│   ├── api.py             # create_app(settings)：webhook/Dashboard/API/启动恢复
+│   ├── runner.py          # Worker 线程：克隆→扫描→影子门控/逐仓提交→落库
+│   ├── prsync.py          # Poller 线程：轮询 open PR 状态
+│   ├── db.py              # SQLite 状态层（WAL + 单连接）
+│   ├── queueing.py        # 合并队列（latest-wins）
+│   ├── config.py          # Settings.from_env()
+│   └── templates/         # Dashboard 页面（Jinja2 服务端渲染）
 ├── tests/                 # pytest 单元测试（全部 mock，不发起真实请求）
 ├── pyproject.toml
 └── requirements.txt

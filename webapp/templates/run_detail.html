@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Run #{{ run.id }} - translator-ci{% endblock %}
+{% block content %}
+<h1>Run #{{ run.id }} <span class="badge {{ run.status }}" id="run-status">{{ run.status }}</span>{% if run.shadow %} <span class="badge shadow">影子</span>{% endif %}</h1>
+<dl class="meta">
+  <dt>触发</dt><dd>{{ run.trigger }}</dd>
+  {% if run.keyword %}<dt>关键字</dt><dd>{{ run.keyword }}</dd>{% endif %}
+  {% if run.push_before %}<dt>增量区间</dt><dd class="mono">{{ run.push_before[:8] }} → {{ (run.push_after or '')[:8] }}</dd>{% endif %}
+  <dt>增量扫描</dt><dd>{{ '是' if run.incremental else '否' }}</dd>
+  <dt>扫描 / 变更</dt><dd>{{ run.scanned_count }} / {{ run.changed_count }}</dd>
+  <dt>提交成功 / noop / 失败</dt><dd>{{ run.submit_ok_count }} / {{ run.noop_count }} / {{ run.failed_count }}</dd>
+  <dt>开始时间</dt><dd>{{ run.started_at | localtime }}</dd>
+  <dt>结束时间</dt><dd>{{ run.finished_at | localtime }}</dd>
+  {% if run.error %}<dt>错误</dt><dd>{{ run.error }}</dd>{% endif %}
+</dl>
+<h2>仓库结果</h2>
+<table>
+<thead><tr><th>路径</th><th>仓库</th><th>分支</th><th>状态</th><th>新增/更新</th><th>PR</th><th>原因/错误</th></tr></thead>
+<tbody>
+{% for r in repos %}
+<tr>
+  <td>{{ r.path or '' }}</td>
+  <td>{% if r.org %}{{ r.org }}/{{ r.repo }}{% endif %}</td>
+  <td>{{ r.branch or '' }}</td>
+  <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+  <td>+{{ r.new_count }} ~{{ r.update_count }}</td>
+  <td>{% if r.pr_url %}<a href="{{ r.pr_url }}">#{{ r.pr_number }}</a>{% elif r.pr_number %}#{{ r.pr_number }}{% endif %}</td>
+  <td>{{ r.reason or r.error or '' }}</td>
+</tr>
+{% else %}
+<tr><td colspan="7" class="muted">无仓库结果</td></tr>
+{% endfor %}
+</tbody>
+</table>
+<h2>日志</h2>
+<pre class="log" id="run-log">{{ run.log or '' }}</pre>
+{% endblock %}
+{% block script %}
+<script>
+const RUN_ID = {{ run.id }};
+async function refresh() {
+  try {
+    const detail = await (await fetch(withToken('/api/runs/' + RUN_ID))).json();
+    const status = document.getElementById('run-status');
+    status.textContent = detail.run.status;
+    status.className = 'badge ' + detail.run.status;
+    const logData = await (await fetch(withToken('/api/runs/' + RUN_ID + '/log'))).json();
+    const pre = document.getElementById('run-log');
+    pre.textContent = logData.log;
+    pre.scrollTop = pre.scrollHeight;
+    if (detail.run.status !== 'running') clearInterval(timer);
+  } catch (e) { /* 轮询失败下轮再试 */ }
+}
+const timer = setInterval(refresh, 3000);
+</script>
+{% endblock %}

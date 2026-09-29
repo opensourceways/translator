@@ -1,0 +1,315 @@
+"""FastAPI Web 层：webhook 入口、Dashboard 与只读/管理 API。
+
+对应服务化改造计划「API 端点」表：
+- POST /webhook/gitcode：GitCode push 入口（?token= 鉴权，fail closed）；
+  ref 过滤 ^(refs/heads/main|main|)$ 与 Jenkins regexpFilterExpression
+  一致；所有到达事件（含被拒绝的）均落 push_events，接受的入队返回 202
+- GET /healthz：无鉴权探活；busy 以库中是否存在 running run 判定
+  （重启后也准确），不依赖 Worker 内存状态
+- Dashboard 页面与 /api/* 只读 JSON：TC_DASH_TOKEN 未配置时放开，配置后
+  要求 X-Dash-Token 头或 ?token= query
+- POST /api/runs、/api/config/shadow：X-Admin-Token 管理端点，
+  admin_token 未配置时一律 403（fail closed）
+
+lifespan：init_db → init_shadow（env 仅作种子，之后以库为准）→ 僵尸
+running run 恢复为 interrupted → 停机补偿（最后一次成功 run 的
+push_after 与来源仓远端默认分支 HEAD 比对，不一致入队一次全量扫；无
+基线或比对失败都跳过，绝不影响启动）→ 启动 Worker/Poller。关停时协作
+式停止两个线程并 join（Worker 正在执行的 run 会跑完）。
+"""
+
+import hmac
+import logging
+import os
+import re
+from contextlib import asynccontextmanager
+from datetime import datetime
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+
+from translator_ci import client, common
+
+from webapp.config import Settings
+from webapp.db import init_db, init_shadow, is_shadow, set_shadow
+from webapp.prsync import Poller
+from webapp.queueing import CoalescingQueue, Trigger
+from webapp.runner import Worker
+
+log = logging.getLogger("webapp.api")
+
+# webhook ref 过滤：与 Jenkins regexpFilterExpression 一致（空串也触发，
+# 对应缺 ref 的兜底语义——sha 为空时队列语义自动全量扫描）
+_REF_PATTERN = re.compile(r"^(refs/heads/main|main|)$")
+
+_TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+
+
+def _localtime(value):
+    """库中 UTC ISO8601 时间戳转服务器本地时区显示。"""
+    if not value:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _recover_missed_pushes(settings, db, queue):
+    """停机补偿：最后一次成功 run 的 push_after 与来源仓远端 HEAD 比对。
+
+    覆盖服务停机/重启窗口内丢失的 webhook（fire-and-forget）。不一致则
+    入队一次全量扫描；无基线（全新库）、无 GITCODE_TOKEN 或查询远端失败
+    （网络异常）都跳过——绝不影响启动。
+    """
+    token = os.environ.get("GITCODE_TOKEN", "").strip()
+    if not token:
+        log.info("停机补偿跳过：GITCODE_TOKEN 未配置")
+        return
+    baseline = next(
+        (r for r in db.list_runs(limit=50)
+         if r["status"] in ("success", "partial") and r.get("push_after")),
+        None)
+    if baseline is None:
+        log.info("停机补偿跳过：尚无成功 run 作为基线（全新库）")
+        return
+    try:
+        owner, repo = common._source_repo()
+        info = client.get_repo(owner, repo, token)
+        default_branch = info.get("default_branch") or ""
+        branches = client.list_branches(owner, repo, token)
+        head_sha = next(
+            ((b.get("commit") or {}).get("sha") for b in branches
+             if b.get("name") == default_branch), None)
+    except Exception as e:
+        log.warning("停机补偿跳过：查询来源仓远端 HEAD 失败: %s", e)
+        return
+    if not head_sha:
+        log.warning("停机补偿跳过：远端默认分支 %r 未找到", default_branch)
+        return
+    if head_sha == baseline["push_after"]:
+        log.info("停机补偿：远端 HEAD 与基线一致，无需补偿")
+        return
+    log.info("停机补偿：基线 %s 落后远端 HEAD %s，入队一次全量扫描",
+             baseline["push_after"], head_sha)
+    queue.push(Trigger.manual(full_scan=True))
+
+
+def create_app(settings=None):
+    """构建 FastAPI 应用；线程与数据库生命周期由 lifespan 管理。
+
+    settings 为 None 时从环境变量加载（uvicorn --factory 以零参调用）。
+    app.state 上暴露 db / queue / worker / poller（测试与运维探针用）。
+    """
+    if settings is None:
+        settings = Settings.from_env()
+    templates = Jinja2Templates(directory=_TEMPLATES_DIR)
+    templates.env.filters["localtime"] = _localtime
+
+    @asynccontextmanager
+    async def lifespan(app):
+        db = init_db(settings.db_path)
+        init_shadow(db, settings.shadow)
+        interrupted = db.interrupt_running_runs()
+        if interrupted:
+            log.info("启动恢复：%d 个僵尸 running run 标记为 interrupted",
+                     interrupted)
+        queue = CoalescingQueue()
+        _recover_missed_pushes(settings, db, queue)
+        worker = Worker(queue, settings, db)
+        poller = Poller(db, settings)
+        worker.start()
+        poller.start()
+        app.state.db = db
+        app.state.queue = queue
+        app.state.worker = worker
+        app.state.poller = poller
+        try:
+            yield
+        finally:
+            worker.stop()
+            poller.stop()
+            worker.join()
+            poller.join()
+            db.close()
+
+    app = FastAPI(title="translator-ci", lifespan=lifespan)
+
+    # ── 鉴权依赖 ─────────────────────────────────────────────
+
+    def require_dash(request: Request):
+        """只读端点鉴权：dash_token 未配置时放开，否则校验头或 ?token=。"""
+        if not settings.dash_token:
+            return
+        token = request.headers.get("x-dash-token", "")
+        if not token:
+            token = request.query_params.get("token", "")
+        if not hmac.compare_digest(token, settings.dash_token):
+            raise HTTPException(403, "dash token 无效或未提供")
+
+    def require_admin(x_admin_token: str = Header(default="")):
+        """管理端点鉴权：admin_token 未配置时一律 403（fail closed）。"""
+        if not settings.admin_token or not hmac.compare_digest(
+                x_admin_token, settings.admin_token):
+            raise HTTPException(403, "admin token 无效或未配置")
+
+    dash = [Depends(require_dash)]
+
+    def _ctx(request, **kw):
+        """模板公共上下文：shadow 角标 + dash token 是否启用（模板透传用）。"""
+        return {"request": request,
+                "dash_auth": bool(settings.dash_token),
+                "shadow": is_shadow(request.app.state.db), **kw}
+
+    # ── webhook ──────────────────────────────────────────────
+
+    @app.post("/webhook/gitcode")
+    async def webhook_gitcode(request: Request,
+                              token: str = Query(default="")):
+        """GitCode push 入口：token 校验 → ref 过滤 → 落库 → 入队。
+
+        body 非 JSON 或缺字段时按 Jenkins 兜底语义处理：ref 视为空串
+        （命中过滤正则），sha 为空 → 队列语义自动全量扫描。
+        """
+        if not settings.webhook_token or not hmac.compare_digest(
+                token, settings.webhook_token):
+            raise HTTPException(403, "webhook token 无效或未配置")
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        db = request.app.state.db
+        ref = str(payload.get("ref") or "")
+        before = str(payload.get("before") or "") or None
+        after = str(payload.get("after") or "") or None
+        accepted, reason = True, ""
+        if not _REF_PATTERN.match(ref):
+            accepted, reason = False, "ref 不在触发范围"
+        elif after and set(after) == {"0"}:
+            accepted, reason = False, "分支删除事件不触发"
+        event_id = db.record_push_event(ref, before, after, accepted)
+        if not accepted:
+            log.info("webhook 事件 #%d 被拒绝：%s (ref=%r)",
+                     event_id, reason, ref)
+            return JSONResponse(
+                {"accepted": False, "reason": reason, "event_id": event_id})
+        queued = request.app.state.queue.push(
+            Trigger.from_push(ref, before, after, event_id))
+        return JSONResponse(
+            {"accepted": True, "event_id": event_id, "queued": queued},
+            status_code=202)
+
+    # ── 探活 ─────────────────────────────────────────────────
+
+    @app.get("/healthz")
+    async def healthz(request: Request):
+        db = request.app.state.db
+        busy = any(r["status"] == "running" for r in db.list_runs(limit=10))
+        return {"status": "ok", "shadow": is_shadow(db), "busy": busy,
+                "pending": request.app.state.queue.pending_count(),
+                "last_run_at": db.kv_get("last_run_at"),
+                "last_poll_at": db.kv_get("last_poll_at")}
+
+    # ── Dashboard 页面 ───────────────────────────────────────
+
+    @app.get("/", response_class=HTMLResponse, dependencies=dash)
+    async def page_index(request: Request):
+        db = request.app.state.db
+        return templates.TemplateResponse(
+            request, "index.html",
+            _ctx(request, summary=db.summary(), runs=db.list_runs(limit=20)))
+
+    @app.get("/runs", response_class=HTMLResponse, dependencies=dash)
+    async def page_runs(request: Request):
+        db = request.app.state.db
+        return templates.TemplateResponse(
+            request, "runs.html",
+            _ctx(request, runs=db.list_runs(limit=100)))
+
+    @app.get("/runs/{run_id}", response_class=HTMLResponse, dependencies=dash)
+    async def page_run_detail(request: Request, run_id: int):
+        db = request.app.state.db
+        run = db.get_run(run_id)
+        if run is None:
+            raise HTTPException(404, "run 不存在")
+        return templates.TemplateResponse(
+            request, "run_detail.html",
+            _ctx(request, run=run, repos=db.get_run_repos(run_id)))
+
+    @app.get("/prs", response_class=HTMLResponse, dependencies=dash)
+    async def page_prs(request: Request):
+        db = request.app.state.db
+        return templates.TemplateResponse(
+            request, "prs.html", _ctx(request, prs=db.list_prs()))
+
+    # ── 只读 JSON ────────────────────────────────────────────
+
+    @app.get("/api/summary", dependencies=dash)
+    async def api_summary(request: Request):
+        db = request.app.state.db
+        return {**db.summary(), "shadow": is_shadow(db)}
+
+    @app.get("/api/runs", dependencies=dash)
+    async def api_runs(request: Request, limit: int = Query(default=50)):
+        limit = min(max(limit, 1), 200)
+        return {"runs": request.app.state.db.list_runs(limit=limit)}
+
+    @app.get("/api/runs/{run_id}", dependencies=dash)
+    async def api_run_detail(request: Request, run_id: int):
+        db = request.app.state.db
+        run = db.get_run(run_id)
+        if run is None:
+            raise HTTPException(404, "run 不存在")
+        run = dict(run)
+        run.pop("log", None)  # log 大字段走独立端点
+        return {"run": run, "repos": db.get_run_repos(run_id)}
+
+    @app.get("/api/runs/{run_id}/log", dependencies=dash)
+    async def api_run_log(request: Request, run_id: int):
+        run = request.app.state.db.get_run(run_id)
+        if run is None:
+            raise HTTPException(404, "run 不存在")
+        return {"run_id": run_id, "log": run.get("log") or ""}
+
+    @app.get("/api/prs", dependencies=dash)
+    async def api_prs(request: Request, state: str = Query(default="")):
+        return {"prs": request.app.state.db.list_prs(state=state or None)}
+
+    # ── 管理端点 ─────────────────────────────────────────────
+
+    @app.post("/api/runs", dependencies=[Depends(require_admin)])
+    async def api_create_run(request: Request):
+        """手动触发（Build Now 替代）：{full_scan, keyword} 入队，202。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        trigger = Trigger.manual(
+            full_scan=bool(body.get("full_scan", True)),
+            keyword=str(body.get("keyword") or ""))
+        queued = request.app.state.queue.push(trigger)
+        return JSONResponse({"queued": queued, "full_scan": trigger.full_scan,
+                             "keyword": trigger.keyword}, status_code=202)
+
+    @app.post("/api/config/shadow", dependencies=[Depends(require_admin)])
+    async def api_set_shadow(request: Request):
+        """影子开关：{enabled: bool} 持久化到 config 表。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        enabled = body.get("enabled") if isinstance(body, dict) else None
+        if not isinstance(enabled, bool):
+            raise HTTPException(422, "body 需要布尔字段 enabled")
+        db = request.app.state.db
+        set_shadow(db, enabled)
+        log.info("影子模式切换为 %s", "开启" if enabled else "关闭")
+        return {"shadow": is_shadow(db)}
+
+    return app
