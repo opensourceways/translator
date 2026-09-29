@@ -7,6 +7,8 @@
 - runs.log 追加时截断保留尾部 200KB（全量扫描日志可达数千行）；
   调用方（runner）按 50 行/2s 缓冲后批量调用 append_log
 - prs.mergeable 三态：None 存 NULL（服务端尚未计算）
+- prs.labels_json/draft/review_total/review_accepted 为原始信号，
+  派生状态（CI 未通过/待评审等）由 webapp.prstatus 在展示层计算
 - 任何 token 值不落库：本模块接口设计上就不接收 token 参数
 """
 
@@ -96,9 +98,21 @@ CREATE TABLE IF NOT EXISTS prs (
     last_polled TEXT,
     merged_at   TEXT,
     closed_at   TEXT,
+    labels_json TEXT,
+    draft       INTEGER,
+    review_total    INTEGER,
+    review_accepted INTEGER,
     UNIQUE(org, repo, number)
 );
 """
+
+# prs 表后加列（轻量迁移用）：列名 → 列定义；旧库缺列时 ALTER TABLE 补齐
+_PRS_EXTRA_COLUMNS = {
+    "labels_json": "TEXT",
+    "draft": "INTEGER",
+    "review_total": "INTEGER",
+    "review_accepted": "INTEGER",
+}
 
 
 def _utcnow():
@@ -365,39 +379,51 @@ class Database:
 
     def upsert_pr(self, org, repo, number, branch=None, path=None, url=None,
                   title=None, state="open", mergeable=None,
-                  source="service", run_id=None):
+                  source="service", run_id=None, labels=None, draft=None):
         """按 (org, repo, number) 复合唯一约束插入或更新 PR 记录。
 
         GitCode 的 PR 编号按仓库计数，不同仓库可以有相同 number，
         因此唯一键必须是三元组而非 number 单列。
 
         首次插入记 first_seen；每次调用刷新 last_polled。mergeable 三态：
-        None 存 NULL。解析后的 token 值一律不经由此处落库。
+        None 存 NULL。labels 为 [{"name", "color"}] 列表（序列化为
+        labels_json），与 draft 同为展示层派生状态的原始信号；冲突更新时
+        两者取 COALESCE（新值缺省为 None 时不覆盖已有信号）。
+        解析后的 token 值一律不经由此处落库。
         """
         now = _utcnow()
         mb = None if mergeable is None else int(bool(mergeable))
+        labels_json = (json.dumps(labels, ensure_ascii=False)
+                       if labels is not None else None)
+        dr = None if draft is None else int(bool(draft))
         with self._lock:
             self._conn.execute(
                 "INSERT INTO prs (org, repo, branch, number, path, url,"
                 " title, state, mergeable, source, run_id, first_seen,"
-                " last_polled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " last_polled, labels_json, draft)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(org, repo, number) DO UPDATE SET"
                 " org = excluded.org, repo = excluded.repo,"
                 " branch = excluded.branch, path = excluded.path,"
                 " url = excluded.url, title = excluded.title,"
                 " state = excluded.state, mergeable = excluded.mergeable,"
-                " source = excluded.source, last_polled = excluded.last_polled",
+                " source = excluded.source, last_polled = excluded.last_polled,"
+                " labels_json = COALESCE(excluded.labels_json, labels_json),"
+                " draft = COALESCE(excluded.draft, draft)",
                 (org, repo, branch, number, path, url, title, state, mb,
-                 source, run_id, now, now))
+                 source, run_id, now, now, labels_json, dr))
             self._conn.commit()
 
     def apply_pr_state(self, org, repo, number, state, mergeable=None,
-                       merged_at=None, closed_at=None):
+                       merged_at=None, closed_at=None, labels=None,
+                       draft=None, review_total=None, review_accepted=None):
         """Poller 轮询后更新 PR 状态；merged/closed 时写对应时间戳。
 
         按 (org, repo, number) 三元组定位（PR 编号按仓库计数）。
         时间戳缺省取当前时间；merged_at/closed_at 传 None 表示不更新该列
         （state 为 merged/closed 时缺省自动写当前时间）。
+        labels/draft/review_total/review_accepted 为派生状态原始信号，
+        传 None 表示不更新该列（响应未带对应字段时不覆盖已有值）。
         """
         now = _utcnow()
         if state == "merged" and merged_at is None:
@@ -405,13 +431,27 @@ class Database:
         if state == "closed" and closed_at is None:
             closed_at = now
         mb = None if mergeable is None else int(bool(mergeable))
+        fields = ["state = ?", "mergeable = ?", "last_polled = ?",
+                  "merged_at = COALESCE(?, merged_at)",
+                  "closed_at = COALESCE(?, closed_at)"]
+        params = [state, mb, now, merged_at, closed_at]
+        if labels is not None:
+            fields.append("labels_json = ?")
+            params.append(json.dumps(labels, ensure_ascii=False))
+        if draft is not None:
+            fields.append("draft = ?")
+            params.append(int(bool(draft)))
+        if review_total is not None:
+            fields.append("review_total = ?")
+            params.append(int(review_total))
+        if review_accepted is not None:
+            fields.append("review_accepted = ?")
+            params.append(int(review_accepted))
+        params.extend((org, repo, number))
         with self._lock:
             self._conn.execute(
-                "UPDATE prs SET state = ?, mergeable = ?, last_polled = ?,"
-                " merged_at = COALESCE(?, merged_at),"
-                " closed_at = COALESCE(?, closed_at)"
-                " WHERE org = ? AND repo = ? AND number = ?",
-                (state, mb, now, merged_at, closed_at, org, repo, number))
+                f"UPDATE prs SET {', '.join(fields)}"
+                " WHERE org = ? AND repo = ? AND number = ?", params)
             self._conn.commit()
 
     def open_prs(self):
@@ -587,8 +627,20 @@ def init_db(path):
     db = Database(path)
     with db._lock:
         db._conn.executescript(_SCHEMA)
+        _migrate(db)
         db._conn.commit()
     return db
+
+
+def _migrate(db):
+    """轻量迁移：旧库 prs 表缺的新列用 ALTER TABLE 补齐（已有数据不丢）。
+
+    新库的建表语句已含全部列，此处对每列做存在性检查，幂等。
+    """
+    cols = {r["name"] for r in db._all("PRAGMA table_info(prs)")}
+    for name, ddl in _PRS_EXTRA_COLUMNS.items():
+        if name not in cols:
+            db._conn.execute(f"ALTER TABLE prs ADD COLUMN {name} {ddl}")
 
 
 # ── shadow 开关（真值存 config 表，env 只作初始值种子） ────────

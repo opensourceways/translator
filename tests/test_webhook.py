@@ -375,6 +375,42 @@ class TestPages:
             assert r.status_code == 200
             assert "暂无数据" in r.text
 
+    def test_prs_page_shows_derived_status(self, tmp_path, monkeypatch):
+        """PR 行含派生状态徽章（颜色类）与指引小字。"""
+        settings = _make_settings(tmp_path)
+        self._seed_repo_run(settings.db_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            app.state.db.upsert_pr(
+                "o1", "r1", 42, branch="master", state="open",
+                labels=[{"name": "ci-pipeline-failed", "color": "#DB2828"}])
+            r = client.get("/prs")
+            assert r.status_code == 200
+            assert "badge d-red" in r.text
+            assert "CI 未通过" in r.text
+            assert "点开 PR 查看 CI 日志" in r.text  # 指引文案
+
+    def test_api_prs_derived(self, tmp_path, monkeypatch):
+        """/api/prs 平铺与 ?group_by=org 的每个 PR 均带 derived 派生状态。"""
+        settings = _make_settings(tmp_path)
+        self._seed_repo_run(settings.db_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            db = app.state.db
+            db.upsert_pr("o1", "r1", 2, branch="master", state="open",
+                         mergeable=True)
+            db.upsert_pr("o1", "r1", 3, branch="master", state="open")
+            db.apply_pr_state("o1", "r1", 3, "open",
+                              review_total=2, review_accepted=1)
+            flat = client.get("/api/prs").json()["prs"]
+            derived = {p["number"]: p["derived"] for p in flat}
+            assert derived[2]["key"] == "mergeable"
+            assert derived[2]["color"] == "green"
+            assert derived[3]["key"] == "reviewing"
+            assert "1/2" in derived[3]["guidance"]  # 评审进度计数
+            grouped = client.get("/api/prs?group_by=org").json()
+            prs = grouped["orgs"][0]["repos"][0]["prs"]
+            assert all("derived" in p for p in prs)
+            assert prs[0]["derived"]["guidance"]
+
     def test_api_prs_group_by_org(self, tmp_path, monkeypatch):
         """?group_by=org 返回分组结构；默认仍返回平铺（兼容）。"""
         settings = _make_settings(tmp_path)

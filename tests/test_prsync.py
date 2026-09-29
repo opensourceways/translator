@@ -4,6 +4,7 @@
 rules_cache、service.load_token_rules 均打桩；db 用 tmp_path 真库。
 """
 
+import json
 import time
 from unittest.mock import MagicMock
 
@@ -158,6 +159,62 @@ class TestRepoBudget:
         prsync._poll_once(db, SETTINGS)
         round2 = {c.args[1] for c in get.call_args_list}
         assert skipped <= round2  # 上轮落下的仓本轮最旧优先处理
+
+
+# ── 派生状态原始信号提取 ──────────────────────────────────────
+
+
+class TestSignalExtraction:
+    """get_pull_request 真实形态响应中的 labels/draft/assignees 落库。"""
+
+    def test_labels_draft_review_counts_persisted(self, db, monkeypatch):
+        _seed_pr(db)
+        _mock_get(monkeypatch, payload={
+            "state": "open", "mergeable": False, "draft": False,
+            "labels": [{"name": "ci-pipeline-failed", "color": "#DB2828"},
+                       {"name": "cann-cla/yes", "color": "#21BA45"}],
+            "assignees": [{"login": "m1", "name": "评审甲", "accept": True},
+                          {"login": "m2", "name": "评审乙", "accept": False}]})
+        prsync._poll_once(db, SETTINGS)
+        row = db.list_prs()[0]
+        labels = json.loads(row["labels_json"])
+        assert labels == [{"name": "ci-pipeline-failed", "color": "#DB2828"},
+                          {"name": "cann-cla/yes", "color": "#21BA45"}]
+        assert row["draft"] == 0
+        assert row["review_total"] == 2
+        assert row["review_accepted"] == 1
+
+    def test_missing_signal_fields_keep_existing(self, db, monkeypatch):
+        """响应缺 labels/draft/assignees 字段时不覆盖库中已有信号。"""
+        _seed_pr(db)
+        db.apply_pr_state("o1", "r1", 1, "open",
+                          labels=[{"name": "ci-pipeline-failed",
+                                   "color": None}],
+                          draft=True, review_total=2, review_accepted=1)
+        _mock_get(monkeypatch, payload={"state": "open"})
+        prsync._poll_once(db, SETTINGS)
+        row = db.list_prs()[0]
+        assert json.loads(row["labels_json"])[0]["name"] == \
+            "ci-pipeline-failed"
+        assert row["draft"] == 1
+        assert row["review_total"] == 2 and row["review_accepted"] == 1
+
+    def test_discovery_carries_labels(self, db, monkeypatch):
+        """影子发现：列表项带 labels/draft 时顺带落库。"""
+        db_mod.set_shadow(db, True)
+        _seed_pr(db, number=99, state="closed")  # 提供已知仓库线索
+        monkeypatch.setattr(prsync.client, "list_pull_requests",
+                            MagicMock(return_value=[{
+                                "number": 5,
+                                "head": {"ref": "translator/auto-master"},
+                                "base": {"ref": "master"}, "draft": False,
+                                "labels": [{"name": "ci-pipeline-failed",
+                                            "color": "#DB2828"}]}]))
+        prsync._poll_once(db, SETTINGS)
+        row = {p["number"]: p for p in db.list_prs()}[5]
+        assert json.loads(row["labels_json"])[0]["name"] == \
+            "ci-pipeline-failed"
+        assert row["draft"] == 0
 
 
 # ── 影子模式 Jenkins PR 发现 ──────────────────────────────────

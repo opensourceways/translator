@@ -121,8 +121,20 @@ def _poll_open_prs(db, rules, default_token, budget):
     return used, polled
 
 
+def _extract_labels(pr):
+    """从 PR 响应提取标签（名字+颜色）；无 labels 字段返回 None（不覆盖库中已有值）。"""
+    if "labels" not in pr:
+        return None
+    return [{"name": l.get("name"), "color": l.get("color")}
+            for l in pr.get("labels") or [] if isinstance(l, dict)]
+
+
 def _poll_one_pr(db, row, rules, default_token):
-    """查询单个 PR 最新状态并落库；失败只告警不中断。"""
+    """查询单个 PR 最新状态并落库；失败只告警不中断。
+
+    除 state/mergeable 外，顺带落派生状态原始信号：labels（名字+颜色）、
+    draft、评审人计数（assignees 中 accept 为真记为已通过）。
+    """
     org, repo, number = row["org"], row["repo"], row["number"]
     token, _ = resolve_token(row.get("path") or "", rules, default_token)
     try:
@@ -130,11 +142,22 @@ def _poll_one_pr(db, row, rules, default_token):
     except client.GitCodeError as e:
         log.warning("查询 PR 状态失败 %s/%s#%s: %s", org, repo, number, e)
         return
+    assignees = None
+    if "assignees" in pr:
+        assignees = [a for a in pr.get("assignees") or []
+                     if isinstance(a, dict)]
     # apply_pr_state 同时刷新 last_polled；失败的 PR 不刷新，下轮优先重试
     db.apply_pr_state(org, repo, number, _map_state(pr),
                       mergeable=pr.get("mergeable"),
                       merged_at=pr.get("merged_at"),
-                      closed_at=pr.get("closed_at"))
+                      closed_at=pr.get("closed_at"),
+                      labels=_extract_labels(pr),
+                      draft=pr.get("draft"),
+                      review_total=(len(assignees)
+                                    if assignees is not None else None),
+                      review_accepted=(sum(1 for a in assignees
+                                           if a.get("accept"))
+                                       if assignees is not None else None))
 
 
 def _map_state(pr):
@@ -188,7 +211,8 @@ def _discover_repo(db, info, rules, default_token):
                      path=info.get("path"),
                      url=pr.get("html_url") or pr.get("url"),
                      title=pr.get("title"), state="open",
-                     mergeable=pr.get("mergeable"), source="jenkins")
+                     mergeable=pr.get("mergeable"), source="jenkins",
+                     labels=_extract_labels(pr), draft=pr.get("draft"))
 
 
 def _is_auto_pr(pr, branch):

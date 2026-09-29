@@ -4,6 +4,7 @@
 """
 
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -121,6 +122,61 @@ class TestInitAndKv:
         # 再次 init_db 不报错且数据保留
         d2 = db_mod.init_db(path)
         assert d2.kv_get("k") == "v"
+        d2.close()
+
+    # 加派生状态信号列之前的 prs 建表语句（旧库形态）
+    _OLD_PRS_SCHEMA = """
+    CREATE TABLE prs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        org         TEXT,
+        repo        TEXT,
+        branch      TEXT,
+        number      INTEGER,
+        path        TEXT,
+        url         TEXT,
+        title       TEXT,
+        state       TEXT,
+        mergeable   INTEGER,
+        source      TEXT,
+        run_id      INTEGER,
+        first_seen  TEXT,
+        last_polled TEXT,
+        merged_at   TEXT,
+        closed_at   TEXT,
+        UNIQUE(org, repo, number)
+    );
+    """
+
+    def test_migrate_old_prs_table(self, tmp_path):
+        """旧库（prs 无信号列）init_db 后列补齐且已有数据不丢，可正常读写。"""
+        path = tmp_path / "d" / "t.db"
+        path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(path)
+        conn.execute(self._OLD_PRS_SCHEMA)
+        conn.execute("INSERT INTO prs (org, repo, number, state, mergeable)"
+                     " VALUES ('o1', 'r1', 1, 'open', 1)")
+        conn.commit()
+        conn.close()
+
+        d = db_mod.init_db(path)
+        row = d.list_prs()[0]
+        assert row["state"] == "open" and row["mergeable"] == 1  # 数据不丢
+        assert row["labels_json"] is None and row["draft"] is None
+        assert row["review_total"] is None
+        assert row["review_accepted"] is None
+        # 新列可正常写入
+        d.apply_pr_state("o1", "r1", 1, "open",
+                         labels=[{"name": "ci-pipeline-failed", "color": None}],
+                         draft=False, review_total=2, review_accepted=1)
+        row = d.list_prs()[0]
+        assert json.loads(row["labels_json"])[0]["name"] == \
+            "ci-pipeline-failed"
+        assert (row["draft"], row["review_total"], row["review_accepted"]) == \
+            (0, 2, 1)
+        d.close()
+        # 迁移幂等：重复 init 不报错、数据保留
+        d2 = db_mod.init_db(path)
+        assert d2.list_prs()[0]["review_total"] == 2
         d2.close()
 
     def test_kv_get_default(self, db):
@@ -489,6 +545,50 @@ class TestPrs:
         assert len(open_prs) == 1
         assert open_prs[0]["repo"] == "boostkit"
         assert open_prs[0]["title"] == "仓 B 的 PR"
+
+
+# ── 派生状态原始信号列 ────────────────────────────────────────
+
+
+class TestPrSignals:
+    def test_upsert_with_labels_and_draft(self, db):
+        """upsert 带 labels/draft 落库；再 upsert 不带时不覆盖已有信号。"""
+        db.upsert_pr("Ascend", "msprof", 12,
+                     labels=[{"name": "ci-pipeline-failed",
+                              "color": "#DB2828"}],
+                     draft=True)
+        row = db.list_prs()[0]
+        labels = json.loads(row["labels_json"])
+        assert labels == [{"name": "ci-pipeline-failed", "color": "#DB2828"}]
+        assert row["draft"] == 1
+        # 再次 upsert 不带信号：COALESCE 保留已有值
+        db.upsert_pr("Ascend", "msprof", 12, title="新标题")
+        row = db.list_prs()[0]
+        assert row["title"] == "新标题"
+        assert json.loads(row["labels_json"])[0]["name"] == \
+            "ci-pipeline-failed"
+        assert row["draft"] == 1
+
+    def test_apply_pr_state_signals_roundtrip(self, db):
+        """apply_pr_state 落 labels/draft/评审计数；缺省 None 不覆盖。"""
+        db.upsert_pr("Ascend", "msprof", 12)
+        db.apply_pr_state("Ascend", "msprof", 12, "open",
+                          labels=[{"name": "cann-cla/no", "color": "#DB2828"}],
+                          draft=False, review_total=3, review_accepted=1)
+        row = db.list_prs()[0]
+        assert json.loads(row["labels_json"])[0]["name"] == "cann-cla/no"
+        assert (row["draft"], row["review_total"],
+                row["review_accepted"]) == (0, 3, 1)
+        # 普通状态更新不带信号：已有信号保留
+        db.apply_pr_state("Ascend", "msprof", 12, "open", mergeable=True)
+        row = db.list_prs()[0]
+        assert row["mergeable"] == 1
+        assert row["review_total"] == 3 and row["review_accepted"] == 1
+        assert row["labels_json"] is not None
+        # 评审计数可更新（部分通过 → 全部通过）
+        db.apply_pr_state("Ascend", "msprof", 12, "open",
+                          review_total=3, review_accepted=3)
+        assert db.list_prs()[0]["review_accepted"] == 3
 
 
 # ── push 事件 ────────────────────────────────────────────────

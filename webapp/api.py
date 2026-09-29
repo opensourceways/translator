@@ -33,6 +33,7 @@ from translator_ci import client, common
 
 from webapp.config import Settings
 from webapp.db import init_db, init_shadow, is_shadow, set_shadow
+from webapp.prstatus import derive
 from webapp.prsync import Poller
 from webapp.queueing import CoalescingQueue, Trigger
 from webapp.runner import Worker
@@ -279,10 +280,13 @@ def create_app(settings=None):
     @app.get("/prs", response_class=HTMLResponse, dependencies=dash)
     async def page_prs(request: Request):
         db = request.app.state.db
+        prs = db.list_prs()
+        for pr in prs:
+            pr["derived"] = derive(pr)
         return templates.TemplateResponse(
             request, "prs.html",
             _ctx(request, summary=db.summary(),
-                 orgs=_group_prs(db.list_prs(), db.latest_repo_statuses())))
+                 orgs=_group_prs(prs, db.latest_repo_statuses())))
 
     # ── 只读 JSON ────────────────────────────────────────────
 
@@ -316,9 +320,15 @@ def create_app(settings=None):
     @app.get("/api/prs", dependencies=dash)
     async def api_prs(request: Request, state: str = Query(default=""),
                       group_by: str = Query(default="")):
-        """PR 列表：默认平铺（兼容旧结构）；?group_by=org 返回分组结构。"""
+        """PR 列表：默认平铺（兼容旧结构）；?group_by=org 返回分组结构。
+
+        每个 PR 对象附 derived 派生状态（key/text/color/guidance，
+        由 prstatus.derive 从原始信号现算，调映射规则无需重新轮询）。
+        """
         db = request.app.state.db
         prs = db.list_prs(state=state or None)
+        for pr in prs:
+            pr["derived"] = derive(pr)
         if group_by == "org":
             return {"orgs": _group_prs(prs, db.latest_repo_statuses())}
         return {"prs": prs}
