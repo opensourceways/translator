@@ -46,6 +46,42 @@ _REF_PATTERN = re.compile(r"^(refs/heads/main|main|)$")
 _TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 
 
+def _group_prs(prs, statuses):
+    """把 PR 列表与最新仓库状态合并为 社区(org) → (repo, branch) 分组结构。
+
+    每组含该仓最新 run 状态（latest，无 run 记录为 None）与该仓全部 PR
+    （number 倒序）；仅在 run_repos 中出现但没有任何 PR 的仓库也会成组
+    （prs 为空，模板据此显示「未发现 PR」）。org 与组内仓库均按字母序
+    稳定排序；org 附 open/merged/closed 三态计数（徽标用）。
+
+    Returns:
+        list[dict]: [{org, counts, repos: [{org, repo, branch, latest,
+        prs}]}]。
+    """
+    groups = {}
+    for s in statuses:
+        groups[(s["org"], s["repo"], s["branch"])] = {
+            "org": s["org"], "repo": s["repo"], "branch": s["branch"],
+            "latest": s, "prs": []}
+    for pr in prs:
+        key = (pr["org"], pr["repo"], pr.get("branch"))
+        groups.setdefault(key, {"org": key[0], "repo": key[1],
+                                "branch": key[2], "latest": None,
+                                "prs": []})["prs"].append(pr)
+    orgs = {}
+    for key in sorted(groups, key=lambda k: (k[0], k[1], k[2] or "")):
+        g = groups[key]
+        g["prs"].sort(key=lambda p: p["number"], reverse=True)
+        org = orgs.setdefault(key[0], {
+            "org": key[0], "counts": {"open": 0, "merged": 0, "closed": 0},
+            "repos": []})
+        org["repos"].append(g)
+        for pr in g["prs"]:
+            if pr.get("state") in org["counts"]:
+                org["counts"][pr["state"]] += 1
+    return [orgs[name] for name in sorted(orgs)]
+
+
 def _localtime(value):
     """库中 UTC ISO8601 时间戳转服务器本地时区显示。"""
     if not value:
@@ -244,7 +280,9 @@ def create_app(settings=None):
     async def page_prs(request: Request):
         db = request.app.state.db
         return templates.TemplateResponse(
-            request, "prs.html", _ctx(request, prs=db.list_prs()))
+            request, "prs.html",
+            _ctx(request, summary=db.summary(),
+                 orgs=_group_prs(db.list_prs(), db.latest_repo_statuses())))
 
     # ── 只读 JSON ────────────────────────────────────────────
 
@@ -276,8 +314,14 @@ def create_app(settings=None):
         return {"run_id": run_id, "log": run.get("log") or ""}
 
     @app.get("/api/prs", dependencies=dash)
-    async def api_prs(request: Request, state: str = Query(default="")):
-        return {"prs": request.app.state.db.list_prs(state=state or None)}
+    async def api_prs(request: Request, state: str = Query(default=""),
+                      group_by: str = Query(default="")):
+        """PR 列表：默认平铺（兼容旧结构）；?group_by=org 返回分组结构。"""
+        db = request.app.state.db
+        prs = db.list_prs(state=state or None)
+        if group_by == "org":
+            return {"orgs": _group_prs(prs, db.latest_repo_statuses())}
+        return {"prs": prs}
 
     # ── 管理端点 ─────────────────────────────────────────────
 

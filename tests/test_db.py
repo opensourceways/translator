@@ -345,6 +345,73 @@ class TestRecordSubmitResults:
         assert db.get_run(run_id)["failed_count"] == 1
 
 
+# ── 每仓最新状态（/prs 面板） ─────────────────────────────────
+
+
+def _changed_scan(org, repo, branch, new=1, upd=0):
+    """模拟只含一个 changed 仓库的 scan_changed 返回。"""
+    return {"ok": True, "changed": [{
+        "project": {"path": f"{org}/{branch}/{repo}"},
+        "org": org, "repo": repo, "branch": branch, "files": [],
+        "new_count": new, "update_count": upd}],
+        "unchanged": [], "skipped": [], "errors": []}
+
+
+class TestLatestRepoStatuses:
+    def test_empty(self, db):
+        assert db.latest_repo_statuses() == []
+
+    def test_null_org_repo_rows_skipped(self, db):
+        """unchanged/skipped/error 行 org/repo 为 NULL，不产生状态行。"""
+        run_id = db.create_run("webhook", True)
+        db.record_scan_results(run_id, {
+            "ok": True, "changed": [], "unchanged": ["Ascend/x/y"],
+            "skipped": [{"path": "a/b", "reason": "黑名单"}],
+            "errors": [{"path": "c/d", "error": "e"}]})
+        assert db.latest_repo_statuses() == []
+
+    def test_latest_across_runs(self, db):
+        """同一 (org, repo, branch) 跨多次 run：取最近一次的状态；
+        未参与新 run 的仓库保留其最近一次 run 的状态。"""
+        r1 = db.create_run("webhook", True)
+        db.record_scan_results(
+            r1, _changed_scan("Ascend", "msprof", "26.1.0"), shadow=True)
+        db.record_scan_results(
+            r1, _changed_scan("Ascend", "toolkit", "26.1.0"), shadow=True)
+        db.mark_run(r1, "success")
+        r2 = db.create_run("webhook", True)
+        db.record_scan_results(
+            r2, _changed_scan("Ascend", "msprof", "26.1.0", new=2, upd=3))
+        db.record_submit_results(r2, [{
+            "path": "Ascend/26.1.0/msprof", "ok": True, "pr_existed": False,
+            "pr_number": 12, "pr_url": "https://gitcode.com/x/12"}])
+        db.mark_run(r2, "success")
+
+        rows = {(row["repo"]): row for row in db.latest_repo_statuses()}
+        assert set(rows) == {"msprof", "toolkit"}
+        latest = rows["msprof"]
+        assert latest["run_id"] == r2
+        assert latest["status"] == "submit_ok"
+        assert latest["new_count"] == 2 and latest["update_count"] == 3
+        assert latest["pr_number"] == 12
+        assert latest["pr_url"] == "https://gitcode.com/x/12"
+        assert latest["finished_at"] == db.get_run(r2)["finished_at"]
+        # toolkit 未参与 r2，保留 r1 的影子状态
+        assert rows["toolkit"]["run_id"] == r1
+        assert rows["toolkit"]["status"] == "would_submit"
+
+    def test_branches_are_separate_rows(self, db):
+        """同仓不同 branch 各自成行，按 (org, repo, branch) 稳定排序。"""
+        r1 = db.create_run("webhook", True)
+        db.record_scan_results(
+            r1, _changed_scan("Ascend", "msprof", "master"), shadow=True)
+        db.record_scan_results(
+            r1, _changed_scan("Ascend", "msprof", "26.1.0"), shadow=True)
+        rows = db.latest_repo_statuses()
+        assert [(r["repo"], r["branch"]) for r in rows] == [
+            ("msprof", "26.1.0"), ("msprof", "master")]
+
+
 # ── PR 追踪 ──────────────────────────────────────────────────
 
 

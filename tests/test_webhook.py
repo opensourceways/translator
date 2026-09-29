@@ -330,9 +330,21 @@ class TestPages:
             assert "扫描完成" in r.text
             assert client.get("/runs/999").status_code == 404
 
-    def test_prs_page_shows_pr_link(self, tmp_path, monkeypatch):
-        """PR 页 200 且含 PR 链接与状态。"""
+    def _seed_repo_run(self, db_path, shadow=True):
+        """播种一条含 o1/r1@master changed 记录的已完成 run，返回 run id。"""
+        run_id = _seed_run(db_path)
+        db = db_mod.init_db(db_path)
+        db.record_scan_results(run_id, {
+            "changed": [{"project": {"path": "Ascend/x"}, "org": "o1",
+                         "repo": "r1", "branch": "master", "files": []}],
+            "unchanged": [], "skipped": [], "errors": []}, shadow=shadow)
+        db.close()
+        return run_id
+
+    def test_prs_page_grouped_with_latest_status(self, tmp_path, monkeypatch):
+        """PR 页按 社区→仓库 分组：仓库卡片含最新 run 状态徽章与 PR 行。"""
         settings = _make_settings(tmp_path)
+        run_id = self._seed_repo_run(settings.db_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
             app.state.db.upsert_pr(
                 "o1", "r1", 42, branch="master", path="Ascend/x",
@@ -340,7 +352,50 @@ class TestPages:
             r = client.get("/prs")
             assert r.status_code == 200
             assert "http://gitcode/o1/r1/pulls/42" in r.text
-            assert "o1/r1" in r.text and "open" in r.text
+            assert "repo-card" in r.text
+            assert "would_submit" in r.text  # 最新 run 状态徽章
+            assert f"/runs/{run_id}" in r.text  # 徽章链接到 run 详情页
+            assert "open 1" in r.text  # 社区 open 计数徽标
+
+    def test_prs_page_known_repo_without_pr(self, tmp_path, monkeypatch):
+        """已知仓库（有 run 记录）但无任何 PR：显示「未发现 PR」。"""
+        settings = _make_settings(tmp_path)
+        self._seed_repo_run(settings.db_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.get("/prs")
+            assert r.status_code == 200
+            assert "repo-card" in r.text and "r1" in r.text
+            assert "未发现 PR" in r.text
+
+    def test_prs_page_empty_db(self, tmp_path, monkeypatch):
+        """空库：友好空态，不报错。"""
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.get("/prs")
+            assert r.status_code == 200
+            assert "暂无数据" in r.text
+
+    def test_api_prs_group_by_org(self, tmp_path, monkeypatch):
+        """?group_by=org 返回分组结构；默认仍返回平铺（兼容）。"""
+        settings = _make_settings(tmp_path)
+        run_id = self._seed_repo_run(settings.db_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            db = app.state.db
+            db.upsert_pr("o1", "r1", 2, branch="master", state="open")
+            db.upsert_pr("o1", "r1", 5, branch="master", state="merged")
+            body = client.get("/api/prs?group_by=org").json()
+            (org,) = body["orgs"]
+            assert org["org"] == "o1"
+            assert org["counts"] == {"open": 1, "merged": 1, "closed": 0}
+            (g,) = org["repos"]
+            assert g["repo"] == "r1" and g["branch"] == "master"
+            assert g["latest"]["status"] == "would_submit"
+            assert g["latest"]["run_id"] == run_id
+            assert g["latest"]["finished_at"] is not None
+            assert [p["number"] for p in g["prs"]] == [5, 2]  # number 倒序
+            # 默认平铺结构不变
+            flat = client.get("/api/prs").json()
+            assert "prs" in flat and len(flat["prs"]) == 2
 
     def test_api_readonly(self, tmp_path, monkeypatch):
         """只读 JSON：summary/runs/run 详情（含 repos，不含 log）/log/prs。"""

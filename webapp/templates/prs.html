@@ -1,44 +1,127 @@
 {% extends "base.html" %}
 {% block title %}PR - translator-ci{% endblock %}
 {% block content %}
+<style>
+/* 本页专属徽章配色（不影响 run 页）：run 状态 紫/绿/灰/黄/红，PR 状态 蓝/绿/灰 */
+.badge.would_submit { background: #ede9fe; color: #5b21b6; }
+.badge.submit_ok { background: #dcfce7; color: #166534; }
+.badge.noop { background: #e2e8f0; color: #475569; }
+.badge.skipped { background: #fef9c3; color: #854d0e; }
+.badge.merged { background: #dcfce7; color: #166534; }
+.org { margin-top: 24px; }
+.org h2 { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.repo-card { display: block; margin-bottom: 14px; }
+.repo-card .repo-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.repo-card .repo-head .name { font-size: 14px; }
+.repo-card table { margin-top: 4px; }
+</style>
 <h1>Pull Requests</h1>
-<table>
-<thead><tr><th>仓库</th><th>PR</th><th>标题</th><th>状态</th><th>可合并</th><th>来源</th><th>路径</th><th>分支</th><th>最近轮询</th><th>合入时间</th></tr></thead>
-<tbody id="prs-body">
-{% for pr in prs %}
-<tr>
-  <td>{{ pr.org }}/{{ pr.repo }}</td>
-  <td>{% if pr.url %}<a href="{{ pr.url }}">#{{ pr.number }}</a>{% else %}#{{ pr.number }}{% endif %}</td>
-  <td>{{ pr.title or '' }}</td>
-  <td><span class="badge {{ pr.state }}">{{ pr.state }}</span></td>
-  <td>{% if pr.mergeable is none %}?{% elif pr.mergeable %}是{% else %}否{% endif %}</td>
-  <td>{{ pr.source or '' }}</td>
-  <td>{{ pr.path or '' }}</td>
-  <td>{{ pr.branch or '' }}</td>
-  <td>{{ pr.last_polled | localtime }}</td>
-  <td>{{ pr.merged_at | localtime }}</td>
-</tr>
+<div class="cards" id="prs-summary">
+  <div class="card"><div class="num" data-sum="total">{{ summary.prs_total }}</div><div class="label">PR 总数</div></div>
+  <div class="card"><div class="num" data-sum="open">{{ summary.prs_by_state.get('open', 0) }}</div><div class="label">Open</div></div>
+  <div class="card"><div class="num" data-sum="merged">{{ summary.prs_by_state.get('merged', 0) }}</div><div class="label">已合入</div></div>
+  <div class="card"><div class="num" data-sum="closed">{{ summary.prs_by_state.get('closed', 0) }}</div><div class="label">已关闭</div></div>
+</div>
+<div id="prs-groups">
+{% for org in orgs %}
+<section class="org">
+  <h2>{{ org.org }}
+    <span class="badge open">open {{ org.counts.open }}</span>
+    <span class="badge merged">merged {{ org.counts.merged }}</span>
+    <span class="badge closed">closed {{ org.counts.closed }}</span>
+  </h2>
+  {% for g in org.repos %}
+  <div class="card repo-card">
+    <div class="repo-head">
+      <strong class="name">{{ g.repo }}</strong>
+      {% if g.branch %}<span class="badge">{{ g.branch }}</span>{% endif %}
+      {% if g.latest %}
+      <a href="/runs/{{ g.latest.run_id }}" data-link><span class="badge {{ g.latest.status }}">{{ g.latest.status }}</span></a>
+      <span class="muted">+{{ g.latest.new_count }} ~{{ g.latest.update_count }} · {{ g.latest.finished_at | localtime }}</span>
+      {% if g.latest.pr_url %}<a href="{{ g.latest.pr_url }}">#{{ g.latest.pr_number }}</a>{% endif %}
+      {% else %}
+      <span class="muted">暂无 run 记录</span>
+      {% endif %}
+    </div>
+    {% if g.prs %}
+    <table>
+    <thead><tr><th>PR</th><th>标题</th><th>状态</th><th>可合并</th><th>来源</th><th>目标分支</th><th>最近轮询</th><th>合入/关闭时间</th></tr></thead>
+    <tbody>
+    {% for pr in g.prs %}
+    <tr>
+      <td>{% if pr.url %}<a href="{{ pr.url }}">#{{ pr.number }}</a>{% else %}#{{ pr.number }}{% endif %}</td>
+      <td>{{ pr.title or '' }}</td>
+      <td><span class="badge {{ pr.state }}">{{ pr.state }}</span></td>
+      <td>{% if pr.mergeable is none %}?{% elif pr.mergeable %}是{% else %}否{% endif %}</td>
+      <td>{{ pr.source or '' }}</td>
+      <td>{{ pr.branch or '' }}</td>
+      <td>{{ pr.last_polled | localtime }}</td>
+      <td>{{ (pr.merged_at or pr.closed_at) | localtime }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+    </table>
+    {% else %}
+    <p class="muted">未发现 PR</p>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
 {% else %}
-<tr><td colspan="10" class="muted">暂无 PR</td></tr>
+<p class="muted">暂无数据：尚未有任何 run 或 PR 记录。</p>
 {% endfor %}
-</tbody>
-</table>
+</div>
 {% endblock %}
 {% block script %}
 <script>
+function renderPrRow(pr) {
+  return `<tr>` +
+    `<td>${pr.url ? `<a href="${esc(pr.url)}">#${pr.number}</a>` : '#' + pr.number}</td>` +
+    `<td>${esc(pr.title || '')}</td>` +
+    `<td><span class="badge ${esc(pr.state)}">${esc(pr.state)}</span></td>` +
+    `<td>${pr.mergeable == null ? '?' : (pr.mergeable ? '是' : '否')}</td>` +
+    `<td>${esc(pr.source || '')}</td>` +
+    `<td>${esc(pr.branch || '')}</td>` +
+    `<td>${fmtTs(pr.last_polled)}</td>` +
+    `<td>${fmtTs(pr.merged_at || pr.closed_at)}</td></tr>`;
+}
+function renderGroup(g) {
+  const latest = g.latest
+    ? `<a href="${withToken('/runs/' + g.latest.run_id)}"><span class="badge ${esc(g.latest.status)}">${esc(g.latest.status)}</span></a>` +
+      `<span class="muted">+${g.latest.new_count} ~${g.latest.update_count} · ${fmtTs(g.latest.finished_at)}</span>` +
+      (g.latest.pr_url ? `<a href="${esc(g.latest.pr_url)}">#${g.latest.pr_number}</a>` : '')
+    : '<span class="muted">暂无 run 记录</span>';
+  const body = g.prs.length
+    ? `<table><thead><tr><th>PR</th><th>标题</th><th>状态</th><th>可合并</th><th>来源</th><th>目标分支</th><th>最近轮询</th><th>合入/关闭时间</th></tr></thead>` +
+      `<tbody>${g.prs.map(renderPrRow).join('')}</tbody></table>`
+    : '<p class="muted">未发现 PR</p>';
+  return `<div class="card repo-card"><div class="repo-head">` +
+    `<strong class="name">${esc(g.repo)}</strong>` +
+    (g.branch ? `<span class="badge">${esc(g.branch)}</span>` : '') +
+    latest + `</div>` + body + `</div>`;
+}
+function renderOrgs(orgs) {
+  if (!orgs.length) return '<p class="muted">暂无数据：尚未有任何 run 或 PR 记录。</p>';
+  return orgs.map(org =>
+    `<section class="org"><h2>${esc(org.org)} ` +
+    `<span class="badge open">open ${org.counts.open}</span> ` +
+    `<span class="badge merged">merged ${org.counts.merged}</span> ` +
+    `<span class="badge closed">closed ${org.counts.closed}</span></h2>` +
+    org.repos.map(renderGroup).join('') + `</section>`
+  ).join('');
+}
 async function refresh() {
   try {
-    const data = await (await fetch(withToken('/api/prs'))).json();
-    document.getElementById('prs-body').innerHTML = data.prs.map(pr =>
-      `<tr><td>${esc(pr.org)}/${esc(pr.repo)}</td>` +
-      `<td>${pr.url ? `<a href="${esc(pr.url)}">#${pr.number}</a>` : '#' + pr.number}</td>` +
-      `<td>${esc(pr.title || '')}</td>` +
-      `<td><span class="badge ${esc(pr.state)}">${esc(pr.state)}</span></td>` +
-      `<td>${pr.mergeable == null ? '?' : (pr.mergeable ? '是' : '否')}</td>` +
-      `<td>${esc(pr.source || '')}</td>` +
-      `<td>${esc(pr.path || '')}</td><td>${esc(pr.branch || '')}</td>` +
-      `<td>${fmtTs(pr.last_polled)}</td><td>${fmtTs(pr.merged_at)}</td></tr>`
-    ).join('') || '<tr><td colspan="10" class="muted">暂无 PR</td></tr>';
+    const data = await (await fetch(withToken('/api/prs?group_by=org'))).json();
+    document.getElementById('prs-groups').innerHTML = renderOrgs(data.orgs);
+    const sums = { total: 0, open: 0, merged: 0, closed: 0 };
+    data.orgs.forEach(org => {
+      ['open', 'merged', 'closed'].forEach(s => { sums[s] += org.counts[s] || 0; });
+    });
+    sums.total = sums.open + sums.merged + sums.closed;
+    document.querySelectorAll('#prs-summary [data-sum]').forEach(el => {
+      el.textContent = sums[el.dataset.sum];
+    });
   } catch (e) { /* 轮询失败下轮再试 */ }
 }
 setInterval(refresh, 5000);

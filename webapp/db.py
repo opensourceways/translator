@@ -456,6 +456,29 @@ class Database:
         return sorted(seen.values(),
                       key=lambda r: (r["org"], r["repo"], r["branch"] or ""))
 
+    def latest_repo_statuses(self):
+        """每个 (org, repo, branch) 取最近一次 run 中的仓库状态（/prs 面板用）。
+
+        以 run_repos.id 最大者为准（id 随 run 递增，等价于最新一次 run）；
+        org/repo 为 NULL 的行（unchanged/skipped/error 等无目标仓信息）
+        跳过。结果按 (org, repo, branch) 排序，保证稳定。
+
+        Returns:
+            list[dict]: org/repo/branch/status/new_count/update_count/
+            pr_number/pr_url/run_id/finished_at（所属 run 的结束时间）。
+        """
+        with self._lock:
+            return self._all(
+                "SELECT rr.org, rr.repo, rr.branch, rr.status,"
+                " rr.new_count, rr.update_count, rr.pr_number, rr.pr_url,"
+                " rr.run_id, r.finished_at"
+                " FROM run_repos rr JOIN runs r ON rr.run_id = r.id"
+                " WHERE rr.org IS NOT NULL AND rr.repo IS NOT NULL"
+                " AND rr.id = (SELECT MAX(rr2.id) FROM run_repos rr2"
+                "              WHERE rr2.org = rr.org AND rr2.repo = rr.repo"
+                "              AND rr2.branch IS rr.branch)"
+                " ORDER BY rr.org, rr.repo, rr.branch")
+
     # ── 查询 ─────────────────────────────────────────────────
 
     def list_runs(self, limit=50):
