@@ -356,6 +356,10 @@ class TestPages:
             assert "would_submit" in r.text  # 最新 run 状态徽章
             assert f"/runs/{run_id}" in r.text  # 徽章链接到 run 详情页
             assert "open 1" in r.text  # 社区 open 计数徽标
+            # tab 结构：社区 tab 栏 + 仓库子 tab
+            assert 'id="org-tabs"' in r.text
+            assert 'class="tab active" data-org="o1"' in r.text
+            assert 'data-repo="r1|master"' in r.text
 
     def test_prs_page_known_repo_without_pr(self, tmp_path, monkeypatch):
         """已知仓库（有 run 记录）但无任何 PR：显示「未发现 PR」。"""

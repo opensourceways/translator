@@ -15,9 +15,17 @@
 .badge.d-blue { background: #dbeafe; color: #1e40af; }
 .badge.d-gray { background: #e2e8f0; color: #475569; }
 .small { font-size: 12px; margin-top: 2px; }
-.org { margin-top: 24px; }
-.org h2 { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
-.repo-card { display: block; margin-bottom: 14px; }
+/* 两级 tab：社区 → 仓库 */
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; border-bottom: 2px solid #e5e7eb; }
+.tabs.sub { margin-top: 14px; border-bottom: 1px solid #eef0f2; }
+.tab { border: 1px solid transparent; border-bottom: none; background: transparent; border-radius: 6px 6px 0 0; padding: 7px 14px; font-size: 13px; cursor: pointer; color: #475569; display: inline-flex; gap: 6px; align-items: center; font-family: inherit; }
+.tab:hover { color: #111827; background: #eceef1; }
+.tab.active { background: #fff; border-color: #e5e7eb; color: #111827; font-weight: 600; margin-bottom: -2px; border-bottom: 2px solid #fff; }
+.tabs.sub .tab.active { margin-bottom: -1px; border-bottom: 1px solid #fff; }
+.org-pane { display: none; }
+.org-pane.active { display: block; }
+.repo-card { display: none; margin-top: 14px; }
+.repo-card.active { display: block; }
 .repo-card .repo-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
 .repo-card .repo-head .name { font-size: 14px; }
 .repo-card table { margin-top: 4px; }
@@ -30,15 +38,25 @@
   <div class="card"><div class="num" data-sum="closed">{{ summary.prs_by_state.get('closed', 0) }}</div><div class="label">已关闭</div></div>
 </div>
 <div id="prs-groups">
-{% for org in orgs %}
-<section class="org">
-  <h2>{{ org.org }}
+{% if orgs %}
+<div class="tabs" id="org-tabs">
+  {% for org in orgs %}
+  <button type="button" class="tab{% if loop.first %} active{% endif %}" data-org="{{ org.org }}">{{ org.org }}
     <span class="badge open">open {{ org.counts.open }}</span>
     <span class="badge merged">merged {{ org.counts.merged }}</span>
     <span class="badge closed">closed {{ org.counts.closed }}</span>
-  </h2>
+  </button>
+  {% endfor %}
+</div>
+{% for org in orgs %}
+<div class="org-pane{% if loop.first %} active{% endif %}" data-org="{{ org.org }}">
+  <div class="tabs sub">
+    {% for g in org.repos %}
+    <button type="button" class="tab{% if loop.first %} active{% endif %}" data-repo="{{ g.repo }}|{{ g.branch or '' }}">{{ g.repo }}{% if g.branch %} <span class="badge">{{ g.branch }}</span>{% endif %}{% if g.prs %} <span class="muted">{{ g.prs | length }}</span>{% endif %}</button>
+    {% endfor %}
+  </div>
   {% for g in org.repos %}
-  <div class="card repo-card">
+  <div class="card repo-card{% if loop.first %} active{% endif %}" data-repo="{{ g.repo }}|{{ g.branch or '' }}">
     <div class="repo-head">
       <strong class="name">{{ g.repo }}</strong>
       {% if g.branch %}<span class="badge">{{ g.branch }}</span>{% endif %}
@@ -75,14 +93,39 @@
     {% endif %}
   </div>
   {% endfor %}
-</section>
+</div>
+{% endfor %}
 {% else %}
 <p class="muted">暂无数据：尚未有任何 run 或 PR 记录。</p>
-{% endfor %}
+{% endif %}
 </div>
 {% endblock %}
 {% block script %}
 <script>
+// tab 选中状态：社区用 activeOrg，仓库按社区各自记忆（刷新重绘后恢复）
+let activeOrg = null;
+const activeRepoByOrg = {};
+function repoKey(g) { return g.repo + '|' + (g.branch || ''); }
+
+document.addEventListener('click', e => {
+  const btn = e.target.closest('#prs-groups .tab');
+  if (!btn) return;
+  if (btn.dataset.org) {
+    activeOrg = btn.dataset.org;
+    document.querySelectorAll('#org-tabs .tab').forEach(
+      t => t.classList.toggle('active', t.dataset.org === activeOrg));
+    document.querySelectorAll('#prs-groups .org-pane').forEach(
+      p => p.classList.toggle('active', p.dataset.org === activeOrg));
+  } else if (btn.dataset.repo) {
+    const pane = btn.closest('.org-pane');
+    activeRepoByOrg[pane.dataset.org] = btn.dataset.repo;
+    pane.querySelectorAll('.tabs.sub .tab').forEach(
+      t => t.classList.toggle('active', t.dataset.repo === btn.dataset.repo));
+    pane.querySelectorAll('.repo-card').forEach(
+      p => p.classList.toggle('active', p.dataset.repo === btn.dataset.repo));
+  }
+});
+
 function renderPrRow(pr) {
   const d = pr.derived || {};
   return `<tr>` +
@@ -97,7 +140,7 @@ function renderPrRow(pr) {
     `<td>${fmtTs(pr.last_polled)}</td>` +
     `<td>${fmtTs(pr.merged_at || pr.closed_at)}</td></tr>`;
 }
-function renderGroup(g) {
+function renderGroup(g, active) {
   const latest = g.latest
     ? `<a href="${withToken('/runs/' + g.latest.run_id)}"><span class="badge ${esc(g.latest.status)}">${esc(g.latest.status)}</span></a>` +
       `<span class="muted">+${g.latest.new_count} ~${g.latest.update_count} · ${fmtTs(g.latest.finished_at)}</span>` +
@@ -107,20 +150,37 @@ function renderGroup(g) {
     ? `<table><thead><tr><th>PR</th><th>标题</th><th>状态</th><th>进度</th><th>可合并</th><th>来源</th><th>目标分支</th><th>最近轮询</th><th>合入/关闭时间</th></tr></thead>` +
       `<tbody>${g.prs.map(renderPrRow).join('')}</tbody></table>`
     : '<p class="muted">未发现 PR</p>';
-  return `<div class="card repo-card"><div class="repo-head">` +
+  return `<div class="card repo-card${active ? ' active' : ''}" data-repo="${esc(repoKey(g))}"><div class="repo-head">` +
     `<strong class="name">${esc(g.repo)}</strong>` +
     (g.branch ? `<span class="badge">${esc(g.branch)}</span>` : '') +
     latest + `</div>` + body + `</div>`;
 }
 function renderOrgs(orgs) {
   if (!orgs.length) return '<p class="muted">暂无数据：尚未有任何 run 或 PR 记录。</p>';
-  return orgs.map(org =>
-    `<section class="org"><h2>${esc(org.org)} ` +
+  if (!orgs.some(o => o.org === activeOrg)) activeOrg = orgs[0].org;
+  const tabs = orgs.map(org =>
+    `<button type="button" class="tab${org.org === activeOrg ? ' active' : ''}" data-org="${esc(org.org)}">${esc(org.org)} ` +
     `<span class="badge open">open ${org.counts.open}</span> ` +
     `<span class="badge merged">merged ${org.counts.merged}</span> ` +
-    `<span class="badge closed">closed ${org.counts.closed}</span></h2>` +
-    org.repos.map(renderGroup).join('') + `</section>`
+    `<span class="badge closed">closed ${org.counts.closed}</span></button>`
   ).join('');
+  const panes = orgs.map(org => {
+    let repo = activeRepoByOrg[org.org];
+    if (!org.repos.some(g => repoKey(g) === repo)) {
+      repo = org.repos.length ? repoKey(org.repos[0]) : null;
+      activeRepoByOrg[org.org] = repo;
+    }
+    const subTabs = org.repos.map(g =>
+      `<button type="button" class="tab${repoKey(g) === repo ? ' active' : ''}" data-repo="${esc(repoKey(g))}">${esc(g.repo)}` +
+      (g.branch ? ` <span class="badge">${esc(g.branch)}</span>` : '') +
+      (g.prs.length ? ` <span class="muted">${g.prs.length}</span>` : '') +
+      `</button>`
+    ).join('');
+    return `<div class="org-pane${org.org === activeOrg ? ' active' : ''}" data-org="${esc(org.org)}">` +
+      `<div class="tabs sub">${subTabs}</div>` +
+      org.repos.map(g => renderGroup(g, repoKey(g) === repo)).join('') + `</div>`;
+  }).join('');
+  return `<div class="tabs" id="org-tabs">${tabs}</div>` + panes;
 }
 async function refresh() {
   try {
