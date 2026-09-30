@@ -160,7 +160,7 @@ Worker 线程执行扫描/提交，SQLite 落库，自带 Dashboard 监控页面
 
 ```bash
 cp .env.example .env
-# 编辑 .env：至少填 GITCODE_TOKEN、TC_WEBHOOK_TOKEN、TC_ADMIN_TOKEN
+# 编辑 .env：至少填 GITCODE_TOKEN、TC_WEBHOOK_TOKEN（TC_ADMIN_TOKEN 可选）
 docker compose up -d --build
 curl http://localhost:8000/healthz   # {"status":"ok","shadow":true,...}
 ```
@@ -204,8 +204,9 @@ curl -X POST http://localhost:8000/api/config/shadow \
   `/prs` 为运行记录与 PR 状态页（`/prs` 按 社区 → 仓库 两级 tab 浏览）
 - `/settings`：自动提 PR 开关页。只有在此**添加并启用**的
   社区/仓库/分支（分支留空=该仓全部分支）才会在 active 模式下真正创建
-  PR，未列出的仓库一律跳过（默认拒绝）；修改操作需 TC_ADMIN_TOKEN
-  （页面顶部输入，仅存浏览器 localStorage）
+  PR，未列出的仓库一律跳过（默认拒绝）；`TC_ADMIN_TOKEN` 未配置时修改
+  操作无需鉴权（内部工具，默认内网部署），配置后需在页面顶部输入 token
+  （仅存浏览器 localStorage）
 - 只读 JSON：`/api/summary`、`/api/runs`、`/api/runs/{id}`、
   `/api/runs/{id}/log`、`/api/prs`、`/api/settings/auto-pr`
 - 配置 `TC_DASH_TOKEN` 后页面与只读 API 都需鉴权；留空则放开（默认

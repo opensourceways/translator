@@ -180,13 +180,24 @@ class TestWebhookEvents:
 
 
 class TestAdminEndpoints:
-    def test_admin_token_empty_fails_closed(self, tmp_path, monkeypatch):
-        """admin_token 未配置：管理端点一律 403。"""
+    def test_admin_token_empty_open(self, tmp_path, monkeypatch):
+        """admin_token 未配置：管理端点放开（内部工具，默认内网部署）。"""
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
             r = client.post("/api/runs", json={"full_scan": True})
-            assert r.status_code == 403
+            assert r.status_code == 202
             r = client.post("/api/config/shadow", json={"enabled": False})
+            assert r.status_code == 200
+            assert app.state.queue.pending_count() == 1
+
+    def test_admin_token_wrong_403(self, tmp_path, monkeypatch):
+        """admin_token 配置后：token 错误/缺失一律 403。"""
+        settings = _make_settings(tmp_path, admin_token="adm")
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.post("/api/runs", json={"full_scan": True})
+            assert r.status_code == 403
+            r = client.post("/api/runs", json={"full_scan": True},
+                            headers={"X-Admin-Token": "wrong"})
             assert r.status_code == 403
             assert app.state.queue.pending_count() == 0
 
@@ -483,17 +494,32 @@ class TestAutoPrSettings:
             app.state.db.upsert_auto_pr_entry("o1", "r1", "master")
             assert 'class="btn small sugg"' not in client.get("/settings").text
 
-    def test_mutations_require_admin_token(self, tmp_path, monkeypatch):
-        """admin_token 未配置：三个修改端点一律 403（fail closed）。"""
+    def test_mutations_open_when_admin_token_unset(
+            self, tmp_path, monkeypatch):
+        """admin_token 未配置：修改端点放开（内网部署模式）。"""
         settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.post("/api/settings/auto-pr",
+                            json={"org": "o", "repo": "r"})
+            assert r.status_code == 200
+            entry_id = r.json()["id"]
+            assert client.post(f"/api/settings/auto-pr/{entry_id}",
+                               json={"enabled": False}).status_code == 200
+            assert client.delete(
+                f"/api/settings/auto-pr/{entry_id}").status_code == 200
+            # 只读列表走 dash 鉴权（未配置时放开）
+            assert client.get("/api/settings/auto-pr").status_code == 200
+
+    def test_mutations_403_with_wrong_admin_token(
+            self, tmp_path, monkeypatch):
+        """admin_token 配置后：错误 token 一律 403。"""
+        settings = _make_settings(tmp_path, admin_token="adm")
         with _client(settings, monkeypatch) as (client, app, _, _):
             assert client.post("/api/settings/auto-pr",
                                json={"org": "o", "repo": "r"}).status_code == 403
             assert client.post("/api/settings/auto-pr/1",
                                json={"enabled": True}).status_code == 403
             assert client.delete("/api/settings/auto-pr/1").status_code == 403
-            # 只读列表仍走 dash 鉴权（未配置时放开）
-            assert client.get("/api/settings/auto-pr").status_code == 200
 
     def test_add_toggle_delete_flow(self, tmp_path, monkeypatch):
         settings = _make_settings(tmp_path, admin_token="adm")

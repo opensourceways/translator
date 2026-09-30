@@ -9,7 +9,8 @@
 - Dashboard 页面与 /api/* 只读 JSON：TC_DASH_TOKEN 未配置时放开，配置后
   要求 X-Dash-Token 头或 ?token= query
 - POST /api/runs、/api/config/shadow、/api/settings/auto-pr*：
-  X-Admin-Token 管理端点，admin_token 未配置时一律 403（fail closed）
+  X-Admin-Token 管理端点；admin_token 未配置时放开（内部工具，默认
+  内网部署），配置后校验
 
 lifespan：init_db → init_shadow（env 仅作种子，之后以库为准）→ 僵尸
 running run 恢复为 interrupted → 停机补偿（最后一次成功 run 的
@@ -187,10 +188,12 @@ def create_app(settings=None):
             raise HTTPException(403, "dash token 无效或未提供")
 
     def require_admin(x_admin_token: str = Header(default="")):
-        """管理端点鉴权：admin_token 未配置时一律 403（fail closed）。"""
-        if not settings.admin_token or not hmac.compare_digest(
-                x_admin_token, settings.admin_token):
-            raise HTTPException(403, "admin token 无效或未配置")
+        """管理端点鉴权：admin_token 未配置时放开（内部工具，默认内网
+        部署），配置后校验 X-Admin-Token 头。"""
+        if not settings.admin_token:
+            return
+        if not hmac.compare_digest(x_admin_token, settings.admin_token):
+            raise HTTPException(403, "admin token 无效")
 
     dash = [Depends(require_dash)]
 

@@ -44,7 +44,7 @@ class Settings:
         port: HTTP 监听端口（TC_PORT）
         poll_interval: Poller 轮询间隔秒数（TC_POLL_INTERVAL）
         webhook_token: webhook 鉴权 token（TC_WEBHOOK_TOKEN）
-        admin_token: 管理端点 token，空则管理端点一律 403（TC_ADMIN_TOKEN）
+        admin_token: 管理端点 token，空则管理端点放开（TC_ADMIN_TOKEN）
         dash_token: 只读端点 token，空则只读端点放开（TC_DASH_TOKEN）
         shadow: 影子模式初始值（TC_SHADOW，默认 true 安全优先），
             仅用于给 SQLite config 表播种，之后以库中值为准
