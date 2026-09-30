@@ -153,6 +153,7 @@ def _poll_one_pr(db, row, rules, default_token):
                       closed_at=pr.get("closed_at"),
                       labels=_extract_labels(pr),
                       draft=pr.get("draft"),
+                      created_at=pr.get("created_at"),
                       review_total=(len(assignees)
                                     if assignees is not None else None),
                       review_accepted=(sum(1 for a in assignees
@@ -212,7 +213,8 @@ def _discover_repo(db, info, rules, default_token):
                      url=pr.get("html_url") or pr.get("url"),
                      title=pr.get("title"), state="open",
                      mergeable=pr.get("mergeable"), source="jenkins",
-                     labels=_extract_labels(pr), draft=pr.get("draft"))
+                     labels=_extract_labels(pr), draft=pr.get("draft"),
+                     created_at=pr.get("created_at"))
 
 
 def _is_auto_pr(pr, branch):

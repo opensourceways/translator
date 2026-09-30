@@ -72,7 +72,7 @@
     </div>
     {% if g.prs %}
     <table>
-    <thead><tr><th>PR</th><th>标题</th><th>状态</th><th>进度</th><th>可合并</th><th>来源</th><th>目标分支</th><th>最近轮询</th><th>合入/关闭时间</th></tr></thead>
+    <thead><tr><th>PR</th><th>标题</th><th>状态</th><th>进度</th><th>可合并</th><th>来源</th><th>目标分支</th><th>创建时间</th><th>最近轮询</th><th>合入/关闭时间</th></tr></thead>
     <tbody>
     {% for pr in g.prs %}
     <tr>
@@ -84,6 +84,7 @@
       <td>{% if pr.mergeable is none %}?{% elif pr.mergeable %}是{% else %}否{% endif %}</td>
       <td>{{ pr.source or '' }}</td>
       <td>{{ pr.branch or '' }}</td>
+      <td>{{ pr.created_at | localtime }}</td>
       <td>{{ pr.last_polled | localtime }}</td>
       <td>{{ (pr.merged_at or pr.closed_at) | localtime }}</td>
     </tr>
@@ -139,6 +140,7 @@ function renderPrRow(pr) {
     `<td>${pr.mergeable == null ? '?' : (pr.mergeable ? '是' : '否')}</td>` +
     `<td>${esc(pr.source || '')}</td>` +
     `<td>${esc(pr.branch || '')}</td>` +
+    `<td>${fmtTs(pr.created_at)}</td>` +
     `<td>${fmtTs(pr.last_polled)}</td>` +
     `<td>${fmtTs(pr.merged_at || pr.closed_at)}</td></tr>`;
 }
@@ -149,7 +151,7 @@ function renderGroup(g, active) {
       (g.latest.pr_url ? `<a href="${esc(g.latest.pr_url)}">#${g.latest.pr_number}</a>` : '')
     : '<span class="muted">暂无 run 记录</span>';
   const body = g.prs.length
-    ? `<table><thead><tr><th>PR</th><th>标题</th><th>状态</th><th>进度</th><th>可合并</th><th>来源</th><th>目标分支</th><th>最近轮询</th><th>合入/关闭时间</th></tr></thead>` +
+    ? `<table><thead><tr><th>PR</th><th>标题</th><th>状态</th><th>进度</th><th>可合并</th><th>来源</th><th>目标分支</th><th>创建时间</th><th>最近轮询</th><th>合入/关闭时间</th></tr></thead>` +
       `<tbody>${g.prs.map(renderPrRow).join('')}</tbody></table>`
     : '<p class="muted">未发现 PR</p>';
   return `<div class="card repo-card${active ? ' active' : ''}" data-repo="${esc(repoKey(g))}"><div class="repo-head">` +

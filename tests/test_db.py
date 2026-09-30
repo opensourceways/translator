@@ -751,3 +751,21 @@ class TestAutoPrEntries:
             assert master["enabled"] == 1  # 保留 id 最小者的开关状态
         finally:
             d.close()
+
+    def test_created_at_fill_once(self, db):
+        """prs.created_at（PR 真实创建时间）：upsert 落值、轮询补空、不覆盖。"""
+        db.upsert_pr("o1", "r1", 1)
+        assert db.list_prs()[0]["created_at"] is None
+        # 轮询补空
+        db.apply_pr_state("o1", "r1", 1, "open",
+                          created_at="2026-09-01T08:00:00+08:00")
+        assert db.list_prs()[0]["created_at"] == "2026-09-01T08:00:00+08:00"
+        # upsert/apply 均不覆盖已有值
+        db.upsert_pr("o1", "r1", 1, created_at="2020-01-01T00:00:00+00:00")
+        db.apply_pr_state("o1", "r1", 1, "open",
+                          created_at="2020-01-01T00:00:00+00:00")
+        assert db.list_prs()[0]["created_at"] == "2026-09-01T08:00:00+08:00"
+        # 新 PR 直接由 upsert 落创建时间
+        db.upsert_pr("o1", "r1", 2, created_at="2026-09-02T08:00:00+08:00")
+        pr2 = [p for p in db.list_prs() if p["number"] == 2][0]
+        assert pr2["created_at"] == "2026-09-02T08:00:00+08:00"

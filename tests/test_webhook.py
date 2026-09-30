@@ -403,6 +403,7 @@ class TestPages:
             assert "badge d-red" in r.text
             assert "CI 未通过" in r.text
             assert "点开 PR 查看 CI 日志" in r.text  # 指引文案
+            assert "创建时间" in r.text  # PR 创建时间列
 
     def test_api_prs_derived(self, tmp_path, monkeypatch):
         """/api/prs 平铺与 ?group_by=org 的每个 PR 均带 derived 派生状态。"""
