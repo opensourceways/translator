@@ -84,6 +84,13 @@ def engine():
                               scan_changed=scan, submit_repo=submit)
 
 
+@pytest.fixture
+def auto_pr_on(db):
+    """为测试用的两个目标仓开启自动提 PR 通配条目（runner 门控放行）。"""
+    db.upsert_auto_pr_entry("Ascend", "msprof")
+    db.upsert_auto_pr_entry("CANN", "cann")
+
+
 def _push_trigger(**kw):
     return Trigger(trigger="push", ref="refs/heads/main",
                    before_sha="b01", after_sha="a02", **kw)
@@ -125,7 +132,7 @@ class TestActiveMode:
     """active 模式：逐仓 resolve_token + submit_repo，完整粒度落库。"""
 
     def test_submit_each_repo_with_granularity(
-            self, settings, db, token_env, engine):
+            self, settings, db, token_env, engine, auto_pr_on):
         set_shadow(db, False)
         engine.scan_changed.return_value = _scan(changed=[
             _changed_item(),
@@ -162,7 +169,7 @@ class TestActiveMode:
         assert prs[0]["run_id"] == run["id"]
         assert prs[0]["branch"] == "26.1.0"
 
-    def test_pr_existed_upserted(self, settings, db, token_env, engine):
+    def test_pr_existed_upserted(self, settings, db, token_env, engine, auto_pr_on):
         set_shadow(db, False)
         engine.scan_changed.return_value = _scan(changed=[_changed_item()])
         engine.submit_repo.return_value = {
@@ -176,7 +183,7 @@ class TestActiveMode:
         assert repo["pr_existed"] == 1
         assert db.list_prs()[0]["number"] == 7
 
-    def test_token_rule_routing(self, settings, db, token_env, engine):
+    def test_token_rule_routing(self, settings, db, token_env, engine, auto_pr_on):
         """命中规则的仓库用规则 token 提交；配置了有效规则时未命中的
         仓库按权限管控不提交（记 token_rule 失败，与 submit_all 一致）。"""
         set_shadow(db, False)
@@ -197,7 +204,7 @@ class TestActiveMode:
         assert skipped["stage"] == "token_rule"
 
     def test_submit_failure_marks_partial(
-            self, settings, db, token_env, engine):
+            self, settings, db, token_env, engine, auto_pr_on):
         set_shadow(db, False)
         engine.scan_changed.return_value = _scan(changed=[
             _changed_item(),
@@ -216,7 +223,7 @@ class TestActiveMode:
         assert repos == {"noop", "submit_failed"}
 
     def test_submit_repo_exception_contained(
-            self, settings, db, token_env, engine):
+            self, settings, db, token_env, engine, auto_pr_on):
         """submit_repo 抛异常时按单仓失败处理，不中断其余仓库。"""
         set_shadow(db, False)
         engine.scan_changed.return_value = _scan(changed=[
@@ -234,6 +241,60 @@ class TestActiveMode:
         assert run["failed_count"] == 1
         repos = {r["path"]: r for r in db.get_run_repos(run["id"])}
         assert repos["Ascend/26.1.0/MindStudio/msprof"]["stage"] == "exception"
+
+
+class TestAutoPrGate:
+    """自动提 PR 开关门控：设置页无条目或已禁用的仓库默认拒绝提交。"""
+
+    def test_no_entry_skips_submit(self, settings, db, token_env, engine):
+        set_shadow(db, False)
+        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
+        execute_run(_push_trigger(), settings, db)
+        engine.submit_repo.assert_not_called()
+        run = db.list_runs()[0]
+        assert run["status"] == "success"  # 跳过不算失败
+        repo = db.get_run_repos(run["id"])[0]
+        assert repo["status"] == "noop"
+        assert repo["stage"] == "auto_pr_off"
+        assert "开关未启用" in db.get_run(run["id"])["log"]
+        assert db.list_prs() == []
+
+    def test_disabled_entry_skips(self, settings, db, token_env, engine):
+        set_shadow(db, False)
+        entry_id = db.upsert_auto_pr_entry("Ascend", "msprof", "26.1.0")
+        db.set_auto_pr_enabled(entry_id, False)
+        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
+        execute_run(_push_trigger(), settings, db)
+        engine.submit_repo.assert_not_called()
+        repo = db.get_run_repos(db.list_runs()[0]["id"])[0]
+        assert repo["stage"] == "auto_pr_off"
+
+    def test_exact_branch_overrides_wildcard(
+            self, settings, db, token_env, engine):
+        """精确分支条目优先于通配条目：通配启用但 26.1.0 禁用 → 仍跳过。"""
+        set_shadow(db, False)
+        db.upsert_auto_pr_entry("Ascend", "msprof")  # 通配启用
+        exact = db.upsert_auto_pr_entry("Ascend", "msprof", "26.1.0")
+        db.set_auto_pr_enabled(exact, False)
+        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
+        execute_run(_push_trigger(), settings, db)
+        engine.submit_repo.assert_not_called()
+
+    def test_mixed_gate_per_repo(self, settings, db, token_env, engine):
+        """同一 run 内：启用条目的仓提交，无条目的仓跳过。"""
+        set_shadow(db, False)
+        db.upsert_auto_pr_entry("Ascend", "msprof", "26.1.0")
+        engine.scan_changed.return_value = _scan(changed=[
+            _changed_item(),
+            _changed_item(path="CANN/9.1.0/sip/cann", org="CANN",
+                          repo="cann", branch="9.1.0"),
+        ])
+        execute_run(_push_trigger(), settings, db)
+        assert engine.submit_repo.call_count == 1
+        assert engine.submit_repo.call_args.args[1] == "msprof"
+        repos = {r["path"]: r for r in db.get_run_repos(db.list_runs()[0]["id"])}
+        assert repos["Ascend/26.1.0/MindStudio/msprof"]["status"] == "noop"
+        assert repos["CANN/9.1.0/sip/cann"]["stage"] == "auto_pr_off"
 
 
 class TestStatusMapping:
@@ -330,7 +391,7 @@ class TestMasking:
         assert DEFAULT_TOKEN not in db.get_run(run["id"])["log"]
 
     def test_rule_token_masked_in_submit_error(
-            self, settings, db, token_env, engine):
+            self, settings, db, token_env, engine, auto_pr_on):
         """submit_repo 错误文本带规则 token：run_repos.error 脱敏。"""
         set_shadow(db, False)
         engine.load_rules.return_value = [

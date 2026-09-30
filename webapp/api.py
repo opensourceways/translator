@@ -8,8 +8,8 @@
   （重启后也准确），不依赖 Worker 内存状态
 - Dashboard 页面与 /api/* 只读 JSON：TC_DASH_TOKEN 未配置时放开，配置后
   要求 X-Dash-Token 头或 ?token= query
-- POST /api/runs、/api/config/shadow：X-Admin-Token 管理端点，
-  admin_token 未配置时一律 403（fail closed）
+- POST /api/runs、/api/config/shadow、/api/settings/auto-pr*：
+  X-Admin-Token 管理端点，admin_token 未配置时一律 403（fail closed）
 
 lifespan：init_db → init_shadow（env 仅作种子，之后以库为准）→ 僵尸
 running run 恢复为 interrupted → 停机补偿（最后一次成功 run 的
@@ -332,6 +332,76 @@ def create_app(settings=None):
         if group_by == "org":
             return {"orgs": _group_prs(prs, db.latest_repo_statuses())}
         return {"prs": prs}
+
+    # ── 自动提 PR 开关（设置页） ─────────────────────────────
+
+    @app.get("/settings", response_class=HTMLResponse, dependencies=dash)
+    async def page_settings(request: Request):
+        db = request.app.state.db
+        known = {(r["org"], r["repo"], r["branch"])
+                 for r in db.list_auto_pr_entries()}
+        suggestions = [r for r in db.distinct_repos()
+                       if (r["org"], r["repo"], r["branch"]) not in known]
+        return templates.TemplateResponse(
+            request, "settings.html",
+            _ctx(request, entries=db.list_auto_pr_entries(),
+                 suggestions=suggestions,
+                 admin_auth=bool(settings.admin_token)))
+
+    @app.get("/api/settings/auto-pr", dependencies=dash)
+    async def api_list_auto_pr(request: Request):
+        return {"entries": request.app.state.db.list_auto_pr_entries()}
+
+    @app.post("/api/settings/auto-pr",
+              dependencies=[Depends(require_admin)])
+    async def api_add_auto_pr(request: Request):
+        """新增/更新条目：{org, repo, branch?, enabled?}；branch 空=全分支通配。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        org = str(body.get("org") or "").strip()
+        repo = str(body.get("repo") or "").strip()
+        branch = str(body.get("branch") or "").strip()
+        if not org or not repo:
+            raise HTTPException(422, "body 需要非空字段 org 与 repo")
+        enabled = body.get("enabled", True)
+        db = request.app.state.db
+        entry_id = db.upsert_auto_pr_entry(
+            org, repo, branch, enabled=bool(enabled))
+        log.info("自动提 PR 条目 upsert：%s/%s@%s enabled=%s",
+                 org, repo, branch or "*", bool(enabled))
+        return {"id": entry_id, "org": org, "repo": repo, "branch": branch,
+                "enabled": bool(enabled)}
+
+    @app.post("/api/settings/auto-pr/{entry_id}",
+              dependencies=[Depends(require_admin)])
+    async def api_toggle_auto_pr(request: Request, entry_id: int):
+        """切换条目开关：{enabled: bool}。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        enabled = body.get("enabled") if isinstance(body, dict) else None
+        if not isinstance(enabled, bool):
+            raise HTTPException(422, "body 需要布尔字段 enabled")
+        db = request.app.state.db
+        if not db.set_auto_pr_enabled(entry_id, enabled):
+            raise HTTPException(404, "条目不存在")
+        log.info("自动提 PR 条目 #%d 切换为 %s",
+                 entry_id, "启用" if enabled else "禁用")
+        return {"id": entry_id, "enabled": enabled}
+
+    @app.delete("/api/settings/auto-pr/{entry_id}",
+                dependencies=[Depends(require_admin)])
+    async def api_delete_auto_pr(request: Request, entry_id: int):
+        db = request.app.state.db
+        if not db.delete_auto_pr_entry(entry_id):
+            raise HTTPException(404, "条目不存在")
+        log.info("自动提 PR 条目 #%d 已删除", entry_id)
+        return {"id": entry_id, "deleted": True}
 
     # ── 管理端点 ─────────────────────────────────────────────
 

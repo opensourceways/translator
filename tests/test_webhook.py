@@ -456,6 +456,93 @@ class TestPages:
             assert prs[0]["number"] == 1
 
 
+# ── 设置页与自动提 PR 开关端点 ────────────────────────────────
+
+
+class TestAutoPrSettings:
+    def test_settings_page_lists_entries(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            app.state.db.upsert_auto_pr_entry("cann", "hccl", "master")
+            r = client.get("/settings")
+            assert r.status_code == 200
+            assert "自动提 PR 开关" in r.text
+            assert "cann" in r.text and "hccl" in r.text
+            assert 'href="/settings"' in client.get("/").text  # 导航入口
+
+    def test_settings_page_shows_known_repo_suggestions(
+            self, tmp_path, monkeypatch):
+        """有 run 记录但未添加条目的仓库出现在快捷建议中。"""
+        settings = _make_settings(tmp_path)
+        TestPages()._seed_repo_run(settings.db_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.get("/settings")
+            assert r.status_code == 200
+            assert 'data-org="o1"' in r.text and 'data-repo="r1"' in r.text
+            # 添加条目后不再出现在建议中
+            app.state.db.upsert_auto_pr_entry("o1", "r1", "master")
+            assert 'class="btn small sugg"' not in client.get("/settings").text
+
+    def test_mutations_require_admin_token(self, tmp_path, monkeypatch):
+        """admin_token 未配置：三个修改端点一律 403（fail closed）。"""
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            assert client.post("/api/settings/auto-pr",
+                               json={"org": "o", "repo": "r"}).status_code == 403
+            assert client.post("/api/settings/auto-pr/1",
+                               json={"enabled": True}).status_code == 403
+            assert client.delete("/api/settings/auto-pr/1").status_code == 403
+            # 只读列表仍走 dash 鉴权（未配置时放开）
+            assert client.get("/api/settings/auto-pr").status_code == 200
+
+    def test_add_toggle_delete_flow(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path, admin_token="adm")
+        headers = {"X-Admin-Token": "adm"}
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.post("/api/settings/auto-pr",
+                            json={"org": "cann", "repo": "hccl"},
+                            headers=headers)
+            assert r.status_code == 200
+            entry = r.json()
+            assert entry["branch"] == "" and entry["enabled"] is True
+            db = app.state.db
+            assert db.is_auto_pr_enabled("cann", "hccl", "master") is True
+            # 列表端点可见
+            entries = client.get("/api/settings/auto-pr").json()["entries"]
+            assert len(entries) == 1 and entries[0]["id"] == entry["id"]
+            # 切换开关
+            r = client.post(f"/api/settings/auto-pr/{entry['id']}",
+                            json={"enabled": False}, headers=headers)
+            assert r.json()["enabled"] is False
+            assert db.is_auto_pr_enabled("cann", "hccl", "master") is False
+            # 删除
+            r = client.delete(f"/api/settings/auto-pr/{entry['id']}",
+                              headers=headers)
+            assert r.json()["deleted"] is True
+            assert db.list_auto_pr_entries() == []
+
+    def test_add_validation_422(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path, admin_token="adm")
+        headers = {"X-Admin-Token": "adm"}
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            assert client.post("/api/settings/auto-pr", json={"org": "o"},
+                               headers=headers).status_code == 422
+            assert client.post("/api/settings/auto-pr", json={},
+                               headers=headers).status_code == 422
+
+    def test_toggle_404_and_422(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path, admin_token="adm")
+        headers = {"X-Admin-Token": "adm"}
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            assert client.post("/api/settings/auto-pr/999",
+                               json={"enabled": True},
+                               headers=headers).status_code == 404
+            assert client.post("/api/settings/auto-pr/1", json={},
+                               headers=headers).status_code == 422
+            assert client.delete("/api/settings/auto-pr/999",
+                                 headers=headers).status_code == 404
+
+
 # ── 启动恢复与停机补偿 ────────────────────────────────────────
 
 

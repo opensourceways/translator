@@ -664,3 +664,50 @@ class TestSummaryAndCleanup:
         assert db.cleanup_old_runs() == {
             "runs": 0, "run_repos": 0, "push_events": 0}
         assert db.get_run(run_id) is not None
+
+
+class TestAutoPrEntries:
+    """auto_pr 表：增删改查与门控判定（默认拒绝 / 精确优先于通配）。"""
+
+    def test_upsert_and_list(self, db):
+        entry_id = db.upsert_auto_pr_entry("cann", "hccl", "master")
+        entries = db.list_auto_pr_entries()
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["id"] == entry_id
+        assert (e["org"], e["repo"], e["branch"]) == ("cann", "hccl", "master")
+        assert e["enabled"] == 1
+        assert e["created_at"] and e["updated_at"]
+
+    def test_upsert_conflict_updates(self, db):
+        db.upsert_auto_pr_entry("cann", "hccl", "master", enabled=True)
+        db.upsert_auto_pr_entry("cann", "hccl", "master", enabled=False)
+        entries = db.list_auto_pr_entries()
+        assert len(entries) == 1
+        assert entries[0]["enabled"] == 0
+
+    def test_default_deny_when_no_entry(self, db):
+        assert db.is_auto_pr_enabled("cann", "hccl", "master") is False
+
+    def test_wildcard_branch_covers_any(self, db):
+        db.upsert_auto_pr_entry("cann", "hccl")  # branch='' 通配
+        assert db.is_auto_pr_enabled("cann", "hccl", "master") is True
+        assert db.is_auto_pr_enabled("cann", "hccl", "dev") is True
+        assert db.is_auto_pr_enabled("cann", "sip", "master") is False
+
+    def test_exact_branch_overrides_wildcard(self, db):
+        db.upsert_auto_pr_entry("cann", "hccl")  # 通配启用
+        db.upsert_auto_pr_entry("cann", "hccl", "master", enabled=False)
+        assert db.is_auto_pr_enabled("cann", "hccl", "master") is False
+        assert db.is_auto_pr_enabled("cann", "hccl", "dev") is True
+
+    def test_toggle_and_delete(self, db):
+        entry_id = db.upsert_auto_pr_entry("cann", "hccl", "master")
+        assert db.set_auto_pr_enabled(entry_id, False) is True
+        assert db.is_auto_pr_enabled("cann", "hccl", "master") is False
+        assert db.set_auto_pr_enabled(entry_id, True) is True
+        assert db.is_auto_pr_enabled("cann", "hccl", "master") is True
+        assert db.set_auto_pr_enabled(999, True) is False
+        assert db.delete_auto_pr_entry(entry_id) is True
+        assert db.list_auto_pr_entries() == []
+        assert db.delete_auto_pr_entry(999) is False

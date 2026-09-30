@@ -104,6 +104,16 @@ CREATE TABLE IF NOT EXISTS prs (
     review_accepted INTEGER,
     UNIQUE(org, repo, number)
 );
+CREATE TABLE IF NOT EXISTS auto_pr (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    org        TEXT NOT NULL,
+    repo       TEXT NOT NULL,
+    branch     TEXT NOT NULL DEFAULT '',
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT,
+    updated_at TEXT,
+    UNIQUE(org, repo, branch)
+);
 """
 
 # prs 表后加列（轻量迁移用）：列名 → 列定义；旧库缺列时 ALTER TABLE 补齐
@@ -568,6 +578,67 @@ class Database:
             "prs_by_state": pr_counts,
             "last_run": last,
         }
+
+    # ── 自动提 PR 开关（auto_pr 表，设置页维护） ──────────────
+
+    def list_auto_pr_entries(self):
+        """全部自动提 PR 条目，按 (org, repo, branch) 排序。"""
+        with self._lock:
+            return self._all(
+                "SELECT * FROM auto_pr ORDER BY org, repo, branch")
+
+    def upsert_auto_pr_entry(self, org, repo, branch="", enabled=True):
+        """新增或更新条目（org/repo/branch 三元组唯一）；返回条目 id。
+
+        branch 空串表示该仓库所有分支的通配条目。
+        """
+        now = _utcnow()
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO auto_pr (org, repo, branch, enabled,"
+                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(org, repo, branch) DO UPDATE SET"
+                " enabled = excluded.enabled, updated_at = excluded.updated_at",
+                (org, repo, branch or "", 1 if enabled else 0, now, now))
+            self._conn.commit()
+            if cur.lastrowid:
+                return cur.lastrowid
+            row = self._one(
+                "SELECT id FROM auto_pr WHERE org = ? AND repo = ?"
+                " AND branch = ?", (org, repo, branch or ""))
+            return row["id"]
+
+    def set_auto_pr_enabled(self, entry_id, enabled):
+        """按 id 切换条目开关；条目不存在返回 False。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE auto_pr SET enabled = ?, updated_at = ? WHERE id = ?",
+                (1 if enabled else 0, _utcnow(), entry_id))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def delete_auto_pr_entry(self, entry_id):
+        """按 id 删除条目；不存在返回 False。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM auto_pr WHERE id = ?", (entry_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def is_auto_pr_enabled(self, org, repo, branch=None):
+        """runner 提交前门控：精确分支条目优先，其次 branch='' 通配条目。
+
+        无任何匹配条目时返回 False（默认拒绝：只有显式添加并启用的
+        仓库才允许自动提 PR）。
+        """
+        with self._lock:
+            rows = self._all(
+                "SELECT branch, enabled FROM auto_pr"
+                " WHERE org = ? AND repo = ? AND (branch = ? OR branch = '')",
+                (org, repo, branch or ""))
+        exact = next((r for r in rows if r["branch"] == (branch or "")), None)
+        chosen = exact or (rows[0] if rows else None)
+        return bool(chosen and chosen["enabled"])
 
     # ── kv 配置（shadow 开关等） ─────────────────────────────
 

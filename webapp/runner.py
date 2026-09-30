@@ -7,7 +7,8 @@
   work_dir/run-<id>/（blobs=True 全量浅克隆，等价
   ``git clone --depth=1 --no-checkout``），从本地克隆加载规则/名单，
   scan_changed 走本地化模式（支持增量 diff），影子模式只落
-  would_submit 不提交，active 模式逐仓 resolve_token + submit_repo
+  would_submit 不提交，active 模式先过 auto_pr 开关门控（设置页维护，
+  默认拒绝），再逐仓 resolve_token + submit_repo
   （复制 submit_all 的路由逻辑，换取 head_branch/noop/pr_existed 粒度）
 - 日志缓冲落库（50 行/2 秒批量 append_log）+ 全链路 token 脱敏：
   localgit.clone 失败会把含 token 的 URL 包进 GitCodeError（Jenkins
@@ -199,9 +200,10 @@ def execute_run(trigger, settings, db):
 
 def _submit_all(run_id, changed, token_rules, default_token, log, masker,
                 db):
-    """active 模式逐仓提交：resolve_token 路由 + submit_repo，结果落库。
+    """active 模式逐仓提交：auto_pr 开关门控 + resolve_token 路由 + submit_repo，结果落库。
 
-    复制引擎 submit_all 的路由逻辑（配置了有效规则时只提交命中规则的
+    未在设置页启用（无条目或已禁用）的仓库直接记 noop
+    （stage='auto_pr_off'）跳过，默认拒绝。复制引擎 submit_all 的路由逻辑（配置了有效规则时只提交命中规则的
     仓库），但保留 submit_repo 返回的完整粒度（head_branch / noop /
     pr_existed）供落库。单仓失败不中断；有 pr_number 的结果同步
     upsert 到 prs 表（source='service'，供 prsync 轮询）。
@@ -214,21 +216,27 @@ def _submit_all(run_id, changed, token_rules, default_token, log, masker,
     for i, item in enumerate(changed, 1):
         path = item["project"]["path"]
         log(f"正在提交 ({i}/{len(changed)}): {item['org']}/{item['repo']}")
-        item_token, rule_keyword = rules.resolve_token(
-            path, token_rules, default_token)
-        if restrict and not rule_keyword:
-            result = {"ok": False, "stage": "token_rule",
-                      "error": "未命中 Token 规则，按权限管控不处理"}
+        if not db.is_auto_pr_enabled(item["org"], item["repo"],
+                                     item["branch"]):
+            # 设置页未添加条目或已禁用：默认拒绝，记 noop 不提交
+            log("  自动提 PR 开关未启用（设置页无此条目或已禁用），跳过")
+            result = {"ok": True, "noop": True, "stage": "auto_pr_off"}
         else:
-            if rule_keyword:
-                log(f"  命中 Token 规则「{rule_keyword}」，使用规则 Token 提交")
-            try:
-                result = dict(service.submit_repo(
-                    item["org"], item["repo"], item["branch"],
-                    item["files"], item_token, log))
-            except Exception as e:
-                result = {"ok": False, "stage": "exception",
-                          "error": str(e)}
+            item_token, rule_keyword = rules.resolve_token(
+                path, token_rules, default_token)
+            if restrict and not rule_keyword:
+                result = {"ok": False, "stage": "token_rule",
+                          "error": "未命中 Token 规则，按权限管控不处理"}
+            else:
+                if rule_keyword:
+                    log(f"  命中 Token 规则「{rule_keyword}」，使用规则 Token 提交")
+                try:
+                    result = dict(service.submit_repo(
+                        item["org"], item["repo"], item["branch"],
+                        item["files"], item_token, log))
+                except Exception as e:
+                    result = {"ok": False, "stage": "exception",
+                              "error": str(e)}
         if result.get("error"):
             result["error"] = masker.mask(str(result["error"]))
         result.update(path=path, org=item["org"], repo=item["repo"],
