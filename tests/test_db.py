@@ -37,7 +37,7 @@ class TestSettings:
         s = config.Settings.from_env()
         assert s.data_dir == "./data"
         assert s.port == 8000
-        assert s.poll_interval == 300
+        assert s.poll_interval == 3600
         assert s.webhook_token == ""
         assert s.admin_token == ""
         assert s.dash_token == ""
@@ -77,7 +77,7 @@ class TestSettings:
         monkeypatch.setenv("TC_POLL_INTERVAL", "")
         s = config.Settings.from_env()
         assert s.port == 8000
-        assert s.poll_interval == 300
+        assert s.poll_interval == 3600
 
     def test_paths(self):
         s = config.Settings(data_dir="/x")
