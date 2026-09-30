@@ -65,7 +65,7 @@ class Settings:
         return cls(
             data_dir=env.get("TC_DATA_DIR", "./data"),
             port=_parse_int(env.get("TC_PORT"), 8000),
-            poll_interval=_parse_int(env.get("TC_POLL_INTERVAL"), 3600),
+            poll_interval=_parse_int(env.get("TC_POLL_INTERVAL"), 300),
             webhook_token=env.get("TC_WEBHOOK_TOKEN", ""),
             admin_token=env.get("TC_ADMIN_TOKEN", ""),
             dash_token=env.get("TC_DASH_TOKEN", ""),

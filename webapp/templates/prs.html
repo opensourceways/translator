@@ -200,6 +200,6 @@ async function refresh() {
     });
   } catch (e) { /* 轮询失败下轮再试 */ }
 }
-setInterval(refresh, 3600000);
+setInterval(refresh, 5000);
 </script>
 {% endblock %}
