@@ -591,6 +591,62 @@ class TestAutoPrSettings:
                                  headers=headers).status_code == 404
 
 
+class TestTokenSettings:
+    """仓库专属 token 端点：明文永不出库（列表与页面均为掩码）。"""
+
+    SECRET = "tok-plaintext-secret"
+
+    def test_add_list_masked_delete_flow(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.post("/api/settings/tokens",
+                            json={"org": "CANN", "repo": "HCCL",
+                                  "token": self.SECRET})
+            assert r.status_code == 200
+            assert r.json()["org"] == "cann"  # 小写规范化
+            entry_id = r.json()["id"]
+            assert app.state.db.get_repo_token("CANN", "hccl") == self.SECRET
+            # 列表只回掩码，明文不出现在响应里
+            body = client.get("/api/settings/tokens")
+            assert self.SECRET not in body.text
+            entries = body.json()["entries"]
+            assert entries[0]["token_masked"] == "tok-***"
+            assert "token" not in entries[0]
+            # 设置页同样只渲染掩码
+            page = client.get("/settings")
+            assert "仓库专属 Token" in page.text
+            assert self.SECRET not in page.text
+            assert "tok-***" in page.text
+            # 删除
+            r = client.delete(f"/api/settings/tokens/{entry_id}")
+            assert r.json()["deleted"] is True
+            assert app.state.db.get_repo_token("cann", "hccl") is None
+
+    def test_add_validation_422(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            assert client.post("/api/settings/tokens",
+                               json={"org": "o", "repo": "r"}).status_code == 422
+            assert client.post("/api/settings/tokens",
+                               json={"org": "o", "repo": "r",
+                                     "token": "  "}).status_code == 422
+
+    def test_403_with_wrong_admin_token(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path, admin_token="adm")
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            assert client.post("/api/settings/tokens",
+                               json={"org": "o", "repo": "r",
+                                     "token": "t"}).status_code == 403
+            assert client.delete("/api/settings/tokens/1").status_code == 403
+            # 只读列表仍放开（dash token 未配置）
+            assert client.get("/api/settings/tokens").status_code == 200
+
+    def test_delete_404(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            assert client.delete("/api/settings/tokens/999").status_code == 404
+
+
 # ── 启动恢复与停机补偿 ────────────────────────────────────────
 
 

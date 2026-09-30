@@ -205,7 +205,9 @@ curl -X POST http://localhost:8000/api/config/shadow \
 - `/settings`：自动提 PR 开关页。只有在此**添加并启用**的
   社区/仓库/分支（分支留空=该仓全部分支）才会在 active 模式下真正创建
   PR，未列出的仓库一律跳过（默认拒绝）；社区/仓库名大小写不敏感
-  （统一按小写存储）。`TC_ADMIN_TOKEN` 未配置时修改
+  （统一按小写存储）。同页还可配置**仓库专属 Token**（提交与轮询时
+  优先于 token_rules.json 规则和默认 GITCODE_TOKEN；保存在 SQLite，
+  只显示掩码不回显明文）。`TC_ADMIN_TOKEN` 未配置时修改
   操作无需鉴权（内部工具，默认内网部署），配置后需在页面顶部输入 token
   （仅存浏览器 localStorage）
 - 只读 JSON：`/api/summary`、`/api/runs`、`/api/runs/{id}`、

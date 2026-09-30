@@ -113,6 +113,20 @@ class TestTokenRouting:
         tokens = {(c.args[0], c.args[3]) for c in get.call_args_list}
         assert tokens == {("o1", "rule-token"), ("o2", "default-token")}
 
+    def test_db_token_beats_rule_token(self, db, monkeypatch):
+        """设置页配置的仓库专属 token 优先于关键字规则与默认 token。"""
+        db_mod.set_shadow(db, False)
+        monkeypatch.setattr(
+            prsync.rules_cache, "get_rules",
+            lambda: [{"keyword": "Ascend", "token": "rule-token"}])
+        db.upsert_repo_token("O1", "R1", "db-token")
+        _seed_pr(db, org="o1", repo="r1", number=1, path="Ascend/a")
+        _seed_pr(db, org="o2", repo="r2", number=2, path="Ascend/b")
+        get = _mock_get(monkeypatch, payload={"state": "open"})
+        prsync._poll_once(db, SETTINGS)
+        tokens = {(c.args[0], c.args[3]) for c in get.call_args_list}
+        assert tokens == {("o1", "db-token"), ("o2", "rule-token")}
+
     def test_empty_cache_loads_rules_via_api_and_caches(
             self, db, monkeypatch):
         """缓存为空（重启后无 run）时回退 API 模式加载并回填缓存。"""

@@ -149,6 +149,8 @@ def execute_run(trigger, settings, db):
             default_token, log=log, source_repo_dir=src_dir)
         rules_cache.set_rules(token_rules)
         masker.add_secrets(r.get("token") for r in token_rules)
+        # 设置页配置的仓库专属 token 也纳入脱敏集合
+        masker.add_secrets(t.get("token") for t in db.list_repo_tokens())
         blacklist = service.load_blacklist(
             default_token, log=log, source_repo_dir=src_dir)
         whitelist = service.load_whitelist(
@@ -222,14 +224,15 @@ def _submit_all(run_id, changed, token_rules, default_token, log, masker,
             log("  自动提 PR 开关未启用（设置页无此条目或已禁用），跳过")
             result = {"ok": True, "noop": True, "stage": "auto_pr_off"}
         else:
-            item_token, rule_keyword = rules.resolve_token(
-                path, token_rules, default_token)
+            item_token, rule_keyword = rules_cache.resolve_repo_token(
+                db, item["org"], item["repo"], path, token_rules,
+                default_token)
             if restrict and not rule_keyword:
                 result = {"ok": False, "stage": "token_rule",
                           "error": "未命中 Token 规则，按权限管控不处理"}
             else:
                 if rule_keyword:
-                    log(f"  命中 Token 规则「{rule_keyword}」，使用规则 Token 提交")
+                    log(f"  使用「{rule_keyword}」的 Token 提交")
                 try:
                     result = dict(service.submit_repo(
                         item["org"], item["repo"], item["branch"],

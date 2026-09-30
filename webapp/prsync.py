@@ -21,7 +21,6 @@ from datetime import datetime, timezone
 
 from translator_ci import client, service
 from translator_ci.common import AUTO_BRANCH_PREFIX
-from translator_ci.rules import resolve_token
 
 from webapp import rules_cache
 from webapp.db import is_shadow
@@ -136,7 +135,8 @@ def _poll_one_pr(db, row, rules, default_token):
     draft、评审人计数（assignees 中 accept 为真记为已通过）。
     """
     org, repo, number = row["org"], row["repo"], row["number"]
-    token, _ = resolve_token(row.get("path") or "", rules, default_token)
+    token, _ = rules_cache.resolve_repo_token(
+        db, org, repo, row.get("path") or "", rules, default_token)
     try:
         pr = client.get_pull_request(org, repo, number, token)
     except client.GitCodeError as e:
@@ -198,7 +198,8 @@ def _discover_jenkins_prs(db, rules, default_token, budget, polled):
 def _discover_repo(db, info, rules, default_token):
     """单仓发现：list_pull_requests 拉全量 open PR 后客户端过滤落库。"""
     org, repo, branch = info["org"], info["repo"], info["branch"]
-    token, _ = resolve_token(info.get("path") or "", rules, default_token)
+    token, _ = rules_cache.resolve_repo_token(
+        db, org, repo, info.get("path") or "", rules, default_token)
     try:
         prs = client.list_pull_requests(org, repo, token, state="open")
     except client.GitCodeError as e:

@@ -358,10 +358,14 @@ def create_app(settings=None):
             r for r in db.distinct_repos()
             if (r["org"].lower(), r["repo"].lower(), r["branch"] or "")
             not in known]
+        tokens = db.list_repo_tokens()
+        for t in tokens:
+            v = t.pop("token")
+            t["token_masked"] = (v[:4] + "***") if len(v) > 4 else "***"
         return templates.TemplateResponse(
             request, "settings.html",
             _ctx(request, entries=db.list_auto_pr_entries(),
-                 suggestions=suggestions,
+                 suggestions=suggestions, tokens=tokens,
                  admin_auth=bool(settings.admin_token)))
 
     @app.get("/api/settings/auto-pr", dependencies=dash)
@@ -418,6 +422,47 @@ def create_app(settings=None):
         if not db.delete_auto_pr_entry(entry_id):
             raise HTTPException(404, "条目不存在")
         log.info("自动提 PR 条目 #%d 已删除", entry_id)
+        return {"id": entry_id, "deleted": True}
+
+    # ── 仓库专属 Token（设置页） ─────────────────────────────
+
+    @app.get("/api/settings/tokens", dependencies=dash)
+    async def api_list_tokens(request: Request):
+        """仓库专属 token 列表；token 值只回掩码（前 4 位 + ***），不出库。"""
+        entries = request.app.state.db.list_repo_tokens()
+        for e in entries:
+            t = e.pop("token")
+            e["token_masked"] = (t[:4] + "***") if len(t) > 4 else "***"
+        return {"entries": entries}
+
+    @app.post("/api/settings/tokens",
+              dependencies=[Depends(require_admin)])
+    async def api_add_token(request: Request):
+        """新增/更新仓库专属 token：{org, repo, token}，三者必填。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        org = str(body.get("org") or "").strip()
+        repo = str(body.get("repo") or "").strip()
+        token = str(body.get("token") or "").strip()
+        if not org or not repo or not token:
+            raise HTTPException(422, "body 需要非空字段 org、repo 与 token")
+        db = request.app.state.db
+        entry_id = db.upsert_repo_token(org, repo, token)
+        log.info("仓库专属 Token upsert：%s/%s（值不落日志）",
+                 org.lower(), repo.lower())
+        return {"id": entry_id, "org": org.lower(), "repo": repo.lower()}
+
+    @app.delete("/api/settings/tokens/{entry_id}",
+                dependencies=[Depends(require_admin)])
+    async def api_delete_token(request: Request, entry_id: int):
+        db = request.app.state.db
+        if not db.delete_repo_token(entry_id):
+            raise HTTPException(404, "条目不存在")
+        log.info("仓库专属 Token 条目 #%d 已删除", entry_id)
         return {"id": entry_id, "deleted": True}
 
     # ── 管理端点 ─────────────────────────────────────────────

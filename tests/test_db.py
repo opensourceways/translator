@@ -769,3 +769,25 @@ class TestAutoPrEntries:
         db.upsert_pr("o1", "r1", 2, created_at="2026-09-02T08:00:00+08:00")
         pr2 = [p for p in db.list_prs() if p["number"] == 2][0]
         assert pr2["created_at"] == "2026-09-02T08:00:00+08:00"
+
+
+class TestRepoTokens:
+    """repo_tokens 表：仓库专属 token 的增删查（大小写归一）。"""
+
+    def test_upsert_get_delete(self, db):
+        entry_id = db.upsert_repo_token("CANN", "HCCL", "tok-secret-1")
+        entries = db.list_repo_tokens()
+        assert len(entries) == 1
+        assert entries[0]["org"] == "cann" and entries[0]["repo"] == "hccl"
+        assert entries[0]["token"] == "tok-secret-1"
+        # 大小写不敏感查询
+        assert db.get_repo_token("Cann", "Hccl") == "tok-secret-1"
+        assert db.get_repo_token("cann", "sip") is None
+        # 冲突更新
+        assert db.upsert_repo_token("cann", "hccl", "tok-secret-2") == entry_id
+        assert db.get_repo_token("cann", "hccl") == "tok-secret-2"
+        assert len(db.list_repo_tokens()) == 1
+        # 删除
+        assert db.delete_repo_token(entry_id) is True
+        assert db.delete_repo_token(999) is False
+        assert db.list_repo_tokens() == []

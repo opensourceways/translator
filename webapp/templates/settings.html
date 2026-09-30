@@ -19,9 +19,9 @@ form.add-entry button:hover, .btn:hover { background: #1d4ed8; }
 .token-bar { display: flex; gap: 8px; align-items: center; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 10px 14px; margin-top: 14px; font-size: 13px; }
 .token-bar input { padding: 5px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; width: 240px; }
 .hint { font-size: 12px; margin-top: 6px; }
-#op-msg { font-size: 13px; margin-left: 8px; }
-#op-msg.ok { color: #166534; }
-#op-msg.err { color: #991b1b; }
+#op-msg, #token-msg { font-size: 13px; margin-left: 8px; }
+#op-msg.ok, #token-msg.ok { color: #166534; }
+#op-msg.err, #token-msg.err { color: #991b1b; }
 </style>
 <h1>设置</h1>
 
@@ -85,6 +85,38 @@ form.add-entry button:hover, .btn:hover { background: #1d4ed8; }
 <datalist id="known-orgs">{% for s in suggestions %}<option value="{{ s.org }}">{% endfor %}</datalist>
 <datalist id="known-repos">{% for s in suggestions %}<option value="{{ s.repo }}">{% endfor %}</datalist>
 {% endif %}
+
+<h2>仓库专属 Token</h2>
+<p class="muted" style="font-size:13px">
+  为单个仓库配置专属 GitCode Token（提交 PR 与轮询 PR 状态时优先使用，优先级高于 token_rules.json 的关键字规则和默认 GITCODE_TOKEN）。
+  Token 保存在服务的 SQLite 库中，保存后只显示掩码、永不再回显明文；请妥善保管 ./data 目录。
+</p>
+
+<table id="tokens-table" style="margin-top:14px">
+  <thead><tr><th>社区</th><th>仓库</th><th>Token</th><th>更新时间</th><th>操作</th></tr></thead>
+  <tbody>
+  {% for t in tokens %}
+  <tr data-id="{{ t.id }}">
+    <td>{{ t.org }}</td>
+    <td>{{ t.repo }}</td>
+    <td class="mono">{{ t.token_masked }}</td>
+    <td>{{ t.updated_at | localtime }}</td>
+    <td><button type="button" class="btn danger small del-token">删除</button></td>
+  </tr>
+  {% else %}
+  <tr class="empty-row"><td colspan="5" class="muted">暂无条目：未配置的仓库走 token_rules.json 关键字规则或默认 GITCODE_TOKEN。</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<form class="add-entry" id="token-form">
+  <strong>添加 Token</strong>
+  <input type="text" id="t-org" list="known-orgs" placeholder="社区（如 cann）" required>
+  <input type="text" id="t-repo" list="known-repos" placeholder="仓库（如 hccl）" required>
+  <input type="password" id="t-token" placeholder="GitCode Token" autocomplete="off" required style="width:260px">
+  <button type="submit">保存</button>
+  <span id="token-msg"></span>
+</form>
 {% endblock %}
 {% block script %}
 <script>
@@ -101,18 +133,19 @@ form.add-entry button:hover, .btn:hover { background: #1d4ed8; }
     return { 'Content-Type': 'application/json',
              'X-Admin-Token': tokenInput ? tokenInput.value : '' };
   }
-  function say(text, ok) {
-    msg.textContent = text;
-    msg.className = ok ? 'ok' : 'err';
+  function say(text, ok, target) {
+    const el = target || msg;
+    el.textContent = text;
+    el.className = ok ? 'ok' : 'err';
     if (ok) setTimeout(() => location.reload(), 400);
   }
-  async function call(url, options) {
+  async function call(url, options, target) {
     try {
       const r = await fetch(withToken(url), options);
-      if (r.status === 403) { say('403：Admin Token 无效或未填写', false); return null; }
-      if (!r.ok) { say('失败：' + r.status + ' ' + (await r.text()), false); return null; }
+      if (r.status === 403) { say('403：Admin Token 无效或未填写', false, target); return null; }
+      if (!r.ok) { say('失败：' + r.status + ' ' + (await r.text()), false, target); return null; }
       return await r.json();
-    } catch (e) { say('请求失败：' + e, false); return null; }
+    } catch (e) { say('请求失败：' + e, false, target); return null; }
   }
 
   document.querySelectorAll('#entries-table .toggle').forEach(cb => {
@@ -152,6 +185,31 @@ form.add-entry button:hover, .btn:hover { background: #1d4ed8; }
       document.getElementById('f-repo').value = btn.dataset.repo;
       document.getElementById('f-branch').value = btn.dataset.branch;
     });
+  });
+
+  // ── 仓库专属 Token ──
+  const tokenMsg = document.getElementById('token-msg');
+  document.querySelectorAll('#tokens-table .del-token').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const tr = btn.closest('tr');
+      if (!confirm('删除 ' + tr.children[0].textContent + '/' +
+                   tr.children[1].textContent + ' 的专属 Token？')) return;
+      const r = await call('/api/settings/tokens/' + tr.dataset.id,
+                           { method: 'DELETE', headers: adminHeaders() },
+                           tokenMsg);
+      if (r) say('已删除', true, tokenMsg);
+    });
+  });
+  document.getElementById('token-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const r = await call('/api/settings/tokens', {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify({
+        org: document.getElementById('t-org').value.trim(),
+        repo: document.getElementById('t-repo').value.trim(),
+        token: document.getElementById('t-token').value.trim() }) },
+      tokenMsg);
+    if (r) say('已保存 ' + r.org + '/' + r.repo + ' 的 Token', true, tokenMsg);
   });
 })();
 </script>

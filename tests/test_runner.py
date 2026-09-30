@@ -243,6 +243,46 @@ class TestActiveMode:
         assert repos["Ascend/26.1.0/MindStudio/msprof"]["stage"] == "exception"
 
 
+class TestDbTokenRouting:
+    """设置页仓库专属 token：优先级高于关键字规则与默认 token，且入脱敏集合。"""
+
+    DB_TOKEN = "db-secret-token"
+
+    def test_db_token_takes_precedence(
+            self, settings, db, token_env, engine, auto_pr_on):
+        set_shadow(db, False)
+        db.upsert_repo_token("Ascend", "msprof", self.DB_TOKEN)
+        engine.load_rules.return_value = [
+            {"keyword": "msprof", "token": RULE_TOKEN}]
+        engine.scan_changed.return_value = _scan(changed=[
+            _changed_item(),
+            _changed_item(path="CANN/9.1.0/sip/cann", org="CANN",
+                          repo="cann", branch="9.1.0"),
+        ])
+        execute_run(_push_trigger(), settings, db)
+        tokens = [c.args[4] for c in engine.submit_repo.call_args_list]
+        assert tokens == [self.DB_TOKEN]  # msprof 用 DB token
+        # cann 未命中 msprof 关键字规则，按权限管控不提交（与既有语义一致）
+        repos = {r["path"]: r for r in db.get_run_repos(db.list_runs()[0]["id"])}
+        assert repos["CANN/9.1.0/sip/cann"]["stage"] == "token_rule"
+
+    def test_db_token_masked_in_submit_error(
+            self, settings, db, token_env, engine, auto_pr_on):
+        """submit 错误文本带仓库专属 token：run_repos.error 与日志脱敏。"""
+        set_shadow(db, False)
+        db.upsert_repo_token("Ascend", "msprof", self.DB_TOKEN)
+        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
+        engine.submit_repo.return_value = {
+            "ok": False, "stage": "create_pr",
+            "error": f"推送失败: https://oauth2:{self.DB_TOKEN}@gitcode.com/x"}
+        execute_run(_push_trigger(), settings, db)
+        run = db.list_runs()[0]
+        repo = db.get_run_repos(run["id"])[0]
+        assert repo["status"] == "submit_failed"
+        assert self.DB_TOKEN not in repo["error"]
+        assert self.DB_TOKEN not in db.get_run(run["id"])["log"]
+
+
 class TestAutoPrGate:
     """自动提 PR 开关门控：设置页无条目或已禁用的仓库默认拒绝提交。"""
 

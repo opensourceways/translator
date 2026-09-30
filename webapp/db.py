@@ -9,7 +9,9 @@
 - prs.mergeable 三态：None 存 NULL（服务端尚未计算）
 - prs.labels_json/draft/review_total/review_accepted 为原始信号，
   派生状态（CI 未通过/待评审等）由 webapp.prstatus 在展示层计算
-- 任何 token 值不落库：本模块接口设计上就不接收 token 参数
+- 任何 token 值不进日志/其他表：唯一的例外是 repo_tokens 表
+  （设置页配置的仓库专属 token，按用户明确要求落库，见
+  list/get/upsert_repo_token）；该表之外本模块接口不接收 token 参数
 """
 
 import json
@@ -114,6 +116,15 @@ CREATE TABLE IF NOT EXISTS auto_pr (
     created_at TEXT,
     updated_at TEXT,
     UNIQUE(org, repo, branch)
+);
+CREATE TABLE IF NOT EXISTS repo_tokens (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    org        TEXT NOT NULL,
+    repo       TEXT NOT NULL,
+    token      TEXT NOT NULL,
+    created_at TEXT,
+    updated_at TEXT,
+    UNIQUE(org, repo)
 );
 """
 
@@ -654,6 +665,51 @@ class Database:
         exact = next((r for r in rows if r["branch"] == (branch or "")), None)
         chosen = exact or (rows[0] if rows else None)
         return bool(chosen and chosen["enabled"])
+
+    # ── 仓库专属 Token（repo_tokens 表，设置页维护） ──────────
+
+    def list_repo_tokens(self):
+        """全部仓库专属 token 条目，按 (org, repo) 排序（含明文 token，
+        展示层负责脱敏）。"""
+        with self._lock:
+            return self._all(
+                "SELECT * FROM repo_tokens ORDER BY org, repo")
+
+    def upsert_repo_token(self, org, repo, token):
+        """新增或更新仓库专属 token（org/repo 小写规范化）；返回条目 id。"""
+        org, repo, token = org.strip().lower(), repo.strip().lower(), \
+            (token or "").strip()
+        now = _utcnow()
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO repo_tokens (org, repo, token, created_at,"
+                " updated_at) VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(org, repo) DO UPDATE SET"
+                " token = excluded.token, updated_at = excluded.updated_at",
+                (org, repo, token, now, now))
+            self._conn.commit()
+            if cur.lastrowid:
+                return cur.lastrowid
+            row = self._one(
+                "SELECT id FROM repo_tokens WHERE org = ? AND repo = ?",
+                (org, repo))
+            return row["id"]
+
+    def delete_repo_token(self, entry_id):
+        """按 id 删除条目；不存在返回 False。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM repo_tokens WHERE id = ?", (entry_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def get_repo_token(self, org, repo):
+        """仓库专属 token（大小写不敏感）；无条目返回 None。"""
+        with self._lock:
+            row = self._one(
+                "SELECT token FROM repo_tokens WHERE org = ? AND repo = ?",
+                ((org or "").lower(), (repo or "").lower()))
+        return row["token"] if row else None
 
     # ── kv 配置（shadow 开关等） ─────────────────────────────
 
