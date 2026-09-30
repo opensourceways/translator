@@ -31,6 +31,10 @@
 .repo-card table { margin-top: 4px; }
 .repo-card th { white-space: nowrap; }
 .repo-card td:first-child, .repo-card td:nth-child(3) { white-space: nowrap; }
+/* 社区 tab 上的状态计数徽章：可点击筛选 */
+.tab .badge[data-state] { cursor: pointer; }
+.tab .badge[data-state]:hover { filter: brightness(0.94); }
+.tab .badge[data-state].filter-on { box-shadow: inset 0 0 0 1.5px currentColor; font-weight: 700; }
 </style>
 <h1>Pull Requests</h1>
 <div class="cards" id="prs-summary">
@@ -44,9 +48,9 @@
 <div class="tabs" id="org-tabs">
   {% for org in orgs %}
   <button type="button" class="tab{% if loop.first %} active{% endif %}" data-org="{{ org.org }}">{{ org.org }}
-    <span class="badge open">open {{ org.counts.open }}</span>
-    <span class="badge merged">merged {{ org.counts.merged }}</span>
-    <span class="badge closed">closed {{ org.counts.closed }}</span>
+    <span class="badge open" data-state="open" title="点击筛选该状态">open {{ org.counts.open }}</span>
+    <span class="badge merged" data-state="merged" title="点击筛选该状态">merged {{ org.counts.merged }}</span>
+    <span class="badge closed" data-state="closed" title="点击筛选该状态">closed {{ org.counts.closed }}</span>
   </button>
   {% endfor %}
 </div>
@@ -108,9 +112,21 @@
 // tab 选中状态：社区用 activeOrg，仓库按社区各自记忆（刷新重绘后恢复）
 let activeOrg = null;
 const activeRepoByOrg = {};
+// 状态筛选：按社区记忆（点社区 tab 上的 open/merged/closed 徽章切换，再点一次取消）
+const stateFilterByOrg = {};
 function repoKey(g) { return g.repo + '|' + (g.branch || ''); }
 
 document.addEventListener('click', e => {
+  // 先匹配状态徽章（在 tab 内部，命中后不再走 tab 切换分支）
+  const badge = e.target.closest('#prs-groups .tab .badge[data-state]');
+  if (badge) {
+    const org = badge.closest('.tab').dataset.org;
+    const st = badge.dataset.state;
+    activeOrg = org;
+    stateFilterByOrg[org] = stateFilterByOrg[org] === st ? null : st;
+    refresh();
+    return;
+  }
   const btn = e.target.closest('#prs-groups .tab');
   if (!btn) return;
   if (btn.dataset.org) {
@@ -144,16 +160,17 @@ function renderPrRow(pr) {
     `<td>${fmtTs(pr.last_polled)}</td>` +
     `<td>${fmtTs(pr.merged_at || pr.closed_at)}</td></tr>`;
 }
-function renderGroup(g, active) {
+function renderGroup(g, active, stateFilter) {
+  const prs = stateFilter ? g.prs.filter(p => p.state === stateFilter) : g.prs;
   const latest = g.latest
     ? `<a href="${withToken('/runs/' + g.latest.run_id)}"><span class="badge ${esc(g.latest.status)}">${esc(g.latest.status)}</span></a>` +
       `<span class="muted">+${g.latest.new_count} ~${g.latest.update_count} · ${fmtTs(g.latest.finished_at)}</span>` +
       (g.latest.pr_url ? `<a href="${esc(g.latest.pr_url)}">#${g.latest.pr_number}</a>` : '')
     : '<span class="muted">暂无 run 记录</span>';
-  const body = g.prs.length
+  const body = prs.length
     ? `<table><thead><tr><th>PR</th><th>标题</th><th>状态</th><th>进度</th><th>可合并</th><th>来源</th><th>目标分支</th><th>创建时间</th><th>最近轮询</th><th>合入/关闭时间</th></tr></thead>` +
-      `<tbody>${g.prs.map(renderPrRow).join('')}</tbody></table>`
-    : '<p class="muted">未发现 PR</p>';
+      `<tbody>${prs.map(renderPrRow).join('')}</tbody></table>`
+    : `<p class="muted">${stateFilter ? '无符合筛选的 PR（再点一次徽章取消筛选）' : '未发现 PR'}</p>`;
   return `<div class="card repo-card${active ? ' active' : ''}" data-repo="${esc(repoKey(g))}"><div class="repo-head">` +
     `<strong class="name">${esc(g.repo)}</strong>` +
     (g.branch ? `<span class="badge">${esc(g.branch)}</span>` : '') +
@@ -162,27 +179,30 @@ function renderGroup(g, active) {
 function renderOrgs(orgs) {
   if (!orgs.length) return '<p class="muted">暂无数据：尚未有任何 run 或 PR 记录。</p>';
   if (!orgs.some(o => o.org === activeOrg)) activeOrg = orgs[0].org;
-  const tabs = orgs.map(org =>
-    `<button type="button" class="tab${org.org === activeOrg ? ' active' : ''}" data-org="${esc(org.org)}">${esc(org.org)} ` +
-    `<span class="badge open">open ${org.counts.open}</span> ` +
-    `<span class="badge merged">merged ${org.counts.merged}</span> ` +
-    `<span class="badge closed">closed ${org.counts.closed}</span></button>`
-  ).join('');
+  const tabs = orgs.map(org => {
+    const f = stateFilterByOrg[org.org];
+    const badge = st =>
+      `<span class="badge ${st}${f === st ? ' filter-on' : ''}" data-state="${st}" title="点击筛选该状态">${st} ${org.counts[st]}</span>`;
+    return `<button type="button" class="tab${org.org === activeOrg ? ' active' : ''}" data-org="${esc(org.org)}">${esc(org.org)} ` +
+      `${badge('open')} ${badge('merged')} ${badge('closed')}</button>`;
+  }).join('');
   const panes = orgs.map(org => {
+    const stateFilter = stateFilterByOrg[org.org];
     let repo = activeRepoByOrg[org.org];
     if (!org.repos.some(g => repoKey(g) === repo)) {
       repo = org.repos.length ? repoKey(org.repos[0]) : null;
       activeRepoByOrg[org.org] = repo;
     }
-    const subTabs = org.repos.map(g =>
-      `<button type="button" class="tab${repoKey(g) === repo ? ' active' : ''}" data-repo="${esc(repoKey(g))}">${esc(g.repo)}` +
-      (g.branch ? ` <span class="badge">${esc(g.branch)}</span>` : '') +
-      (g.prs.length ? ` <span class="muted">${g.prs.length}</span>` : '') +
-      `</button>`
-    ).join('');
+    const subTabs = org.repos.map(g => {
+      const n = stateFilter ? g.prs.filter(p => p.state === stateFilter).length : g.prs.length;
+      return `<button type="button" class="tab${repoKey(g) === repo ? ' active' : ''}" data-repo="${esc(repoKey(g))}">${esc(g.repo)}` +
+        (g.branch ? ` <span class="badge">${esc(g.branch)}</span>` : '') +
+        (n ? ` <span class="muted">${n}</span>` : '') +
+        `</button>`;
+    }).join('');
     return `<div class="org-pane${org.org === activeOrg ? ' active' : ''}" data-org="${esc(org.org)}">` +
       `<div class="tabs sub">${subTabs}</div>` +
-      org.repos.map(g => renderGroup(g, repoKey(g) === repo)).join('') + `</div>`;
+      org.repos.map(g => renderGroup(g, repoKey(g) === repo, stateFilter)).join('') + `</div>`;
   }).join('');
   return `<div class="tabs" id="org-tabs">${tabs}</div>` + panes;
 }
