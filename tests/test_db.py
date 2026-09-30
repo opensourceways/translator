@@ -711,3 +711,43 @@ class TestAutoPrEntries:
         assert db.delete_auto_pr_entry(entry_id) is True
         assert db.list_auto_pr_entries() == []
         assert db.delete_auto_pr_entry(999) is False
+
+    def test_case_normalized_and_deduped(self, db):
+        """org/repo 大小写不敏感：CANN 与 cann 是同一条目，统一小写存储。"""
+        first = db.upsert_auto_pr_entry("CANN", "HCCL", "master")
+        second = db.upsert_auto_pr_entry("cann", "hccl", "master",
+                                         enabled=False)
+        assert second == first  # 命中同一条目而非新增
+        entries = db.list_auto_pr_entries()
+        assert len(entries) == 1
+        assert entries[0]["org"] == "cann" and entries[0]["repo"] == "hccl"
+        assert entries[0]["enabled"] == 0  # 第二次 upsert 生效
+        # 门控查询同样大小写不敏感
+        assert db.is_auto_pr_enabled("Cann", "Hccl", "master") is False
+
+    def test_migrate_normalizes_legacy_case_rows(self, tmp_path):
+        """旧库中仅大小写不同的重复条目：init 时折叠为小写（保留 id 最小者）。"""
+        path = tmp_path / "data" / "test.db"
+        d = db_mod.init_db(path)
+        d._conn.execute(
+            "INSERT INTO auto_pr (org, repo, branch, enabled)"
+            " VALUES ('CANN', 'hccl', 'master', 1)")
+        d._conn.execute(
+            "INSERT INTO auto_pr (org, repo, branch, enabled)"
+            " VALUES ('cann', 'HCCL', 'master', 0)")
+        d._conn.execute(
+            "INSERT INTO auto_pr (org, repo, branch, enabled)"
+            " VALUES ('CANN', 'hccl', 'dev', 1)")
+        d._conn.commit()
+        d.close()
+        d = db_mod.init_db(path)  # 重开触发迁移
+        try:
+            entries = d.list_auto_pr_entries()
+            assert len(entries) == 2
+            for e in entries:
+                assert e["org"] == "cann" and e["repo"] == "hccl"
+            assert {e["branch"] for e in entries} == {"master", "dev"}
+            master = next(e for e in entries if e["branch"] == "master")
+            assert master["enabled"] == 1  # 保留 id 最小者的开关状态
+        finally:
+            d.close()

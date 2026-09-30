@@ -55,19 +55,29 @@ def _group_prs(prs, statuses):
     （number 倒序）；仅在 run_repos 中出现但没有任何 PR 的仓库也会成组
     （prs 为空，模板据此显示「未发现 PR」）。org 与组内仓库均按字母序
     稳定排序；org 附 open/merged/closed 三态计数（徽标用）。
+    org/repo 分组大小写不敏感（GitCode 名称大小写不敏感，run_repos 与
+    prs 两处来源可能大小写不一致），显示名取先见者的原始写法。
 
     Returns:
         list[dict]: [{org, counts, repos: [{org, repo, branch, latest,
         prs}]}]。
     """
     groups = {}
+    names = {}
+
+    def _key(org, repo, branch):
+        k = ((org or "").lower(), (repo or "").lower(), branch)
+        names.setdefault(k, (org, repo))
+        return k
+
     for s in statuses:
-        groups[(s["org"], s["repo"], s["branch"])] = {
-            "org": s["org"], "repo": s["repo"], "branch": s["branch"],
-            "latest": s, "prs": []}
+        key = _key(s["org"], s["repo"], s["branch"])
+        groups[key] = {
+            "org": names[key][0], "repo": names[key][1],
+            "branch": s["branch"], "latest": s, "prs": []}
     for pr in prs:
-        key = (pr["org"], pr["repo"], pr.get("branch"))
-        groups.setdefault(key, {"org": key[0], "repo": key[1],
+        key = _key(pr["org"], pr["repo"], pr.get("branch"))
+        groups.setdefault(key, {"org": names[key][0], "repo": names[key][1],
                                 "branch": key[2], "latest": None,
                                 "prs": []})["prs"].append(pr)
     orgs = {}
@@ -75,7 +85,8 @@ def _group_prs(prs, statuses):
         g = groups[key]
         g["prs"].sort(key=lambda p: p["number"], reverse=True)
         org = orgs.setdefault(key[0], {
-            "org": key[0], "counts": {"open": 0, "merged": 0, "closed": 0},
+            "org": names[key][0], "counts": {"open": 0, "merged": 0,
+                                             "closed": 0},
             "repos": []})
         org["repos"].append(g)
         for pr in g["prs"]:
@@ -341,10 +352,12 @@ def create_app(settings=None):
     @app.get("/settings", response_class=HTMLResponse, dependencies=dash)
     async def page_settings(request: Request):
         db = request.app.state.db
-        known = {(r["org"], r["repo"], r["branch"])
+        known = {(r["org"].lower(), r["repo"].lower(), r["branch"])
                  for r in db.list_auto_pr_entries()}
-        suggestions = [r for r in db.distinct_repos()
-                       if (r["org"], r["repo"], r["branch"]) not in known]
+        suggestions = [
+            r for r in db.distinct_repos()
+            if (r["org"].lower(), r["repo"].lower(), r["branch"] or "")
+            not in known]
         return templates.TemplateResponse(
             request, "settings.html",
             _ctx(request, entries=db.list_auto_pr_entries(),
@@ -374,6 +387,7 @@ def create_app(settings=None):
         db = request.app.state.db
         entry_id = db.upsert_auto_pr_entry(
             org, repo, branch, enabled=bool(enabled))
+        org, repo = org.lower(), repo.lower()  # 与库内规范化口径一致
         log.info("自动提 PR 条目 upsert：%s/%s@%s enabled=%s",
                  org, repo, branch or "*", bool(enabled))
         return {"id": entry_id, "org": org, "repo": repo, "branch": branch,

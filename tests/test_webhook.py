@@ -448,6 +448,27 @@ class TestPages:
             flat = client.get("/api/prs").json()
             assert "prs" in flat and len(flat["prs"]) == 2
 
+    def test_group_by_org_case_insensitive(self, tmp_path, monkeypatch):
+        """org/repo 大小写不敏感分组：run 状态（CANN/HCCL）与 PR
+        （cann/hccl）合并为同一社区同一仓库组，显示名取先见者。"""
+        settings = _make_settings(tmp_path)
+        run_id = _seed_run(settings.db_path)
+        db = db_mod.init_db(settings.db_path)
+        db.record_scan_results(run_id, {
+            "changed": [{"project": {"path": "CANN/x"}, "org": "CANN",
+                         "repo": "HCCL", "branch": "master", "files": []}],
+            "unchanged": [], "skipped": [], "errors": []}, shadow=True)
+        db.close()
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            app.state.db.upsert_pr("cann", "hccl", 9, branch="master",
+                                   state="open")
+            body = client.get("/api/prs?group_by=org").json()
+            (org,) = body["orgs"]  # 只有一个社区
+            assert org["counts"]["open"] == 1
+            (g,) = org["repos"]  # 只有一个仓库组：latest 与 PR 合并
+            assert g["latest"]["status"] == "would_submit"
+            assert [p["number"] for p in g["prs"]] == [9]
+
     def test_api_readonly(self, tmp_path, monkeypatch):
         """只读 JSON：summary/runs/run 详情（含 repos，不含 log）/log/prs。"""
         settings = _make_settings(tmp_path)

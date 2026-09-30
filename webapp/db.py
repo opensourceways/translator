@@ -590,8 +590,12 @@ class Database:
     def upsert_auto_pr_entry(self, org, repo, branch="", enabled=True):
         """新增或更新条目（org/repo/branch 三元组唯一）；返回条目 id。
 
-        branch 空串表示该仓库所有分支的通配条目。
+        org/repo 统一规范化为小写（GitCode 组织/仓库名大小写不敏感，
+        避免 CANN/cann 产生重复条目）；branch 保持原样（git 分支名大小
+        写敏感），空串表示该仓库所有分支的通配条目。
         """
+        org, repo, branch = org.strip().lower(), repo.strip().lower(), \
+            (branch or "").strip()
         now = _utcnow()
         with self._lock:
             cur = self._conn.execute(
@@ -599,13 +603,13 @@ class Database:
                 " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(org, repo, branch) DO UPDATE SET"
                 " enabled = excluded.enabled, updated_at = excluded.updated_at",
-                (org, repo, branch or "", 1 if enabled else 0, now, now))
+                (org, repo, branch, 1 if enabled else 0, now, now))
             self._conn.commit()
             if cur.lastrowid:
                 return cur.lastrowid
             row = self._one(
                 "SELECT id FROM auto_pr WHERE org = ? AND repo = ?"
-                " AND branch = ?", (org, repo, branch or ""))
+                " AND branch = ?", (org, repo, branch))
             return row["id"]
 
     def set_auto_pr_enabled(self, entry_id, enabled):
@@ -629,8 +633,10 @@ class Database:
         """runner 提交前门控：精确分支条目优先，其次 branch='' 通配条目。
 
         无任何匹配条目时返回 False（默认拒绝：只有显式添加并启用的
-        仓库才允许自动提 PR）。
+        仓库才允许自动提 PR）。org/repo 大小写不敏感（条目已规范化为
+        小写，这里对查询值同样小写化）。
         """
+        org, repo = (org or "").lower(), (repo or "").lower()
         with self._lock:
             rows = self._all(
                 "SELECT branch, enabled FROM auto_pr"
@@ -712,6 +718,25 @@ def _migrate(db):
     for name, ddl in _PRS_EXTRA_COLUMNS.items():
         if name not in cols:
             db._conn.execute(f"ALTER TABLE prs ADD COLUMN {name} {ddl}")
+    # auto_pr 大小写规范化：org/repo 统一小写，折叠仅大小写不同的重复
+    # 条目（保留 id 最小者，沿用其 enabled）
+    rows = db._all("SELECT id, org, repo, branch FROM auto_pr")
+    seen = {}
+    dupes = []
+    for r in rows:
+        key = (r["org"].lower(), r["repo"].lower(), r["branch"])
+        if key in seen:
+            dupes.append(r["id"])
+        else:
+            seen[key] = r
+    # 先删重复行（释放小写值的唯一约束），再把保留行规范化为小写
+    for entry_id in dupes:
+        db._conn.execute("DELETE FROM auto_pr WHERE id = ?", (entry_id,))
+    for key, r in seen.items():
+        if r["org"] != key[0] or r["repo"] != key[1]:
+            db._conn.execute(
+                "UPDATE auto_pr SET org = ?, repo = ? WHERE id = ?",
+                (key[0], key[1], r["id"]))
 
 
 # ── shadow 开关（真值存 config 表，env 只作初始值种子） ────────

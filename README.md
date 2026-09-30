@@ -204,7 +204,8 @@ curl -X POST http://localhost:8000/api/config/shadow \
   `/prs` 为运行记录与 PR 状态页（`/prs` 按 社区 → 仓库 两级 tab 浏览）
 - `/settings`：自动提 PR 开关页。只有在此**添加并启用**的
   社区/仓库/分支（分支留空=该仓全部分支）才会在 active 模式下真正创建
-  PR，未列出的仓库一律跳过（默认拒绝）；`TC_ADMIN_TOKEN` 未配置时修改
+  PR，未列出的仓库一律跳过（默认拒绝）；社区/仓库名大小写不敏感
+  （统一按小写存储）。`TC_ADMIN_TOKEN` 未配置时修改
   操作无需鉴权（内部工具，默认内网部署），配置后需在页面顶部输入 token
   （仅存浏览器 localStorage）
 - 只读 JSON：`/api/summary`、`/api/runs`、`/api/runs/{id}`、
