@@ -19,9 +19,9 @@ form.add-entry button:hover, .btn:hover { background: #1d4ed8; }
 .token-bar { display: flex; gap: 8px; align-items: center; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 10px 14px; margin-top: 14px; font-size: 13px; }
 .token-bar input { padding: 5px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; width: 240px; }
 .hint { font-size: 12px; margin-top: 6px; }
-#op-msg, #rule-msg, #list-msg, #list-msg2 { font-size: 13px; margin-left: 8px; }
-#op-msg.ok, #rule-msg.ok, #list-msg.ok, #list-msg2.ok { color: #166534; }
-#op-msg.err, #rule-msg.err, #list-msg.err, #list-msg2.err { color: #991b1b; }
+#op-msg, #rule-msg { font-size: 13px; margin-left: 8px; }
+#op-msg.ok, #rule-msg.ok { color: #166534; }
+#op-msg.err, #rule-msg.err { color: #991b1b; }
 </style>
 <h1>设置</h1>
 
@@ -121,69 +121,6 @@ form.add-entry button:hover, .btn:hover { background: #1d4ed8; }
   <span id="rule-msg"></span>
 </form>
 
-<h2>拉黑名单 / 开放白名单</h2>
-<p class="muted" style="font-size:13px">
-  拉黑名单：名单内<strong>已启用</strong>的译稿目录（等于条目或以其为前缀）直接跳过，不对比也不建 PR。
-  开放白名单：有启用条目时只处理命中的目录，其余跳过。
-  路径相对译稿权威仓库根目录（如 <code>Ascend/26.1.0/MindStudio/msprof</code>）。
-  条目可用开关临时停用（不必删除）；<strong>某类名单有启用条目时，来源仓对应的 blacklist.json / whitelist.json 即被整体覆盖；全部禁用或无条目则回退读文件。</strong>
-</p>
-
-<h3 style="font-size:14px; margin-top:14px">拉黑名单</h3>
-<table id="blacklist-table" style="margin-top:8px">
-  <thead><tr><th>目录路径</th><th>启用</th><th>添加时间</th><th>操作</th></tr></thead>
-  <tbody>
-  {% for e in blacklist %}
-  <tr data-id="{{ e.id }}">
-    <td class="mono">{{ e.path }}</td>
-    <td>
-      <label class="switch">
-        <input type="checkbox" class="toggle-list" {% if e.enabled %}checked{% endif %}>
-        <span class="slider"></span>
-      </label>
-    </td>
-    <td>{{ e.created_at | localtime }}</td>
-    <td><button type="button" class="btn danger small del-list">删除</button></td>
-  </tr>
-  {% else %}
-  <tr class="empty-row"><td colspan="4" class="muted">暂无条目：回退读来源仓 blacklist.json（无该文件则不拉黑任何目录）。</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
-<form class="add-entry" id="blacklist-form">
-  <strong>拉黑目录</strong>
-  <input type="text" id="b-path" placeholder="目录路径（如 CANN/hccl）" required style="width:280px">
-  <button type="submit">添加</button>
-  <span id="list-msg"></span>
-</form>
-
-<h3 style="font-size:14px; margin-top:14px">开放白名单</h3>
-<table id="whitelist-table" style="margin-top:8px">
-  <thead><tr><th>目录路径</th><th>启用</th><th>添加时间</th><th>操作</th></tr></thead>
-  <tbody>
-  {% for e in whitelist %}
-  <tr data-id="{{ e.id }}">
-    <td class="mono">{{ e.path }}</td>
-    <td>
-      <label class="switch">
-        <input type="checkbox" class="toggle-list" {% if e.enabled %}checked{% endif %}>
-        <span class="slider"></span>
-      </label>
-    </td>
-    <td>{{ e.created_at | localtime }}</td>
-    <td><button type="button" class="btn danger small del-list">删除</button></td>
-  </tr>
-  {% else %}
-  <tr class="empty-row"><td colspan="4" class="muted">暂无条目：回退读来源仓 whitelist.json（无该文件则不限制开放范围）。</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
-<form class="add-entry" id="whitelist-form">
-  <strong>开放目录</strong>
-  <input type="text" id="w-path" placeholder="目录路径（如 CANN/hccl）" required style="width:280px">
-  <button type="submit">添加</button>
-  <span id="list-msg2"></span>
-</form>
 {% endblock %}
 {% block script %}
 <script>
@@ -277,49 +214,6 @@ form.add-entry button:hover, .btn:hover { background: #1d4ed8; }
     if (r) say('已保存规则「' + r.keyword + '」', true, ruleMsg);
   });
 
-  // ── 黑/白名单 ──
-  document.querySelectorAll('.toggle-list').forEach(cb => {
-    cb.addEventListener('change', async () => {
-      const id = cb.closest('tr').dataset.id;
-      const r = await call('/api/settings/path-lists/' + id, {
-        method: 'POST', headers: adminHeaders(),
-        body: JSON.stringify({ enabled: cb.checked }) });
-      if (r) say(cb.checked ? '已启用' : '已禁用', true);
-      else cb.checked = !cb.checked;  // 失败回滚
-    });
-  });
-  document.querySelectorAll('.del-list').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const tr = btn.closest('tr');
-      const kindLabel = tr.closest('table').id === 'blacklist-table'
-        ? '拉黑名单' : '开放白名单';
-      if (!confirm('从' + kindLabel + '删除 ' + tr.children[0].textContent +
-                   '？')) return;
-      const r = await call('/api/settings/path-lists/' + tr.dataset.id,
-                           { method: 'DELETE', headers: adminHeaders() });
-      if (r) say('已删除', true);
-    });
-  });
-  async function submitList(kind, inputId, msgEl) {
-    const r = await call('/api/settings/path-lists', {
-      method: 'POST', headers: adminHeaders(),
-      body: JSON.stringify({
-        kind: kind,
-        path: document.getElementById(inputId).value.trim() }) }, msgEl);
-    if (r) say('已添加 ' + r.path, true, msgEl);
-  }
-  document.getElementById('blacklist-form').addEventListener('submit',
-    async e => {
-      e.preventDefault();
-      await submitList('blacklist', 'b-path',
-                       document.getElementById('list-msg'));
-    });
-  document.getElementById('whitelist-form').addEventListener('submit',
-    async e => {
-      e.preventDefault();
-      await submitList('whitelist', 'w-path',
-                       document.getElementById('list-msg2'));
-    });
 })();
 </script>
 {% endblock %}

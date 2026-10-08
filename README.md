@@ -95,6 +95,9 @@ https://<jenkins地址>/generic-webhook-trigger/invoke?token=translator-auto-pr
 
 ### 5. 配置开放白名单（可选，范围管控）
 
+> 注：本节约束 Jenkins/CLI 模式。服务化部署（Docker）不适用——哪些仓库
+> 参与统一由 `/settings` 页的仓库配置开关控制。
+
 需要在灰度阶段把功能收口到个别仓库（如「先只对 `sip` 仓库开放」）时，
 在**译稿权威仓库**根目录添加 `whitelist.json`：
 
@@ -210,15 +213,12 @@ curl -X POST http://localhost:8000/api/config/shadow \
     只显示掩码不回显明文，优先级高于 Token 规则和默认 GITCODE_TOKEN
   - **Token 规则**（目录关键字 → Token，匹配大小写不敏感、按添加顺序
     取第一个命中；表非空即覆盖来源仓 token_rules.json，为空回退读文件）
-  - **拉黑名单 / 开放白名单**（目录路径列表，条目带启用开关可临时
-    停用；某类有启用条目即覆盖来源仓 blacklist.json / whitelist.json，
-    全部禁用或无条目回退读文件）
 
   `TC_ADMIN_TOKEN` 未配置时修改操作无需鉴权（内部工具，默认内网部署），
   配置后需在页面顶部输入 token（仅存浏览器 localStorage）
 - 只读 JSON：`/api/summary`、`/api/runs`、`/api/runs/{id}`、
   `/api/runs/{id}/log`、`/api/prs`、`/api/settings/repos`、
-  `/api/settings/token-rules`、`/api/settings/path-lists`
+  `/api/settings/token-rules`
 - 配置 `TC_DASH_TOKEN` 后页面与只读 API 都需鉴权；留空则放开（默认
   部署在内网/反代后）
 - 手动触发（Build Now 替代）：

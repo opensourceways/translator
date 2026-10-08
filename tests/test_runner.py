@@ -68,19 +68,14 @@ def engine():
     """把引擎入口全部 mock 到 runner 模块引用点，返回各 mock 句柄。"""
     with patch.object(runner.localgit, "clone") as clone, \
             patch.object(runner.service, "load_token_rules") as load_rules, \
-            patch.object(runner.service, "load_blacklist") as load_bl, \
-            patch.object(runner.service, "load_whitelist") as load_wl, \
             patch.object(runner.service, "scan_changed") as scan, \
             patch.object(runner.service, "submit_repo") as submit:
         clone.side_effect = lambda *a, **kw: os.makedirs(a[4], exist_ok=True)
         load_rules.return_value = []
-        load_bl.return_value = []
-        load_wl.return_value = []
         scan.return_value = _scan()
         submit.return_value = {"ok": True, "noop": True,
                                "head_branch": "translator/auto-26.1.0"}
         yield SimpleNamespace(clone=clone, load_rules=load_rules,
-                              load_blacklist=load_bl, load_whitelist=load_wl,
                               scan_changed=scan, submit_repo=submit)
 
 
@@ -574,20 +569,6 @@ class TestDbConfigOverride:
         set_shadow(db, True)
         execute_run(_push_trigger(), settings, db)
         engine.load_rules.assert_called_once()
-        engine.load_blacklist.assert_called_once()
-        engine.load_whitelist.assert_called_once()
-
-    def test_db_lists_override_file(
-            self, settings, db, token_env, engine):
-        set_shadow(db, True)
-        db.add_path_list_entry("blacklist", "CANN/hccl")
-        db.add_path_list_entry("whitelist", "Ascend/msprof")
-        execute_run(_push_trigger(), settings, db)
-        engine.load_blacklist.assert_not_called()
-        engine.load_whitelist.assert_not_called()
-        kw = engine.scan_changed.call_args.kwargs
-        assert kw["blacklist"] == ["CANN/hccl"]
-        assert kw["whitelist"] == ["Ascend/msprof"]
 
     def test_db_rule_token_masked_in_log(
             self, settings, db, token_env, engine, auto_pr_on):

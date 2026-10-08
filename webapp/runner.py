@@ -5,8 +5,8 @@
 - 全局唯一 Worker 线程消费 CoalescingQueue，逐 Trigger 执行 execute_run
 - execute_run 复刻 Jenkinsfile 的本地化流程：克隆来源仓到
   work_dir/run-<id>/（blobs=True 全量浅克隆，等价
-  ``git clone --depth=1 --no-checkout``），加载规则/名单（设置页
-  DB 配置优先，非空即覆盖来源仓同名 JSON 文件，为空回退文件），
+  ``git clone --depth=1 --no-checkout``），加载 Token 规则（设置页
+  DB 配置优先，非空即覆盖来源仓 token_rules.json，为空回退文件），
   scan_changed 走本地化模式（支持增量 diff），影子模式只落
   would_submit 不提交，active 模式先过仓库配置门控（设置页维护，按
   仓库粒度，默认拒绝），再逐仓 resolve_token + submit_repo
@@ -146,7 +146,8 @@ def execute_run(trigger, settings, db):
         log(f"正在克隆来源仓库 {owner}/{repo} ...")
         localgit.clone(owner, repo, None, default_token, src_dir,
                        log=log, blobs=True)
-        # 设置页自助配置优先：DB 非空即覆盖来源仓同名文件，为空回退文件
+        # 设置页自助配置优先：DB 非空即覆盖来源仓 token_rules.json，
+        # 为空回退文件
         token_rules = db.list_path_token_rules()
         if token_rules:
             log(f"使用设置页 Token 规则 {len(token_rules)} 条"
@@ -158,26 +159,11 @@ def execute_run(trigger, settings, db):
         masker.add_secrets(r.get("token") for r in token_rules)
         # 设置页配置的仓库专属 token 也纳入脱敏集合
         masker.add_secrets(t.get("token") for t in db.list_repo_configs())
-        blacklist = db.list_path_list("blacklist")
-        if blacklist:
-            log(f"使用设置页拉黑名单 {len(blacklist)} 条"
-                f"（覆盖 blacklist.json）: {', '.join(blacklist)}")
-        else:
-            blacklist = service.load_blacklist(
-                default_token, log=log, source_repo_dir=src_dir)
-        whitelist = db.list_path_list("whitelist")
-        if whitelist:
-            log(f"使用设置页开放白名单 {len(whitelist)} 条"
-                f"（覆盖 whitelist.json）: {', '.join(whitelist)}")
-        else:
-            whitelist = service.load_whitelist(
-                default_token, log=log, source_repo_dir=src_dir)
 
         # ── 扫描（本地化 + 可选增量 diff） ──
         scan = service.scan_changed(
             trigger.keyword, default_token,
-            token_rules=token_rules, blacklist=blacklist,
-            whitelist=whitelist, log=log,
+            token_rules=token_rules, log=log,
             source_repo_dir=src_dir,
             clone_root=os.path.join(workdir, "clones"),
             diff_before=push_before, diff_after=push_after)

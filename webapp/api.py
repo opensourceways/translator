@@ -9,7 +9,7 @@
 - Dashboard 页面与 /api/* 只读 JSON：TC_DASH_TOKEN 未配置时放开，配置后
   要求 X-Dash-Token 头或 ?token= query
 - POST /api/runs、/api/config/shadow、/api/settings/*（仓库配置、
-  token 规则、黑/白名单）：
+  token 规则）：
   X-Admin-Token 管理端点；admin_token 未配置时放开（内部工具，默认
   内网部署），配置后校验
 
@@ -379,8 +379,6 @@ def create_app(settings=None):
             _ctx(request, entries=entries,
                  suggestions=suggestions,
                  token_rules=token_rules,
-                 blacklist=db.list_path_list_entries("blacklist"),
-                 whitelist=db.list_path_list_entries("whitelist"),
                  admin_auth=bool(settings.admin_token)))
 
     @app.get("/api/settings/repos", dependencies=dash)
@@ -450,9 +448,9 @@ def create_app(settings=None):
         log.info("仓库配置条目 #%d 已删除", entry_id)
         return {"id": entry_id, "deleted": True}
 
-    # ── Token 规则与黑/白名单（设置页自助配置） ───────────────
-    # DB 非空即覆盖来源仓 token_rules.json / blacklist.json /
-    # whitelist.json；DB 为空时回退读文件（runner/prsync 生效语义）
+    # ── Token 规则（设置页自助配置） ─────────────────────────
+    # DB 非空即覆盖来源仓 token_rules.json；DB 为空时回退读文件
+    #（runner/prsync 生效语义）
 
 
     @app.get("/api/settings/token-rules", dependencies=dash)
@@ -489,68 +487,6 @@ def create_app(settings=None):
         if not db.delete_path_token_rule(entry_id):
             raise HTTPException(404, "条目不存在")
         log.info("Token 规则条目 #%d 已删除", entry_id)
-        return {"id": entry_id, "deleted": True}
-
-    @app.get("/api/settings/path-lists", dependencies=dash)
-    async def api_list_path_lists(request: Request):
-        """黑/白名单条目：{blacklist: [...], whitelist: [...]}。"""
-        db = request.app.state.db
-        return {"blacklist": db.list_path_list_entries("blacklist"),
-                "whitelist": db.list_path_list_entries("whitelist")}
-
-    @app.post("/api/settings/path-lists",
-              dependencies=[Depends(require_admin)])
-    async def api_add_path_list(request: Request):
-        """新增名单条目：{kind, path, enabled?}，kind ∈ blacklist/whitelist。"""
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        if not isinstance(body, dict):
-            body = {}
-        kind = str(body.get("kind") or "").strip()
-        path = str(body.get("path") or "").strip().strip("/")
-        if kind not in ("blacklist", "whitelist"):
-            raise HTTPException(422, "kind 必须是 blacklist 或 whitelist")
-        if not path:
-            raise HTTPException(422, "body 需要非空字段 path")
-        db = request.app.state.db
-        entry_id = db.add_path_list_entry(kind, path)
-        enabled = body.get("enabled", True)
-        if not isinstance(enabled, bool):
-            raise HTTPException(422, "enabled 必须是布尔值")
-        if not enabled:
-            db.set_path_list_enabled(entry_id, False)
-        label = "拉黑名单" if kind == "blacklist" else "开放白名单"
-        log.info("%s新增条目：%s", label, path)
-        return {"id": entry_id, "kind": kind, "path": path,
-                "enabled": enabled}
-
-    @app.post("/api/settings/path-lists/{entry_id}",
-              dependencies=[Depends(require_admin)])
-    async def api_toggle_path_list(request: Request, entry_id: int):
-        """切换名单条目开关：{enabled: bool}。"""
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        enabled = body.get("enabled") if isinstance(body, dict) else None
-        if not isinstance(enabled, bool):
-            raise HTTPException(422, "body 需要布尔字段 enabled")
-        db = request.app.state.db
-        if not db.set_path_list_enabled(entry_id, enabled):
-            raise HTTPException(404, "条目不存在")
-        log.info("名单条目 #%d 切换为 %s",
-                 entry_id, "启用" if enabled else "禁用")
-        return {"id": entry_id, "enabled": enabled}
-
-    @app.delete("/api/settings/path-lists/{entry_id}",
-                dependencies=[Depends(require_admin)])
-    async def api_delete_path_list(request: Request, entry_id: int):
-        db = request.app.state.db
-        if not db.delete_path_list_entry(entry_id):
-            raise HTTPException(404, "条目不存在")
-        log.info("名单条目 #%d 已删除", entry_id)
         return {"id": entry_id, "deleted": True}
 
     # ── 管理端点 ─────────────────────────────────────────────
