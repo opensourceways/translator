@@ -87,8 +87,8 @@ def engine():
 @pytest.fixture
 def auto_pr_on(db):
     """为测试用的两个目标仓开启自动提 PR 通配条目（runner 门控放行）。"""
-    db.upsert_auto_pr_entry("Ascend", "msprof")
-    db.upsert_auto_pr_entry("CANN", "cann")
+    db.upsert_repo_config("Ascend", "msprof")
+    db.upsert_repo_config("CANN", "cann")
 
 
 def _push_trigger(**kw):
@@ -244,14 +244,14 @@ class TestActiveMode:
 
 
 class TestDbTokenRouting:
-    """设置页仓库专属 token：优先级高于关键字规则与默认 token，且入脱敏集合。"""
+    """仓库配置里的专属 token：优先级高于关键字规则与默认 token，且入脱敏集合。"""
 
     DB_TOKEN = "db-secret-token"
 
     def test_db_token_takes_precedence(
             self, settings, db, token_env, engine, auto_pr_on):
         set_shadow(db, False)
-        db.upsert_repo_token("Ascend", "msprof", self.DB_TOKEN)
+        db.upsert_repo_config("Ascend", "msprof", token=self.DB_TOKEN)
         engine.load_rules.return_value = [
             {"keyword": "msprof", "token": RULE_TOKEN}]
         engine.scan_changed.return_value = _scan(changed=[
@@ -270,7 +270,7 @@ class TestDbTokenRouting:
             self, settings, db, token_env, engine, auto_pr_on):
         """submit 错误文本带仓库专属 token：run_repos.error 与日志脱敏。"""
         set_shadow(db, False)
-        db.upsert_repo_token("Ascend", "msprof", self.DB_TOKEN)
+        db.upsert_repo_config("Ascend", "msprof", token=self.DB_TOKEN)
         engine.scan_changed.return_value = _scan(changed=[_changed_item()])
         engine.submit_repo.return_value = {
             "ok": False, "stage": "create_pr",
@@ -284,7 +284,7 @@ class TestDbTokenRouting:
 
 
 class TestAutoPrGate:
-    """自动提 PR 开关门控：设置页无条目或已禁用的仓库默认拒绝提交。"""
+    """仓库配置门控（仓库粒度）：设置页无条目或已禁用的仓库默认拒绝提交。"""
 
     def test_no_entry_skips_submit(self, settings, db, token_env, engine):
         set_shadow(db, False)
@@ -296,34 +296,23 @@ class TestAutoPrGate:
         repo = db.get_run_repos(run["id"])[0]
         assert repo["status"] == "noop"
         assert repo["stage"] == "auto_pr_off"
-        assert "开关未启用" in db.get_run(run["id"])["log"]
+        assert "仓库配置未启用" in db.get_run(run["id"])["log"]
         assert db.list_prs() == []
 
     def test_disabled_entry_skips(self, settings, db, token_env, engine):
         set_shadow(db, False)
-        entry_id = db.upsert_auto_pr_entry("Ascend", "msprof", "26.1.0")
-        db.set_auto_pr_enabled(entry_id, False)
+        entry_id = db.upsert_repo_config("Ascend", "msprof")
+        db.set_repo_config_enabled(entry_id, False)
         engine.scan_changed.return_value = _scan(changed=[_changed_item()])
         execute_run(_push_trigger(), settings, db)
         engine.submit_repo.assert_not_called()
         repo = db.get_run_repos(db.list_runs()[0]["id"])[0]
         assert repo["stage"] == "auto_pr_off"
 
-    def test_exact_branch_overrides_wildcard(
-            self, settings, db, token_env, engine):
-        """精确分支条目优先于通配条目：通配启用但 26.1.0 禁用 → 仍跳过。"""
-        set_shadow(db, False)
-        db.upsert_auto_pr_entry("Ascend", "msprof")  # 通配启用
-        exact = db.upsert_auto_pr_entry("Ascend", "msprof", "26.1.0")
-        db.set_auto_pr_enabled(exact, False)
-        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
-        execute_run(_push_trigger(), settings, db)
-        engine.submit_repo.assert_not_called()
-
     def test_mixed_gate_per_repo(self, settings, db, token_env, engine):
         """同一 run 内：启用条目的仓提交，无条目的仓跳过。"""
         set_shadow(db, False)
-        db.upsert_auto_pr_entry("Ascend", "msprof", "26.1.0")
+        db.upsert_repo_config("Ascend", "msprof")
         engine.scan_changed.return_value = _scan(changed=[
             _changed_item(),
             _changed_item(path="CANN/9.1.0/sip/cann", org="CANN",

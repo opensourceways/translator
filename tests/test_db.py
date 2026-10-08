@@ -666,131 +666,108 @@ class TestSummaryAndCleanup:
         assert db.get_run(run_id) is not None
 
 
-class TestAutoPrEntries:
-    """auto_pr 表：增删改查与门控判定（默认拒绝 / 精确优先于通配）。"""
+class TestRepoConfigs:
+    """repo_configs 表：一个条目配齐一个仓库的开关与专属 Token（仓库粒度）。"""
 
     def test_upsert_and_list(self, db):
-        entry_id = db.upsert_auto_pr_entry("cann", "hccl", "master")
-        entries = db.list_auto_pr_entries()
+        entry_id = db.upsert_repo_config("CANN", "HCCL")
+        entries = db.list_repo_configs()
         assert len(entries) == 1
         e = entries[0]
         assert e["id"] == entry_id
-        assert (e["org"], e["repo"], e["branch"]) == ("cann", "hccl", "master")
-        assert e["enabled"] == 1
+        assert (e["org"], e["repo"]) == ("cann", "hccl")  # 小写归一
+        assert e["enabled"] == 1 and e["token"] == ""
         assert e["created_at"] and e["updated_at"]
 
-    def test_upsert_conflict_updates(self, db):
-        db.upsert_auto_pr_entry("cann", "hccl", "master", enabled=True)
-        db.upsert_auto_pr_entry("cann", "hccl", "master", enabled=False)
-        entries = db.list_auto_pr_entries()
-        assert len(entries) == 1
-        assert entries[0]["enabled"] == 0
+    def test_upsert_partial_fields_keep_existing(self, db):
+        """enabled/token 传 None 保持不变；冲突更新返回同一条目 id。"""
+        entry_id = db.upsert_repo_config("cann", "hccl", enabled=True,
+                                         token="tok-1")
+        # 只改开关，token 保留
+        assert db.upsert_repo_config("cann", "hccl", enabled=False) == entry_id
+        e = db.list_repo_configs()[0]
+        assert e["enabled"] == 0 and e["token"] == "tok-1"
+        # 只改 token，开关保留
+        assert db.upsert_repo_config("cann", "hccl", token="tok-2") == entry_id
+        e = db.list_repo_configs()[0]
+        assert e["enabled"] == 0 and e["token"] == "tok-2"
+        assert len(db.list_repo_configs()) == 1
 
-    def test_default_deny_when_no_entry(self, db):
-        assert db.is_auto_pr_enabled("cann", "hccl", "master") is False
+    def test_token_clear_with_empty_string(self, db):
+        db.upsert_repo_config("cann", "hccl", token="tok-1")
+        db.upsert_repo_config("cann", "hccl", token="")
+        assert db.get_repo_token("cann", "hccl") is None
 
-    def test_wildcard_branch_covers_any(self, db):
-        db.upsert_auto_pr_entry("cann", "hccl")  # branch='' 通配
-        assert db.is_auto_pr_enabled("cann", "hccl", "master") is True
+    def test_gate_default_deny_and_toggle(self, db):
+        assert db.is_auto_pr_enabled("cann", "hccl") is False  # 默认拒绝
+        entry_id = db.upsert_repo_config("cann", "hccl")
+        assert db.is_auto_pr_enabled("CANN", "Hccl") is True  # 大小写不敏感
+        # branch 参数保留兼容但不参与判定（仓库粒度）
         assert db.is_auto_pr_enabled("cann", "hccl", "dev") is True
-        assert db.is_auto_pr_enabled("cann", "sip", "master") is False
+        assert db.set_repo_config_enabled(entry_id, False) is True
+        assert db.is_auto_pr_enabled("cann", "hccl") is False
+        assert db.set_repo_config_enabled(999, True) is False
+        assert db.delete_repo_config(entry_id) is True
+        assert db.list_repo_configs() == []
+        assert db.delete_repo_config(999) is False
 
-    def test_exact_branch_overrides_wildcard(self, db):
-        db.upsert_auto_pr_entry("cann", "hccl")  # 通配启用
-        db.upsert_auto_pr_entry("cann", "hccl", "master", enabled=False)
-        assert db.is_auto_pr_enabled("cann", "hccl", "master") is False
-        assert db.is_auto_pr_enabled("cann", "hccl", "dev") is True
+    def test_get_repo_token(self, db):
+        assert db.get_repo_token("cann", "hccl") is None  # 无条目
+        db.upsert_repo_config("CANN", "HCCL", token="tok-secret-1")
+        assert db.get_repo_token("Cann", "Hccl") == "tok-secret-1"
+        assert db.get_repo_token("cann", "sip") is None
 
-    def test_toggle_and_delete(self, db):
-        entry_id = db.upsert_auto_pr_entry("cann", "hccl", "master")
-        assert db.set_auto_pr_enabled(entry_id, False) is True
-        assert db.is_auto_pr_enabled("cann", "hccl", "master") is False
-        assert db.set_auto_pr_enabled(entry_id, True) is True
-        assert db.is_auto_pr_enabled("cann", "hccl", "master") is True
-        assert db.set_auto_pr_enabled(999, True) is False
-        assert db.delete_auto_pr_entry(entry_id) is True
-        assert db.list_auto_pr_entries() == []
-        assert db.delete_auto_pr_entry(999) is False
+    def test_migrate_folds_legacy_tables(self, tmp_path):
+        """旧库 auto_pr + repo_tokens 折叠进 repo_configs 后删表。
 
-    def test_case_normalized_and_deduped(self, db):
-        """org/repo 大小写不敏感：CANN 与 cann 是同一条目，统一小写存储。"""
-        first = db.upsert_auto_pr_entry("CANN", "HCCL", "master")
-        second = db.upsert_auto_pr_entry("cann", "hccl", "master",
-                                         enabled=False)
-        assert second == first  # 命中同一条目而非新增
-        entries = db.list_auto_pr_entries()
-        assert len(entries) == 1
-        assert entries[0]["org"] == "cann" and entries[0]["repo"] == "hccl"
-        assert entries[0]["enabled"] == 0  # 第二次 upsert 生效
-        # 门控查询同样大小写不敏感
-        assert db.is_auto_pr_enabled("Cann", "Hccl", "master") is False
-
-    def test_migrate_normalizes_legacy_case_rows(self, tmp_path):
-        """旧库中仅大小写不同的重复条目：init 时折叠为小写（保留 id 最小者）。"""
+        auto_pr 分支粒度折叠为仓库粒度（任一分支启用则仓库启用，
+        org/repo 顺带小写归一）；repo_tokens 的 token 并入同仓条目。
+        """
         path = tmp_path / "data" / "test.db"
         d = db_mod.init_db(path)
-        d._conn.execute(
-            "INSERT INTO auto_pr (org, repo, branch, enabled)"
-            " VALUES ('CANN', 'hccl', 'master', 1)")
-        d._conn.execute(
-            "INSERT INTO auto_pr (org, repo, branch, enabled)"
-            " VALUES ('cann', 'HCCL', 'master', 0)")
-        d._conn.execute(
-            "INSERT INTO auto_pr (org, repo, branch, enabled)"
-            " VALUES ('CANN', 'hccl', 'dev', 1)")
+        d._conn.executescript("""
+            CREATE TABLE auto_pr (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org TEXT, repo TEXT, branch TEXT DEFAULT '', enabled INTEGER);
+            CREATE TABLE repo_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org TEXT, repo TEXT, token TEXT);
+        """)
+        d._conn.execute("INSERT INTO auto_pr (org, repo, branch, enabled)"
+                        " VALUES ('CANN', 'hccl', 'master', 1)")
+        d._conn.execute("INSERT INTO auto_pr (org, repo, branch, enabled)"
+                        " VALUES ('cann', 'HCCL', 'dev', 0)")
+        d._conn.execute("INSERT INTO auto_pr (org, repo, branch, enabled)"
+                        " VALUES ('cann', 'sip', 'master', 0)")
+        d._conn.execute("INSERT INTO repo_tokens (org, repo, token)"
+                        " VALUES ('CANN', 'HCCL', 'tok-hccl')")
+        d._conn.execute("INSERT INTO repo_tokens (org, repo, token)"
+                        " VALUES ('ascend', 'msprof', 'tok-msprof')")
         d._conn.commit()
         d.close()
         d = db_mod.init_db(path)  # 重开触发迁移
         try:
-            entries = d.list_auto_pr_entries()
-            assert len(entries) == 2
-            for e in entries:
-                assert e["org"] == "cann" and e["repo"] == "hccl"
-            assert {e["branch"] for e in entries} == {"master", "dev"}
-            master = next(e for e in entries if e["branch"] == "master")
-            assert master["enabled"] == 1  # 保留 id 最小者的开关状态
+            entries = {e["repo"]: e for e in d.list_repo_configs()}
+            assert set(entries) == {"hccl", "sip", "msprof"}
+            # hccl：master 启用 + dev 禁用 → 仓库启用；token 并入；小写归一
+            assert entries["hccl"]["org"] == "cann"
+            assert entries["hccl"]["enabled"] == 1
+            assert entries["hccl"]["token"] == "tok-hccl"
+            # sip：唯一条目禁用 → 保持禁用
+            assert entries["sip"]["enabled"] == 0
+            # 仅 repo_tokens 出现的仓：迁移为启用条目
+            assert entries["msprof"]["enabled"] == 1
+            assert entries["msprof"]["token"] == "tok-msprof"
+            # 旧表已删
+            tables = {r["name"] for r in d._all(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            assert "auto_pr" not in tables and "repo_tokens" not in tables
         finally:
             d.close()
-
-    def test_created_at_fill_once(self, db):
-        """prs.created_at（PR 真实创建时间）：upsert 落值、轮询补空、不覆盖。"""
-        db.upsert_pr("o1", "r1", 1)
-        assert db.list_prs()[0]["created_at"] is None
-        # 轮询补空
-        db.apply_pr_state("o1", "r1", 1, "open",
-                          created_at="2026-09-01T08:00:00+08:00")
-        assert db.list_prs()[0]["created_at"] == "2026-09-01T08:00:00+08:00"
-        # upsert/apply 均不覆盖已有值
-        db.upsert_pr("o1", "r1", 1, created_at="2020-01-01T00:00:00+00:00")
-        db.apply_pr_state("o1", "r1", 1, "open",
-                          created_at="2020-01-01T00:00:00+00:00")
-        assert db.list_prs()[0]["created_at"] == "2026-09-01T08:00:00+08:00"
-        # 新 PR 直接由 upsert 落创建时间
-        db.upsert_pr("o1", "r1", 2, created_at="2026-09-02T08:00:00+08:00")
-        pr2 = [p for p in db.list_prs() if p["number"] == 2][0]
-        assert pr2["created_at"] == "2026-09-02T08:00:00+08:00"
-
-
-class TestRepoTokens:
-    """repo_tokens 表：仓库专属 token 的增删查（大小写归一）。"""
-
-    def test_upsert_get_delete(self, db):
-        entry_id = db.upsert_repo_token("CANN", "HCCL", "tok-secret-1")
-        entries = db.list_repo_tokens()
-        assert len(entries) == 1
-        assert entries[0]["org"] == "cann" and entries[0]["repo"] == "hccl"
-        assert entries[0]["token"] == "tok-secret-1"
-        # 大小写不敏感查询
-        assert db.get_repo_token("Cann", "Hccl") == "tok-secret-1"
-        assert db.get_repo_token("cann", "sip") is None
-        # 冲突更新
-        assert db.upsert_repo_token("cann", "hccl", "tok-secret-2") == entry_id
-        assert db.get_repo_token("cann", "hccl") == "tok-secret-2"
-        assert len(db.list_repo_tokens()) == 1
-        # 删除
-        assert db.delete_repo_token(entry_id) is True
-        assert db.delete_repo_token(999) is False
-        assert db.list_repo_tokens() == []
+        # 幂等：再次重开不再迁移
+        d = db_mod.init_db(path)
+        try:
+            assert len(d.list_repo_configs()) == 3
+        finally:
+            d.close()
 
 
 class TestPathTokenRules:

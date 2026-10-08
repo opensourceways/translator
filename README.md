@@ -202,12 +202,12 @@ curl -X POST http://localhost:8000/api/config/shadow \
 
 - 浏览器打开 `http://localhost:8000/`：汇总页；`/runs`、`/runs/{id}`、
   `/prs` 为运行记录与 PR 状态页（`/prs` 按 社区 → 仓库 两级 tab 浏览）
-- `/settings`：自动提 PR 开关页。只有在此**添加并启用**的
-  社区/仓库/分支（分支留空=该仓全部分支）才会在 active 模式下真正创建
-  PR，未列出的仓库一律跳过（默认拒绝）；社区/仓库名大小写不敏感
-  （统一按小写存储）。同页还可自助配置：
-  - **仓库专属 Token**（提交与轮询时优先于 Token 规则和默认
-    GITCODE_TOKEN；保存在 SQLite，只显示掩码不回显明文）
+- `/settings`：设置页，全部运行期配置都可在此自助修改：
+  - **仓库配置**：一个条目配齐一个仓库的启用开关与可选专属 Token。
+    只有**添加并启用**的仓库才会在 active 模式下真正创建 PR，未列出
+    的一律跳过（默认拒绝）；粒度到仓库（该仓所有分支统一受控）；
+    社区/仓库名大小写不敏感（统一按小写存储）。Token 保存在 SQLite，
+    只显示掩码不回显明文，优先级高于 Token 规则和默认 GITCODE_TOKEN
   - **Token 规则**（目录关键字 → Token，匹配大小写不敏感、按添加顺序
     取第一个命中；表非空即覆盖来源仓 token_rules.json，为空回退读文件）
   - **拉黑名单 / 开放白名单**（目录路径列表；某类非空即覆盖来源仓
@@ -216,9 +216,8 @@ curl -X POST http://localhost:8000/api/config/shadow \
   `TC_ADMIN_TOKEN` 未配置时修改操作无需鉴权（内部工具，默认内网部署），
   配置后需在页面顶部输入 token（仅存浏览器 localStorage）
 - 只读 JSON：`/api/summary`、`/api/runs`、`/api/runs/{id}`、
-  `/api/runs/{id}/log`、`/api/prs`、`/api/settings/auto-pr`、
-  `/api/settings/tokens`、`/api/settings/token-rules`、
-  `/api/settings/path-lists`
+  `/api/runs/{id}/log`、`/api/prs`、`/api/settings/repos`、
+  `/api/settings/token-rules`、`/api/settings/path-lists`
 - 配置 `TC_DASH_TOKEN` 后页面与只读 API 都需鉴权；留空则放开（默认
   部署在内网/反代后）
 - 手动触发（Build Now 替代）：

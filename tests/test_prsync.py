@@ -119,7 +119,7 @@ class TestTokenRouting:
         monkeypatch.setattr(
             prsync.rules_cache, "get_rules",
             lambda: [{"keyword": "Ascend", "token": "rule-token"}])
-        db.upsert_repo_token("O1", "R1", "db-token")
+        db.upsert_repo_config("O1", "R1", token="db-token")
         _seed_pr(db, org="o1", repo="r1", number=1, path="Ascend/a")
         _seed_pr(db, org="o2", repo="r2", number=2, path="Ascend/b")
         get = _mock_get(monkeypatch, payload={"state": "open"})

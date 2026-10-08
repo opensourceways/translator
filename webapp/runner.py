@@ -8,8 +8,8 @@
   ``git clone --depth=1 --no-checkout``），加载规则/名单（设置页
   DB 配置优先，非空即覆盖来源仓同名 JSON 文件，为空回退文件），
   scan_changed 走本地化模式（支持增量 diff），影子模式只落
-  would_submit 不提交，active 模式先过 auto_pr 开关门控（设置页维护，
-  默认拒绝），再逐仓 resolve_token + submit_repo
+  would_submit 不提交，active 模式先过仓库配置门控（设置页维护，按
+  仓库粒度，默认拒绝），再逐仓 resolve_token + submit_repo
   （复制 submit_all 的路由逻辑，换取 head_branch/noop/pr_existed 粒度）
 - 日志缓冲落库（50 行/2 秒批量 append_log）+ 全链路 token 脱敏：
   localgit.clone 失败会把含 token 的 URL 包进 GitCodeError（Jenkins
@@ -157,7 +157,7 @@ def execute_run(trigger, settings, db):
         rules_cache.set_rules(token_rules)
         masker.add_secrets(r.get("token") for r in token_rules)
         # 设置页配置的仓库专属 token 也纳入脱敏集合
-        masker.add_secrets(t.get("token") for t in db.list_repo_tokens())
+        masker.add_secrets(t.get("token") for t in db.list_repo_configs())
         blacklist = db.list_path_list("blacklist")
         if blacklist:
             log(f"使用设置页拉黑名单 {len(blacklist)} 条"
@@ -219,7 +219,7 @@ def execute_run(trigger, settings, db):
 
 def _submit_all(run_id, changed, token_rules, default_token, log, masker,
                 db):
-    """active 模式逐仓提交：auto_pr 开关门控 + resolve_token 路由 + submit_repo，结果落库。
+    """active 模式逐仓提交：仓库配置门控 + resolve_token 路由 + submit_repo，结果落库。
 
     未在设置页启用（无条目或已禁用）的仓库直接记 noop
     （stage='auto_pr_off'）跳过，默认拒绝。复制引擎 submit_all 的路由逻辑（配置了有效规则时只提交命中规则的
@@ -238,7 +238,7 @@ def _submit_all(run_id, changed, token_rules, default_token, log, masker,
         if not db.is_auto_pr_enabled(item["org"], item["repo"],
                                      item["branch"]):
             # 设置页未添加条目或已禁用：默认拒绝，记 noop 不提交
-            log("  自动提 PR 开关未启用（设置页无此条目或已禁用），跳过")
+            log("  仓库配置未启用（设置页无此条目或已禁用），跳过")
             result = {"ok": True, "noop": True, "stage": "auto_pr_off"}
         else:
             item_token, rule_keyword = rules_cache.resolve_repo_token(

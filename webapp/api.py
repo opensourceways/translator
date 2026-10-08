@@ -8,8 +8,8 @@
   （重启后也准确），不依赖 Worker 内存状态
 - Dashboard 页面与 /api/* 只读 JSON：TC_DASH_TOKEN 未配置时放开，配置后
   要求 X-Dash-Token 头或 ?token= query
-- POST /api/runs、/api/config/shadow、/api/settings/*（auto-pr 开关、
-  仓库专属 token、token 规则、黑/白名单）：
+- POST /api/runs、/api/config/shadow、/api/settings/*（仓库配置、
+  token 规则、黑/白名单）：
   X-Admin-Token 管理端点；admin_token 未配置时放开（内部工具，默认
   内网部署），配置后校验
 
@@ -105,6 +105,13 @@ def _localtime(value):
     except ValueError:
         return value
     return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _mask_token(value):
+    """token 展示掩码：空串原样返回（未配置），其余回 前 4 位 + ***。"""
+    if not value:
+        return ""
+    return (value[:4] + "***") if len(value) > 4 else "***"
 
 
 def _recover_missed_pushes(settings, db, queue):
@@ -348,42 +355,50 @@ def create_app(settings=None):
             return {"orgs": _group_prs(prs, db.latest_repo_statuses())}
         return {"prs": prs}
 
-    # ── 自动提 PR 开关（设置页） ─────────────────────────────
+    # ── 仓库配置（设置页）：一个条目配齐一个仓库的开关与专属 Token ──
 
     @app.get("/settings", response_class=HTMLResponse, dependencies=dash)
     async def page_settings(request: Request):
         db = request.app.state.db
-        known = {(r["org"].lower(), r["repo"].lower(), r["branch"])
-                 for r in db.list_auto_pr_entries()}
-        suggestions = [
-            r for r in db.distinct_repos()
-            if (r["org"].lower(), r["repo"].lower(), r["branch"] or "")
-            not in known]
-        tokens = db.list_repo_tokens()
-        for t in tokens:
-            v = t.pop("token")
-            t["token_masked"] = (v[:4] + "***") if len(v) > 4 else "***"
+        entries = db.list_repo_configs()
+        for e in entries:
+            e["token_masked"] = _mask_token(e.pop("token"))
+        known = {(e["org"], e["repo"]) for e in entries}
+        suggestions = []
+        seen = set()
+        for r in db.distinct_repos():
+            key = (r["org"].lower(), r["repo"].lower())
+            if key not in known and key not in seen:
+                seen.add(key)
+                suggestions.append(r)
         token_rules = db.list_path_token_rules()
         for r in token_rules:
-            v = r.pop("token")
-            r["token_masked"] = (v[:4] + "***") if len(v) > 4 else "***"
+            r["token_masked"] = _mask_token(r.pop("token"))
         return templates.TemplateResponse(
             request, "settings.html",
-            _ctx(request, entries=db.list_auto_pr_entries(),
-                 suggestions=suggestions, tokens=tokens,
+            _ctx(request, entries=entries,
+                 suggestions=suggestions,
                  token_rules=token_rules,
                  blacklist=db.list_path_list_entries("blacklist"),
                  whitelist=db.list_path_list_entries("whitelist"),
                  admin_auth=bool(settings.admin_token)))
 
-    @app.get("/api/settings/auto-pr", dependencies=dash)
-    async def api_list_auto_pr(request: Request):
-        return {"entries": request.app.state.db.list_auto_pr_entries()}
+    @app.get("/api/settings/repos", dependencies=dash)
+    async def api_list_repo_configs(request: Request):
+        """仓库配置列表；token 值只回掩码（前 4 位 + ***），不出库。"""
+        entries = request.app.state.db.list_repo_configs()
+        for e in entries:
+            e["token_masked"] = _mask_token(e.pop("token"))
+        return {"entries": entries}
 
-    @app.post("/api/settings/auto-pr",
+    @app.post("/api/settings/repos",
               dependencies=[Depends(require_admin)])
-    async def api_add_auto_pr(request: Request):
-        """新增/更新条目：{org, repo, branch?, enabled?}；branch 空=全分支通配。"""
+    async def api_upsert_repo_config(request: Request):
+        """新增/更新仓库配置：{org, repo, enabled?, token?}。
+
+        enabled/token 缺省表示保持不变（新条目默认 enabled=True、无
+        专属 token）；token 传空串表示清空专属 token。
+        """
         try:
             body = await request.json()
         except Exception:
@@ -392,22 +407,25 @@ def create_app(settings=None):
             body = {}
         org = str(body.get("org") or "").strip()
         repo = str(body.get("repo") or "").strip()
-        branch = str(body.get("branch") or "").strip()
         if not org or not repo:
             raise HTTPException(422, "body 需要非空字段 org 与 repo")
-        enabled = body.get("enabled", True)
+        enabled = body.get("enabled")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise HTTPException(422, "enabled 必须是布尔值")
+        token = body.get("token")
+        if token is not None:
+            token = str(token).strip()
         db = request.app.state.db
-        entry_id = db.upsert_auto_pr_entry(
-            org, repo, branch, enabled=bool(enabled))
-        org, repo = org.lower(), repo.lower()  # 与库内规范化口径一致
-        log.info("自动提 PR 条目 upsert：%s/%s@%s enabled=%s",
-                 org, repo, branch or "*", bool(enabled))
-        return {"id": entry_id, "org": org, "repo": repo, "branch": branch,
-                "enabled": bool(enabled)}
+        entry_id = db.upsert_repo_config(org, repo, enabled=enabled,
+                                         token=token)
+        log.info("仓库配置 upsert：%s/%s enabled=%s token=%s",
+                 org.lower(), repo.lower(), enabled,
+                 "更新" if token else ("清空" if token == "" else "不变"))
+        return {"id": entry_id, "org": org.lower(), "repo": repo.lower()}
 
-    @app.post("/api/settings/auto-pr/{entry_id}",
+    @app.post("/api/settings/repos/{entry_id}",
               dependencies=[Depends(require_admin)])
-    async def api_toggle_auto_pr(request: Request, entry_id: int):
+    async def api_toggle_repo_config(request: Request, entry_id: int):
         """切换条目开关：{enabled: bool}。"""
         try:
             body = await request.json()
@@ -417,73 +435,32 @@ def create_app(settings=None):
         if not isinstance(enabled, bool):
             raise HTTPException(422, "body 需要布尔字段 enabled")
         db = request.app.state.db
-        if not db.set_auto_pr_enabled(entry_id, enabled):
+        if not db.set_repo_config_enabled(entry_id, enabled):
             raise HTTPException(404, "条目不存在")
-        log.info("自动提 PR 条目 #%d 切换为 %s",
+        log.info("仓库配置 #%d 切换为 %s",
                  entry_id, "启用" if enabled else "禁用")
         return {"id": entry_id, "enabled": enabled}
 
-    @app.delete("/api/settings/auto-pr/{entry_id}",
+    @app.delete("/api/settings/repos/{entry_id}",
                 dependencies=[Depends(require_admin)])
-    async def api_delete_auto_pr(request: Request, entry_id: int):
+    async def api_delete_repo_config(request: Request, entry_id: int):
         db = request.app.state.db
-        if not db.delete_auto_pr_entry(entry_id):
+        if not db.delete_repo_config(entry_id):
             raise HTTPException(404, "条目不存在")
-        log.info("自动提 PR 条目 #%d 已删除", entry_id)
-        return {"id": entry_id, "deleted": True}
-
-    # ── 仓库专属 Token（设置页） ─────────────────────────────
-
-    @app.get("/api/settings/tokens", dependencies=dash)
-    async def api_list_tokens(request: Request):
-        """仓库专属 token 列表；token 值只回掩码（前 4 位 + ***），不出库。"""
-        entries = request.app.state.db.list_repo_tokens()
-        for e in entries:
-            t = e.pop("token")
-            e["token_masked"] = (t[:4] + "***") if len(t) > 4 else "***"
-        return {"entries": entries}
-
-    @app.post("/api/settings/tokens",
-              dependencies=[Depends(require_admin)])
-    async def api_add_token(request: Request):
-        """新增/更新仓库专属 token：{org, repo, token}，三者必填。"""
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        if not isinstance(body, dict):
-            body = {}
-        org = str(body.get("org") or "").strip()
-        repo = str(body.get("repo") or "").strip()
-        token = str(body.get("token") or "").strip()
-        if not org or not repo or not token:
-            raise HTTPException(422, "body 需要非空字段 org、repo 与 token")
-        db = request.app.state.db
-        entry_id = db.upsert_repo_token(org, repo, token)
-        log.info("仓库专属 Token upsert：%s/%s（值不落日志）",
-                 org.lower(), repo.lower())
-        return {"id": entry_id, "org": org.lower(), "repo": repo.lower()}
-
-    @app.delete("/api/settings/tokens/{entry_id}",
-                dependencies=[Depends(require_admin)])
-    async def api_delete_token(request: Request, entry_id: int):
-        db = request.app.state.db
-        if not db.delete_repo_token(entry_id):
-            raise HTTPException(404, "条目不存在")
-        log.info("仓库专属 Token 条目 #%d 已删除", entry_id)
+        log.info("仓库配置条目 #%d 已删除", entry_id)
         return {"id": entry_id, "deleted": True}
 
     # ── Token 规则与黑/白名单（设置页自助配置） ───────────────
     # DB 非空即覆盖来源仓 token_rules.json / blacklist.json /
     # whitelist.json；DB 为空时回退读文件（runner/prsync 生效语义）
 
+
     @app.get("/api/settings/token-rules", dependencies=dash)
     async def api_list_token_rules(request: Request):
         """Token 规则列表；token 值只回掩码（前 4 位 + ***），不出库。"""
         entries = request.app.state.db.list_path_token_rules()
         for e in entries:
-            t = e.pop("token")
-            e["token_masked"] = (t[:4] + "***") if len(t) > 4 else "***"
+            e["token_masked"] = _mask_token(e.pop("token"))
         return {"entries": entries}
 
     @app.post("/api/settings/token-rules",

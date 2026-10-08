@@ -9,9 +9,9 @@
 - prs.mergeable 三态：None 存 NULL（服务端尚未计算）
 - prs.labels_json/draft/review_total/review_accepted 为原始信号，
   派生状态（CI 未通过/待评审等）由 webapp.prstatus 在展示层计算
-- 任何 token 值不进日志/其他表：例外是 repo_tokens 与
+- 任何 token 值不进日志/其他表：例外是 repo_configs 与
   path_token_rules 两张表（设置页自助配置的 token，按用户明确要求
-  落库，见 list/get/upsert_repo_token 与 list/upsert_path_token_rule）；
+  落库，见 list/upsert_repo_config 与 list/upsert_path_token_rule）；
   两表之外本模块接口不接收 token 参数
 """
 
@@ -108,21 +108,12 @@ CREATE TABLE IF NOT EXISTS prs (
     created_at  TEXT,
     UNIQUE(org, repo, number)
 );
-CREATE TABLE IF NOT EXISTS auto_pr (
+CREATE TABLE IF NOT EXISTS repo_configs (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     org        TEXT NOT NULL,
     repo       TEXT NOT NULL,
-    branch     TEXT NOT NULL DEFAULT '',
     enabled    INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT,
-    updated_at TEXT,
-    UNIQUE(org, repo, branch)
-);
-CREATE TABLE IF NOT EXISTS repo_tokens (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    org        TEXT NOT NULL,
-    repo       TEXT NOT NULL,
-    token      TEXT NOT NULL,
+    token      TEXT NOT NULL DEFAULT '',
     created_at TEXT,
     updated_at TEXT,
     UNIQUE(org, repo)
@@ -615,115 +606,87 @@ class Database:
             "last_run": last,
         }
 
-    # ── 自动提 PR 开关（auto_pr 表，设置页维护） ──────────────
+    # ── 仓库配置（repo_configs 表，设置页维护） ──────────────
+    # 一个条目配齐一个仓库：启用开关（active 模式是否自动提 PR）+
+    # 可选专属 Token。粒度到仓库：该仓所有分支统一受控。
 
-    def list_auto_pr_entries(self):
-        """全部自动提 PR 条目，按 (org, repo, branch) 排序。"""
+    def list_repo_configs(self):
+        """全部仓库配置条目，按 (org, repo) 排序（含明文 token，展示层
+        负责脱敏）。"""
         with self._lock:
             return self._all(
-                "SELECT * FROM auto_pr ORDER BY org, repo, branch")
+                "SELECT * FROM repo_configs ORDER BY org, repo")
 
-    def upsert_auto_pr_entry(self, org, repo, branch="", enabled=True):
-        """新增或更新条目（org/repo/branch 三元组唯一）；返回条目 id。
+    def upsert_repo_config(self, org, repo, enabled=None, token=None):
+        """新增或更新仓库配置条目（org/repo 小写规范化）；返回条目 id。
 
-        org/repo 统一规范化为小写（GitCode 组织/仓库名大小写不敏感，
-        避免 CANN/cann 产生重复条目）；branch 保持原样（git 分支名大小
-        写敏感），空串表示该仓库所有分支的通配条目。
+        enabled / token 传 None 表示该字段保持不变（新条目分别默认
+        True 与空串）；token 传空串表示清空专属 token（回退规则路由）。
         """
-        org, repo, branch = org.strip().lower(), repo.strip().lower(), \
-            (branch or "").strip()
+        org, repo = org.strip().lower(), repo.strip().lower()
+        enabled_val = None if enabled is None else (1 if enabled else 0)
+        token_val = None if token is None else token.strip()
         now = _utcnow()
         with self._lock:
-            self._conn.execute(
-                "INSERT INTO auto_pr (org, repo, branch, enabled,"
-                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(org, repo, branch) DO UPDATE SET"
-                " enabled = excluded.enabled, updated_at = excluded.updated_at",
-                (org, repo, branch, 1 if enabled else 0, now, now))
-            self._conn.commit()
-            # 不依赖 cur.lastrowid：ON CONFLICT 走 UPDATE 分支时它是陈旧值
             row = self._one(
-                "SELECT id FROM auto_pr WHERE org = ? AND repo = ?"
-                " AND branch = ?", (org, repo, branch))
+                "SELECT id FROM repo_configs WHERE org = ? AND repo = ?",
+                (org, repo))
+            if row is None:
+                cur = self._conn.execute(
+                    "INSERT INTO repo_configs (org, repo, enabled, token,"
+                    " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (org, repo,
+                     1 if enabled_val is None else enabled_val,
+                     token_val or "", now, now))
+                self._conn.commit()
+                return cur.lastrowid
+            self._conn.execute(
+                "UPDATE repo_configs SET"
+                " enabled = COALESCE(?, enabled),"
+                " token = COALESCE(?, token), updated_at = ?"
+                " WHERE id = ?",
+                (enabled_val, token_val, now, row["id"]))
+            self._conn.commit()
             return row["id"]
 
-    def set_auto_pr_enabled(self, entry_id, enabled):
+    def set_repo_config_enabled(self, entry_id, enabled):
         """按 id 切换条目开关；条目不存在返回 False。"""
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE auto_pr SET enabled = ?, updated_at = ? WHERE id = ?",
+                "UPDATE repo_configs SET enabled = ?, updated_at = ?"
+                " WHERE id = ?",
                 (1 if enabled else 0, _utcnow(), entry_id))
             self._conn.commit()
             return cur.rowcount > 0
 
-    def delete_auto_pr_entry(self, entry_id):
+    def delete_repo_config(self, entry_id):
         """按 id 删除条目；不存在返回 False。"""
         with self._lock:
             cur = self._conn.execute(
-                "DELETE FROM auto_pr WHERE id = ?", (entry_id,))
+                "DELETE FROM repo_configs WHERE id = ?", (entry_id,))
             self._conn.commit()
             return cur.rowcount > 0
 
     def is_auto_pr_enabled(self, org, repo, branch=None):
-        """runner 提交前门控：精确分支条目优先，其次 branch='' 通配条目。
+        """runner 提交前门控：条目存在且启用才允许自动提 PR。
 
-        无任何匹配条目时返回 False（默认拒绝：只有显式添加并启用的
-        仓库才允许自动提 PR）。org/repo 大小写不敏感（条目已规范化为
-        小写，这里对查询值同样小写化）。
+        粒度到仓库（branch 参数保留仅为调用方兼容，不参与判定）；
+        无条目返回 False（默认拒绝）。org/repo 大小写不敏感（条目已
+        规范化为小写，这里对查询值同样小写化）。
         """
-        org, repo = (org or "").lower(), (repo or "").lower()
         with self._lock:
-            rows = self._all(
-                "SELECT branch, enabled FROM auto_pr"
-                " WHERE org = ? AND repo = ? AND (branch = ? OR branch = '')",
-                (org, repo, branch or ""))
-        exact = next((r for r in rows if r["branch"] == (branch or "")), None)
-        chosen = exact or (rows[0] if rows else None)
-        return bool(chosen and chosen["enabled"])
-
-    # ── 仓库专属 Token（repo_tokens 表，设置页维护） ──────────
-
-    def list_repo_tokens(self):
-        """全部仓库专属 token 条目，按 (org, repo) 排序（含明文 token，
-        展示层负责脱敏）。"""
-        with self._lock:
-            return self._all(
-                "SELECT * FROM repo_tokens ORDER BY org, repo")
-
-    def upsert_repo_token(self, org, repo, token):
-        """新增或更新仓库专属 token（org/repo 小写规范化）；返回条目 id。"""
-        org, repo, token = org.strip().lower(), repo.strip().lower(), \
-            (token or "").strip()
-        now = _utcnow()
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO repo_tokens (org, repo, token, created_at,"
-                " updated_at) VALUES (?, ?, ?, ?, ?)"
-                " ON CONFLICT(org, repo) DO UPDATE SET"
-                " token = excluded.token, updated_at = excluded.updated_at",
-                (org, repo, token, now, now))
-            self._conn.commit()
-            # 不依赖 cur.lastrowid：ON CONFLICT 走 UPDATE 分支时它是陈旧值
             row = self._one(
-                "SELECT id FROM repo_tokens WHERE org = ? AND repo = ?",
-                (org, repo))
-            return row["id"]
-
-    def delete_repo_token(self, entry_id):
-        """按 id 删除条目；不存在返回 False。"""
-        with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM repo_tokens WHERE id = ?", (entry_id,))
-            self._conn.commit()
-            return cur.rowcount > 0
+                "SELECT enabled FROM repo_configs WHERE org = ? AND repo = ?",
+                ((org or "").lower(), (repo or "").lower()))
+        return bool(row and row["enabled"])
 
     def get_repo_token(self, org, repo):
-        """仓库专属 token（大小写不敏感）；无条目返回 None。"""
+        """仓库专属 token（大小写不敏感）；无条目或未配置返回 None。"""
         with self._lock:
             row = self._one(
-                "SELECT token FROM repo_tokens WHERE org = ? AND repo = ?",
+                "SELECT token FROM repo_configs WHERE org = ? AND repo = ?",
                 ((org or "").lower(), (repo or "").lower()))
-        return row["token"] if row else None
+        return row["token"] or None if row else None
 
     # ── Token 规则与黑/白名单（path_token_rules / path_lists，设置页
     #    自助配置；非空即覆盖来源仓里的同名 JSON 文件，为空回退文件） ──
@@ -866,7 +829,8 @@ def init_db(path):
 
 
 def _migrate(db):
-    """轻量迁移：旧库 prs 表缺的新列用 ALTER TABLE 补齐（已有数据不丢）。
+    """轻量迁移：旧库 prs 表缺的新列用 ALTER TABLE 补齐（已有数据不丢）；
+    auto_pr/repo_tokens 两张旧表折叠进 repo_configs 后删表（幂等）。
 
     新库的建表语句已含全部列，此处对每列做存在性检查，幂等。
     """
@@ -874,25 +838,35 @@ def _migrate(db):
     for name, ddl in _PRS_EXTRA_COLUMNS.items():
         if name not in cols:
             db._conn.execute(f"ALTER TABLE prs ADD COLUMN {name} {ddl}")
-    # auto_pr 大小写规范化：org/repo 统一小写，折叠仅大小写不同的重复
-    # 条目（保留 id 最小者，沿用其 enabled）
-    rows = db._all("SELECT id, org, repo, branch FROM auto_pr")
-    seen = {}
-    dupes = []
-    for r in rows:
-        key = (r["org"].lower(), r["repo"].lower(), r["branch"])
-        if key in seen:
-            dupes.append(r["id"])
-        else:
-            seen[key] = r
-    # 先删重复行（释放小写值的唯一约束），再把保留行规范化为小写
-    for entry_id in dupes:
-        db._conn.execute("DELETE FROM auto_pr WHERE id = ?", (entry_id,))
-    for key, r in seen.items():
-        if r["org"] != key[0] or r["repo"] != key[1]:
+    tables = {r["name"] for r in db._all(
+        "SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "auto_pr" in tables:
+        # auto_pr（org,repo,branch 粒度）折叠为仓库粒度：同仓任一分支
+        # 条目启用则仓库启用；org/repo 顺带小写规范化
+        now = _utcnow()
+        for r in db._all("SELECT org, repo, MAX(enabled) AS enabled"
+                         " FROM auto_pr GROUP BY LOWER(org), LOWER(repo)"):
             db._conn.execute(
-                "UPDATE auto_pr SET org = ?, repo = ? WHERE id = ?",
-                (key[0], key[1], r["id"]))
+                "INSERT INTO repo_configs (org, repo, enabled, token,"
+                " created_at, updated_at) VALUES (?, ?, ?, '', ?, ?)"
+                " ON CONFLICT(org, repo) DO UPDATE SET"
+                " enabled = MAX(repo_configs.enabled, excluded.enabled)",
+                (r["org"].lower(), r["repo"].lower(), r["enabled"],
+                 now, now))
+        db._conn.execute("DROP TABLE auto_pr")
+    if "repo_tokens" in tables:
+        # repo_tokens 的 token 并入 repo_configs（已有条目补 token，没有则新建）
+        now = _utcnow()
+        for r in db._all("SELECT org, repo, token FROM repo_tokens"):
+            db._conn.execute(
+                "INSERT INTO repo_configs (org, repo, enabled, token,"
+                " created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?)"
+                " ON CONFLICT(org, repo) DO UPDATE SET"
+                " token = CASE WHEN repo_configs.token = ''"
+                " THEN excluded.token ELSE repo_configs.token END",
+                (r["org"].lower(), r["repo"].lower(), r["token"],
+                 now, now))
+        db._conn.execute("DROP TABLE repo_tokens")
 
 
 # ── shadow 开关（真值存 config 表，env 只作初始值种子） ────────

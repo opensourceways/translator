@@ -492,14 +492,18 @@ class TestPages:
 # ── 设置页与自动提 PR 开关端点 ────────────────────────────────
 
 
-class TestAutoPrSettings:
+class TestRepoSettings:
+    """仓库配置端点：一个条目配齐开关与专属 Token；token 明文永不出库。"""
+
+    SECRET = "tok-plaintext-secret"
+
     def test_settings_page_lists_entries(self, tmp_path, monkeypatch):
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
-            app.state.db.upsert_auto_pr_entry("cann", "hccl", "master")
+            app.state.db.upsert_repo_config("cann", "hccl")
             r = client.get("/settings")
             assert r.status_code == 200
-            assert "自动提 PR 开关" in r.text
+            assert "仓库配置" in r.text
             assert "cann" in r.text and "hccl" in r.text
             assert 'href="/settings"' in client.get("/").text  # 导航入口
 
@@ -513,7 +517,7 @@ class TestAutoPrSettings:
             assert r.status_code == 200
             assert 'data-org="o1"' in r.text and 'data-repo="r1"' in r.text
             # 添加条目后不再出现在建议中
-            app.state.db.upsert_auto_pr_entry("o1", "r1", "master")
+            app.state.db.upsert_repo_config("o1", "r1")
             assert 'class="btn small sugg"' not in client.get("/settings").text
 
     def test_mutations_open_when_admin_token_unset(
@@ -521,130 +525,94 @@ class TestAutoPrSettings:
         """admin_token 未配置：修改端点放开（内网部署模式）。"""
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
-            r = client.post("/api/settings/auto-pr",
+            r = client.post("/api/settings/repos",
                             json={"org": "o", "repo": "r"})
             assert r.status_code == 200
             entry_id = r.json()["id"]
-            assert client.post(f"/api/settings/auto-pr/{entry_id}",
+            assert client.post(f"/api/settings/repos/{entry_id}",
                                json={"enabled": False}).status_code == 200
             assert client.delete(
-                f"/api/settings/auto-pr/{entry_id}").status_code == 200
+                f"/api/settings/repos/{entry_id}").status_code == 200
             # 只读列表走 dash 鉴权（未配置时放开）
-            assert client.get("/api/settings/auto-pr").status_code == 200
+            assert client.get("/api/settings/repos").status_code == 200
 
     def test_mutations_403_with_wrong_admin_token(
             self, tmp_path, monkeypatch):
         """admin_token 配置后：错误 token 一律 403。"""
         settings = _make_settings(tmp_path, admin_token="adm")
         with _client(settings, monkeypatch) as (client, app, _, _):
-            assert client.post("/api/settings/auto-pr",
-                               json={"org": "o", "repo": "r"}).status_code == 403
-            assert client.post("/api/settings/auto-pr/1",
+            assert client.post("/api/settings/repos",
+                               json={"org": "o", "repo": "r"}
+                               ).status_code == 403
+            assert client.post("/api/settings/repos/1",
                                json={"enabled": True}).status_code == 403
-            assert client.delete("/api/settings/auto-pr/1").status_code == 403
+            assert client.delete("/api/settings/repos/1").status_code == 403
 
     def test_add_toggle_delete_flow(self, tmp_path, monkeypatch):
         settings = _make_settings(tmp_path, admin_token="adm")
         headers = {"X-Admin-Token": "adm"}
         with _client(settings, monkeypatch) as (client, app, _, _):
-            r = client.post("/api/settings/auto-pr",
-                            json={"org": "cann", "repo": "hccl"},
+            r = client.post("/api/settings/repos",
+                            json={"org": "CANN", "repo": "HCCL",
+                                  "token": self.SECRET},
                             headers=headers)
             assert r.status_code == 200
             entry = r.json()
-            assert entry["branch"] == "" and entry["enabled"] is True
+            assert entry["org"] == "cann" and entry["repo"] == "hccl"
             db = app.state.db
-            assert db.is_auto_pr_enabled("cann", "hccl", "master") is True
-            # 列表端点可见
-            entries = client.get("/api/settings/auto-pr").json()["entries"]
-            assert len(entries) == 1 and entries[0]["id"] == entry["id"]
-            # 切换开关
-            r = client.post(f"/api/settings/auto-pr/{entry['id']}",
-                            json={"enabled": False}, headers=headers)
-            assert r.json()["enabled"] is False
-            assert db.is_auto_pr_enabled("cann", "hccl", "master") is False
-            # 删除
-            r = client.delete(f"/api/settings/auto-pr/{entry['id']}",
-                              headers=headers)
-            assert r.json()["deleted"] is True
-            assert db.list_auto_pr_entries() == []
-
-    def test_add_validation_422(self, tmp_path, monkeypatch):
-        settings = _make_settings(tmp_path, admin_token="adm")
-        headers = {"X-Admin-Token": "adm"}
-        with _client(settings, monkeypatch) as (client, app, _, _):
-            assert client.post("/api/settings/auto-pr", json={"org": "o"},
-                               headers=headers).status_code == 422
-            assert client.post("/api/settings/auto-pr", json={},
-                               headers=headers).status_code == 422
-
-    def test_toggle_404_and_422(self, tmp_path, monkeypatch):
-        settings = _make_settings(tmp_path, admin_token="adm")
-        headers = {"X-Admin-Token": "adm"}
-        with _client(settings, monkeypatch) as (client, app, _, _):
-            assert client.post("/api/settings/auto-pr/999",
-                               json={"enabled": True},
-                               headers=headers).status_code == 404
-            assert client.post("/api/settings/auto-pr/1", json={},
-                               headers=headers).status_code == 422
-            assert client.delete("/api/settings/auto-pr/999",
-                                 headers=headers).status_code == 404
-
-
-class TestTokenSettings:
-    """仓库专属 token 端点：明文永不出库（列表与页面均为掩码）。"""
-
-    SECRET = "tok-plaintext-secret"
-
-    def test_add_list_masked_delete_flow(self, tmp_path, monkeypatch):
-        settings = _make_settings(tmp_path)
-        with _client(settings, monkeypatch) as (client, app, _, _):
-            r = client.post("/api/settings/tokens",
-                            json={"org": "CANN", "repo": "HCCL",
-                                  "token": self.SECRET})
-            assert r.status_code == 200
-            assert r.json()["org"] == "cann"  # 小写规范化
-            entry_id = r.json()["id"]
-            assert app.state.db.get_repo_token("CANN", "hccl") == self.SECRET
+            assert db.is_auto_pr_enabled("cann", "hccl") is True
+            assert db.get_repo_token("cann", "hccl") == self.SECRET
             # 列表只回掩码，明文不出现在响应里
-            body = client.get("/api/settings/tokens")
+            body = client.get("/api/settings/repos")
             assert self.SECRET not in body.text
             entries = body.json()["entries"]
             assert entries[0]["token_masked"] == "tok-***"
             assert "token" not in entries[0]
             # 设置页同样只渲染掩码
             page = client.get("/settings")
-            assert "仓库专属 Token" in page.text
             assert self.SECRET not in page.text
             assert "tok-***" in page.text
+            # 不带 token 的 upsert 保留已有 token
+            r = client.post("/api/settings/repos",
+                            json={"org": "cann", "repo": "hccl"},
+                            headers=headers)
+            assert r.json()["id"] == entry["id"]
+            assert db.get_repo_token("cann", "hccl") == self.SECRET
+            # 切换开关
+            r = client.post(f"/api/settings/repos/{entry['id']}",
+                            json={"enabled": False}, headers=headers)
+            assert r.json()["enabled"] is False
+            assert db.is_auto_pr_enabled("cann", "hccl") is False
             # 删除
-            r = client.delete(f"/api/settings/tokens/{entry_id}")
+            r = client.delete(f"/api/settings/repos/{entry['id']}",
+                              headers=headers)
             assert r.json()["deleted"] is True
-            assert app.state.db.get_repo_token("cann", "hccl") is None
+            assert db.list_repo_configs() == []
 
     def test_add_validation_422(self, tmp_path, monkeypatch):
-        settings = _make_settings(tmp_path)
-        with _client(settings, monkeypatch) as (client, app, _, _):
-            assert client.post("/api/settings/tokens",
-                               json={"org": "o", "repo": "r"}).status_code == 422
-            assert client.post("/api/settings/tokens",
-                               json={"org": "o", "repo": "r",
-                                     "token": "  "}).status_code == 422
-
-    def test_403_with_wrong_admin_token(self, tmp_path, monkeypatch):
         settings = _make_settings(tmp_path, admin_token="adm")
+        headers = {"X-Admin-Token": "adm"}
         with _client(settings, monkeypatch) as (client, app, _, _):
-            assert client.post("/api/settings/tokens",
+            assert client.post("/api/settings/repos", json={"org": "o"},
+                               headers=headers).status_code == 422
+            assert client.post("/api/settings/repos", json={},
+                               headers=headers).status_code == 422
+            assert client.post("/api/settings/repos",
                                json={"org": "o", "repo": "r",
-                                     "token": "t"}).status_code == 403
-            assert client.delete("/api/settings/tokens/1").status_code == 403
-            # 只读列表仍放开（dash token 未配置）
-            assert client.get("/api/settings/tokens").status_code == 200
+                                     "enabled": "yes"},
+                               headers=headers).status_code == 422
 
-    def test_delete_404(self, tmp_path, monkeypatch):
-        settings = _make_settings(tmp_path)
+    def test_toggle_404_and_422(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path, admin_token="adm")
+        headers = {"X-Admin-Token": "adm"}
         with _client(settings, monkeypatch) as (client, app, _, _):
-            assert client.delete("/api/settings/tokens/999").status_code == 404
+            assert client.post("/api/settings/repos/999",
+                               json={"enabled": True},
+                               headers=headers).status_code == 404
+            assert client.post("/api/settings/repos/1", json={},
+                               headers=headers).status_code == 422
+            assert client.delete("/api/settings/repos/999",
+                                 headers=headers).status_code == 404
 
 
 # ── 启动恢复与停机补偿 ────────────────────────────────────────
