@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from translator_ci import client
+from docsync import client
 from webapp import runner
 from webapp.config import Settings
 from webapp.db import init_db, set_shadow
@@ -26,7 +26,7 @@ RULE_TOKEN = "rule-secret-token"
 
 @pytest.fixture
 def settings(tmp_path):
-    """tmp_path 数据目录 + 三个已配置的 TC_* token（脱敏断言用）。"""
+    """tmp_path 数据目录 + 三个已配置的 DS_* token（脱敏断言用）。"""
     return Settings(data_dir=str(tmp_path), admin_token="admin-secret",
                     webhook_token="webhook-secret", dash_token="dash-secret")
 
@@ -389,7 +389,7 @@ class TestIncrementalArgs:
 
 
 class TestMasking:
-    """脱敏：默认/规则/TC_* token 一律替换为 ***，落库文本无明文。"""
+    """脱敏：默认/规则/DS_* token 一律替换为 ***，落库文本无明文。"""
 
     def test_masker_replaces_all_kinds(self, settings):
         masker = SecretMasker([DEFAULT_TOKEN, settings.admin_token,

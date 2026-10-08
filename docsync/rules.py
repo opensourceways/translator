@@ -13,8 +13,8 @@ blacklist.json、whitelist.json），每次运行时读取；Token 规则文件�
 import json
 import os
 
-from translator_ci import client, localgit
-from translator_ci.common import (
+from docsync import client, localgit
+from docsync.common import (
     _source_repo, DEFAULT_RULES_PATH, DEFAULT_BLACKLIST_PATH,
     DEFAULT_WHITELIST_PATH, ConfigError,
 )

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}translator-ci{% endblock %}</title>
+<title>{% block title %}docsync{% endblock %}</title>
 <style>
 * { box-sizing: border-box; }
 body { margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f6f8; color: #24292f; }
@@ -44,7 +44,7 @@ dl.meta dd { margin: 0; }
 </head>
 <body>
 <nav>
-  <span class="brand">translator-ci</span>
+  <span class="brand">docsync</span>
   <a href="/" data-link>概览</a>
   <a href="/runs" data-link>Runs</a>
   <a href="/prs" data-link>PR</a>
@@ -55,7 +55,7 @@ dl.meta dd { margin: 0; }
 {% block content %}{% endblock %}
 </main>
 <script>
-// dash token 透传：配置 TC_DASH_TOKEN 后页面经 ?token= 访问，
+// dash token 透传：配置 DS_DASH_TOKEN 后页面经 ?token= 访问，
 // 页面内 fetch 与链接统一经 withToken 带上该参数
 const DASH_TOKEN = new URLSearchParams(location.search).get('token') || '';
 function withToken(url) {

@@ -1,7 +1,7 @@
 """命令行入口：扫描译稿变更并批量提交 PR（Jenkins 无人值守）。
 
 用法：
-    translator-ci [--keyword 关键字] [--rules-path token_rules.json]
+    docsync [--keyword 关键字] [--rules-path token_rules.json]
 
 凭据全部来自环境变量（Jenkins 凭据注入），不读任何本地配置文件：
     GITCODE_TOKEN            默认 Token（必需；读译稿权威仓库、未命中
@@ -24,7 +24,7 @@ import argparse
 import os
 import sys
 
-from translator_ci import service
+from docsync import service
 
 
 def _log(msg):
@@ -34,7 +34,7 @@ def _log(msg):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        prog="translator-ci",
+        prog="docsync",
         description="扫描译稿权威仓库的变更，向目标社区仓库批量提交 PR")
     parser.add_argument("--keyword", default="",
                         help="按译稿路径关键字过滤扫描范围（调试用，默认全部）")

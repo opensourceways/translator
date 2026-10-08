@@ -11,8 +11,8 @@ _target_rel_path:  仓库级目录下相对路径 → 目标仓库内路径（�
 import os
 import time
 
-from translator_ci import client
-from translator_ci.common import (
+from docsync import client
+from docsync.common import (
     _source_repo, SOURCE_ORG, SOURCE_REPO,
 )
 

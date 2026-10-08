@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from translator_ci import client
+from docsync import client
 from webapp import db as db_mod
 from webapp import prsync
 from webapp.config import Settings

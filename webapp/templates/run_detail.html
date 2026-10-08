@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Run #{{ run.id }} - translator-ci{% endblock %}
+{% block title %}Run #{{ run.id }} - docsync{% endblock %}
 {% block content %}
 <h1>Run #{{ run.id }} <span class="badge {{ run.status }}" id="run-status">{{ run.status }}</span>{% if run.shadow %} <span class="badge shadow">影子</span>{% endif %}</h1>
 <dl class="meta">

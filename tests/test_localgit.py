@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
-from translator_ci import localgit
-from translator_ci.client import GitCodeError
+from docsync import localgit
+from docsync.client import GitCodeError
 
 
 class TestAuthUrl:
@@ -25,7 +25,7 @@ class TestClone:
         return localgit.clone(*args, **kwargs)
 
     def test_partial_clone_command(self):
-        with patch("translator_ci.localgit.subprocess.run") as run_mock:
+        with patch("docsync.localgit.subprocess.run") as run_mock:
             self._clone("Ascend", "msprof", "26.1.0", "tok", "/tmp/d")
             cmd = run_mock.call_args.args[0]
             assert cmd[:2] == ["git", "clone"]
@@ -37,22 +37,22 @@ class TestClone:
 
     def test_full_clone_with_blobs(self):
         """blobs=True 时不加 --filter，保留全部 blob（内容本地读取）。"""
-        with patch("translator_ci.localgit.subprocess.run") as run_mock:
+        with patch("docsync.localgit.subprocess.run") as run_mock:
             self._clone("Ascend", "msprof", "26.1.0", "tok", "/tmp/d",
                         blobs=True)
             cmd = run_mock.call_args.args[0]
             assert "--filter=blob:none" not in cmd
 
     def test_empty_ref_clones_default_branch(self):
-        with patch("translator_ci.localgit.subprocess.run") as run_mock:
+        with patch("docsync.localgit.subprocess.run") as run_mock:
             self._clone("Ascend", "msprof", "", "tok", "/tmp/d")
             cmd = run_mock.call_args.args[0]
             assert "--branch" not in cmd
 
     def test_removes_existing_dir(self):
-        with patch("translator_ci.localgit.subprocess.run") as run_mock, \
-                patch("translator_ci.localgit.shutil.rmtree") as rm_mock, \
-                patch("translator_ci.localgit.os.path.isdir",
+        with patch("docsync.localgit.subprocess.run") as run_mock, \
+                patch("docsync.localgit.shutil.rmtree") as rm_mock, \
+                patch("docsync.localgit.os.path.isdir",
                       return_value=True):
             self._clone("Ascend", "msprof", "26.1.0", "tok", "/tmp/d")
             rm_mock.assert_called_once_with("/tmp/d")
@@ -60,7 +60,7 @@ class TestClone:
     def test_failure_raises_gitcode_error(self):
         err = subprocess.CalledProcessError(
             128, "git clone", stderr="fatal: Repository not found")
-        with patch("translator_ci.localgit.subprocess.run",
+        with patch("docsync.localgit.subprocess.run",
                    side_effect=err):
             with pytest.raises(GitCodeError) as exc_info:
                 self._clone("Ascend", "msprof", "26.1.0", "tok", "/tmp/d")
@@ -74,7 +74,7 @@ class TestTreeMap:
             "100644 blob 2222222222222222222222222222222222222222\tdocs/en/b.png\n"
             "040000 tree 3333333333333333333333333333333333333333\tsome/dir\n"
         )
-        with patch("translator_ci.localgit._run_git", return_value=out):
+        with patch("docsync.localgit._run_git", return_value=out):
             tree = localgit.tree_map("/repo")
             assert tree == {
                 "docs/en/a.md": "1" * 40,
@@ -82,7 +82,7 @@ class TestTreeMap:
             }
 
     def test_cat_blob_returns_bytes(self):
-        with patch("translator_ci.localgit._run_git_bytes",
+        with patch("docsync.localgit._run_git_bytes",
                    return_value=b"\x00\x01") as m:
             assert localgit.cat_blob("/repo", "abc") == b"\x00\x01"
             m.assert_called_once_with("/repo", "cat-file", "blob", "abc")
@@ -90,14 +90,14 @@ class TestTreeMap:
 
 class TestReadFile:
     def test_missing_file_maps_to_404(self):
-        with patch("translator_ci.localgit._run_git_bytes",
+        with patch("docsync.localgit._run_git_bytes",
                    side_effect=GitCodeError(200, "git show 失败")):
             with pytest.raises(GitCodeError) as exc_info:
                 localgit.read_file("/repo", "nope")
             assert exc_info.value.status_code == 404
 
     def test_returns_raw_bytes(self):
-        with patch("translator_ci.localgit._run_git_bytes",
+        with patch("docsync.localgit._run_git_bytes",
                    return_value=b'{"rules": []}'):
             assert localgit.read_file(
                 "/repo", "token_rules.json") == b'{"rules": []}'
@@ -111,7 +111,7 @@ class TestQuotePath:
     def test_run_git_bytes_disables_quotepath(self):
         completed = subprocess.CompletedProcess(args=[], returncode=0,
                                                 stdout=b"", stderr=b"")
-        with patch("translator_ci.localgit.subprocess.run",
+        with patch("docsync.localgit.subprocess.run",
                    return_value=completed) as run_mock:
             localgit._run_git_bytes("/repo", "ls-tree", "-r", "HEAD")
             cmd = run_mock.call_args.args[0]

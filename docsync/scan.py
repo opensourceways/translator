@@ -26,14 +26,14 @@ skipped，不做任何对比请求（业务侧临时不想处理的仓库用，�
 import base64
 import os
 
-from translator_ci import client, localgit
-from translator_ci.common import (
+from docsync import client, localgit
+from docsync.common import (
     _source_repo, MAX_FILE_SIZE, MAX_TOTAL_SIZE, _git_blob_sha)
-from translator_ci.index import (
+from docsync.index import (
     _list_subdirs, _collect_dirs, _to_project, _walk_files,
     _repo_dirs_from_tree, _repo_files_from_tree, _target_rel_path,
 )
-from translator_ci.rules import resolve_token, _effective_rules
+from docsync.rules import resolve_token, _effective_rules
 
 
 def _fetch_repo_files(project, branch, token, log, tree=None):

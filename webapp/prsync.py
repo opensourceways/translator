@@ -19,8 +19,8 @@ import os
 import threading
 from datetime import datetime, timezone
 
-from translator_ci import client, service
-from translator_ci.common import AUTO_BRANCH_PREFIX
+from docsync import client, service
+from docsync.common import AUTO_BRANCH_PREFIX
 
 from webapp import rules_cache
 from webapp.db import is_shadow

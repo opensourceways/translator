@@ -11,8 +11,8 @@ import pytest
 
 from webapp import config, db as db_mod
 
-TC_VARS = ["TC_DATA_DIR", "TC_PORT", "TC_POLL_INTERVAL", "TC_WEBHOOK_TOKEN",
-           "TC_ADMIN_TOKEN", "TC_DASH_TOKEN", "TC_SHADOW"]
+DS_VARS = ["DS_DATA_DIR", "DS_PORT", "DS_POLL_INTERVAL", "DS_WEBHOOK_TOKEN",
+           "DS_ADMIN_TOKEN", "DS_DASH_TOKEN", "DS_SHADOW"]
 
 
 @pytest.fixture()
@@ -24,7 +24,7 @@ def db(tmp_path):
 
 
 def _clear_tc_env(monkeypatch):
-    for name in TC_VARS:
+    for name in DS_VARS:
         monkeypatch.delenv(name, raising=False)
 
 
@@ -45,13 +45,13 @@ class TestSettings:
 
     def test_from_env_values(self, monkeypatch):
         _clear_tc_env(monkeypatch)
-        monkeypatch.setenv("TC_DATA_DIR", "/srv/tc")
-        monkeypatch.setenv("TC_PORT", "9000")
-        monkeypatch.setenv("TC_POLL_INTERVAL", "60")
-        monkeypatch.setenv("TC_WEBHOOK_TOKEN", "wh")
-        monkeypatch.setenv("TC_ADMIN_TOKEN", "adm")
-        monkeypatch.setenv("TC_DASH_TOKEN", "dash")
-        monkeypatch.setenv("TC_SHADOW", "false")
+        monkeypatch.setenv("DS_DATA_DIR", "/srv/tc")
+        monkeypatch.setenv("DS_PORT", "9000")
+        monkeypatch.setenv("DS_POLL_INTERVAL", "60")
+        monkeypatch.setenv("DS_WEBHOOK_TOKEN", "wh")
+        monkeypatch.setenv("DS_ADMIN_TOKEN", "adm")
+        monkeypatch.setenv("DS_DASH_TOKEN", "dash")
+        monkeypatch.setenv("DS_SHADOW", "false")
         s = config.Settings.from_env()
         assert s.data_dir == "/srv/tc"
         assert s.port == 9000
@@ -68,20 +68,20 @@ class TestSettings:
     ])
     def test_shadow_parse(self, monkeypatch, raw, expected):
         _clear_tc_env(monkeypatch)
-        monkeypatch.setenv("TC_SHADOW", raw)
+        monkeypatch.setenv("DS_SHADOW", raw)
         assert config.Settings.from_env().shadow is expected
 
     def test_invalid_int_falls_back(self, monkeypatch):
         _clear_tc_env(monkeypatch)
-        monkeypatch.setenv("TC_PORT", "not-a-number")
-        monkeypatch.setenv("TC_POLL_INTERVAL", "")
+        monkeypatch.setenv("DS_PORT", "not-a-number")
+        monkeypatch.setenv("DS_POLL_INTERVAL", "")
         s = config.Settings.from_env()
         assert s.port == 8000
         assert s.poll_interval == 300
 
     def test_paths(self):
         s = config.Settings(data_dir="/x")
-        assert s.db_path == "/x/translator-ci.db"
+        assert s.db_path == "/x/docsync.db"
         assert s.work_dir == "/x/work"
 
 

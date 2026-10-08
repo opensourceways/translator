@@ -33,7 +33,7 @@ def resolve_repo_token(db, org, repo, path, token_rules, default_token):
     的关键字路由。返回值结构与 rules.resolve_token 一致：
     (token, 命中说明)。
     """
-    from translator_ci.rules import resolve_token
+    from docsync.rules import resolve_token
     token = db.get_repo_token(org, repo)
     if token:
         return token, "仓库配置的命名 Token"
