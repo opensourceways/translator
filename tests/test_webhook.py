@@ -758,6 +758,30 @@ class TestPathListSettings:
             assert client.delete("/api/settings/path-lists/999"
                                  ).status_code == 404
 
+    def test_toggle_enabled(self, tmp_path, monkeypatch):
+        """名单条目开关：POST {id} {enabled}；禁用后生效列表不含该条目。"""
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.post("/api/settings/path-lists",
+                            json={"kind": "blacklist", "path": "CANN/hccl"})
+            entry_id = r.json()["id"]
+            assert r.json()["enabled"] is True
+            r = client.post(f"/api/settings/path-lists/{entry_id}",
+                            json={"enabled": False})
+            assert r.json()["enabled"] is False
+            assert app.state.db.list_path_list("blacklist") == []
+            # 条目仍在（设置页可见），只是未生效
+            entries = client.get("/api/settings/path-lists").json()
+            assert entries["blacklist"][0]["enabled"] == 0
+            r = client.post(f"/api/settings/path-lists/{entry_id}",
+                            json={"enabled": True})
+            assert app.state.db.list_path_list("blacklist") == ["CANN/hccl"]
+            # 404 / 422
+            assert client.post("/api/settings/path-lists/999",
+                               json={"enabled": True}).status_code == 404
+            assert client.post(f"/api/settings/path-lists/{entry_id}",
+                               json={}).status_code == 422
+
     def test_403_with_wrong_admin_token(self, tmp_path, monkeypatch):
         settings = _make_settings(tmp_path, admin_token="adm")
         with _client(settings, monkeypatch) as (client, app, _, _):

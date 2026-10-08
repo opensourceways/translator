@@ -501,7 +501,7 @@ def create_app(settings=None):
     @app.post("/api/settings/path-lists",
               dependencies=[Depends(require_admin)])
     async def api_add_path_list(request: Request):
-        """新增名单条目：{kind, path}，kind ∈ blacklist/whitelist。"""
+        """新增名单条目：{kind, path, enabled?}，kind ∈ blacklist/whitelist。"""
         try:
             body = await request.json()
         except Exception:
@@ -516,9 +516,33 @@ def create_app(settings=None):
             raise HTTPException(422, "body 需要非空字段 path")
         db = request.app.state.db
         entry_id = db.add_path_list_entry(kind, path)
+        enabled = body.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise HTTPException(422, "enabled 必须是布尔值")
+        if not enabled:
+            db.set_path_list_enabled(entry_id, False)
         label = "拉黑名单" if kind == "blacklist" else "开放白名单"
         log.info("%s新增条目：%s", label, path)
-        return {"id": entry_id, "kind": kind, "path": path}
+        return {"id": entry_id, "kind": kind, "path": path,
+                "enabled": enabled}
+
+    @app.post("/api/settings/path-lists/{entry_id}",
+              dependencies=[Depends(require_admin)])
+    async def api_toggle_path_list(request: Request, entry_id: int):
+        """切换名单条目开关：{enabled: bool}。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        enabled = body.get("enabled") if isinstance(body, dict) else None
+        if not isinstance(enabled, bool):
+            raise HTTPException(422, "body 需要布尔字段 enabled")
+        db = request.app.state.db
+        if not db.set_path_list_enabled(entry_id, enabled):
+            raise HTTPException(404, "条目不存在")
+        log.info("名单条目 #%d 切换为 %s",
+                 entry_id, "启用" if enabled else "禁用")
+        return {"id": entry_id, "enabled": enabled}
 
     @app.delete("/api/settings/path-lists/{entry_id}",
                 dependencies=[Depends(require_admin)])

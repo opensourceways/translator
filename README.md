@@ -210,8 +210,9 @@ curl -X POST http://localhost:8000/api/config/shadow \
     只显示掩码不回显明文，优先级高于 Token 规则和默认 GITCODE_TOKEN
   - **Token 规则**（目录关键字 → Token，匹配大小写不敏感、按添加顺序
     取第一个命中；表非空即覆盖来源仓 token_rules.json，为空回退读文件）
-  - **拉黑名单 / 开放白名单**（目录路径列表；某类非空即覆盖来源仓
-    blacklist.json / whitelist.json，为空回退读文件）
+  - **拉黑名单 / 开放白名单**（目录路径列表，条目带启用开关可临时
+    停用；某类有启用条目即覆盖来源仓 blacklist.json / whitelist.json，
+    全部禁用或无条目回退读文件）
 
   `TC_ADMIN_TOKEN` 未配置时修改操作无需鉴权（内部工具，默认内网部署），
   配置后需在页面顶部输入 token（仅存浏览器 localStorage）

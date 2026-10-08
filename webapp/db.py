@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS path_lists (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     kind       TEXT NOT NULL,
     path       TEXT NOT NULL,
+    enabled    INTEGER NOT NULL DEFAULT 1,
     created_at TEXT,
     UNIQUE(kind, path)
 );
@@ -142,6 +143,11 @@ _PRS_EXTRA_COLUMNS = {
     "review_total": "INTEGER",
     "review_accepted": "INTEGER",
     "created_at": "TEXT",  # PR 在 GitCode 上的真实创建时间
+}
+
+# path_lists 表后加列（轻量迁移用）
+_PATH_LISTS_EXTRA_COLUMNS = {
+    "enabled": "INTEGER NOT NULL DEFAULT 1",
 }
 
 
@@ -729,15 +735,18 @@ class Database:
             return cur.rowcount > 0
 
     def list_path_list_entries(self, kind):
-        """某类名单（blacklist/whitelist）的全部条目（含 id，设置页用）。"""
+        """某类名单（blacklist/whitelist）的全部条目（含 id 与 enabled，
+        设置页用）。"""
         with self._lock:
             return self._all(
                 "SELECT * FROM path_lists WHERE kind = ? ORDER BY id",
                 (kind,))
 
     def list_path_list(self, kind):
-        """某类名单的路径列表（runner 用，与 load_blacklist 返回同构）。"""
-        return [r["path"] for r in self.list_path_list_entries(kind)]
+        """某类名单的**已启用**路径列表（runner 用，与 load_blacklist
+        返回同构）。全部禁用或无条目时返回空列表（调用方回退读文件）。"""
+        return [r["path"] for r in self.list_path_list_entries(kind)
+                if r["enabled"]]
 
     def add_path_list_entry(self, kind, path):
         """新增名单条目（kind+path 唯一，重复添加幂等返回已有 id）。
@@ -756,6 +765,15 @@ class Database:
                 "SELECT id FROM path_lists WHERE kind = ? AND path = ?",
                 (kind, path))
             return row["id"]
+
+    def set_path_list_enabled(self, entry_id, enabled):
+        """按 id 切换名单条目开关；条目不存在返回 False。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE path_lists SET enabled = ? WHERE id = ?",
+                (1 if enabled else 0, entry_id))
+            self._conn.commit()
+            return cur.rowcount > 0
 
     def delete_path_list_entry(self, entry_id):
         """按 id 删除名单条目；不存在返回 False。"""
@@ -838,6 +856,11 @@ def _migrate(db):
     for name, ddl in _PRS_EXTRA_COLUMNS.items():
         if name not in cols:
             db._conn.execute(f"ALTER TABLE prs ADD COLUMN {name} {ddl}")
+    pl_cols = {r["name"] for r in db._all("PRAGMA table_info(path_lists)")}
+    for name, ddl in _PATH_LISTS_EXTRA_COLUMNS.items():
+        if name not in pl_cols:
+            db._conn.execute(
+                f"ALTER TABLE path_lists ADD COLUMN {name} {ddl}")
     tables = {r["name"] for r in db._all(
         "SELECT name FROM sqlite_master WHERE type = 'table'")}
     if "auto_pr" in tables:
