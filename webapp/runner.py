@@ -5,9 +5,9 @@
 - 全局唯一 Worker 线程消费 CoalescingQueue，逐 Trigger 执行 execute_run
 - execute_run 复刻 Jenkinsfile 的本地化流程：克隆来源仓到
   work_dir/run-<id>/（blobs=True 全量浅克隆，等价
-  ``git clone --depth=1 --no-checkout``），加载 Token 规则（设置页
-  DB 配置优先，非空即覆盖来源仓 token_rules.json，为空回退文件），
-  scan_changed 走本地化模式（支持增量 diff），影子模式只落
+  ``git clone --depth=1 --no-checkout``），从本地克隆加载 Token 规则
+  （token_rules.json，关键字→token_env 环境变量），scan_changed
+  走本地化模式（支持增量 diff），影子模式只落
   would_submit 不提交，active 模式先过仓库配置门控（设置页维护，按
   仓库粒度，默认拒绝），再逐仓 resolve_token + submit_repo
   （复制 submit_all 的路由逻辑，换取 head_branch/noop/pr_existed 粒度）
@@ -146,19 +146,14 @@ def execute_run(trigger, settings, db):
         log(f"正在克隆来源仓库 {owner}/{repo} ...")
         localgit.clone(owner, repo, None, default_token, src_dir,
                        log=log, blobs=True)
-        # 设置页自助配置优先：DB 非空即覆盖来源仓 token_rules.json，
-        # 为空回退文件
-        token_rules = db.list_path_token_rules()
-        if token_rules:
-            log(f"使用设置页 Token 规则 {len(token_rules)} 条"
-                "（覆盖来源仓 token_rules.json）")
-        else:
-            token_rules = service.load_token_rules(
-                default_token, log=log, source_repo_dir=src_dir)
+        # Token 规则仍从来源仓 token_rules.json 加载（DB 不再有关键字
+        # 规则：仓库配置通过命名 token 下拉引用，控制精确到仓库）
+        token_rules = service.load_token_rules(
+            default_token, log=log, source_repo_dir=src_dir)
         rules_cache.set_rules(token_rules)
         masker.add_secrets(r.get("token") for r in token_rules)
-        # 设置页配置的仓库专属 token 也纳入脱敏集合
-        masker.add_secrets(t.get("token") for t in db.list_repo_configs())
+        # 设置页命名 token 池中的 token 也纳入脱敏集合
+        masker.add_secrets(t.get("token") for t in db.list_named_tokens())
 
         # ── 扫描（本地化 + 可选增量 diff） ──
         scan = service.scan_changed(

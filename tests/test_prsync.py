@@ -119,7 +119,8 @@ class TestTokenRouting:
         monkeypatch.setattr(
             prsync.rules_cache, "get_rules",
             lambda: [{"keyword": "Ascend", "token": "rule-token"}])
-        db.upsert_repo_config("O1", "R1", token="db-token")
+        db.upsert_named_token("r1-bot", "db-token")
+        db.upsert_repo_config("O1", "R1", token_name="r1-bot")
         _seed_pr(db, org="o1", repo="r1", number=1, path="Ascend/a")
         _seed_pr(db, org="o2", repo="r2", number=2, path="Ascend/b")
         get = _mock_get(monkeypatch, payload={"state": "open"})
@@ -375,14 +376,6 @@ class TestPoller:
 
 
 class TestEnsureRules:
-    def test_db_rules_win(self, db, monkeypatch):
-        """DB 有条目时直接用 DB，不查缓存也不回退 API 加载。"""
-        db.upsert_path_token_rule("cann", "tok-cann")
-        load = prsync.service.load_token_rules
-        rules = prsync._ensure_rules(db, "default-token")
-        assert [r["keyword"] for r in rules] == ["cann"]
-        load.assert_not_called()
-
     def test_empty_db_falls_back_to_cache(self, db, monkeypatch):
         monkeypatch.setattr(prsync.rules_cache, "get_rules",
                             lambda: [{"keyword": "k", "token": "t"}])

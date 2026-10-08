@@ -676,26 +676,30 @@ class TestRepoConfigs:
         e = entries[0]
         assert e["id"] == entry_id
         assert (e["org"], e["repo"]) == ("cann", "hccl")  # 小写归一
-        assert e["enabled"] == 1 and e["token"] == ""
+        assert e["enabled"] == 1 and e["token_name"] == ""
         assert e["created_at"] and e["updated_at"]
 
     def test_upsert_partial_fields_keep_existing(self, db):
-        """enabled/token 传 None 保持不变；冲突更新返回同一条目 id。"""
+        """enabled/token_name 传 None 保持不变；冲突更新返回同一条目 id。"""
+        db.upsert_named_token("bot-a", "tok-1")
         entry_id = db.upsert_repo_config("cann", "hccl", enabled=True,
-                                         token="tok-1")
-        # 只改开关，token 保留
+                                         token_name="bot-a")
+        # 只改开关，token 引用保留
         assert db.upsert_repo_config("cann", "hccl", enabled=False) == entry_id
         e = db.list_repo_configs()[0]
-        assert e["enabled"] == 0 and e["token"] == "tok-1"
-        # 只改 token，开关保留
-        assert db.upsert_repo_config("cann", "hccl", token="tok-2") == entry_id
+        assert e["enabled"] == 0 and e["token_name"] == "bot-a"
+        # 只改 token 引用，开关保留
+        db.upsert_named_token("bot-b", "tok-2")
+        assert db.upsert_repo_config("cann", "hccl",
+                                     token_name="bot-b") == entry_id
         e = db.list_repo_configs()[0]
-        assert e["enabled"] == 0 and e["token"] == "tok-2"
+        assert e["enabled"] == 0 and e["token_name"] == "bot-b"
         assert len(db.list_repo_configs()) == 1
 
-    def test_token_clear_with_empty_string(self, db):
-        db.upsert_repo_config("cann", "hccl", token="tok-1")
-        db.upsert_repo_config("cann", "hccl", token="")
+    def test_token_name_clear_with_empty_string(self, db):
+        db.upsert_named_token("bot-a", "tok-1")
+        db.upsert_repo_config("cann", "hccl", token_name="bot-a")
+        db.upsert_repo_config("cann", "hccl", token_name="")
         assert db.get_repo_token("cann", "hccl") is None
 
     def test_gate_default_deny_and_toggle(self, db):
@@ -713,15 +717,23 @@ class TestRepoConfigs:
 
     def test_get_repo_token(self, db):
         assert db.get_repo_token("cann", "hccl") is None  # 无条目
-        db.upsert_repo_config("CANN", "HCCL", token="tok-secret-1")
+        db.upsert_repo_config("CANN", "HCCL")
+        assert db.get_repo_token("cann", "hccl") is None  # 未引用 token
+        db.upsert_named_token("Bot-A", "tok-secret-1")
+        db.upsert_repo_config("cann", "hccl", token_name="bot-a")
         assert db.get_repo_token("Cann", "Hccl") == "tok-secret-1"
         assert db.get_repo_token("cann", "sip") is None
+        # 引用的命名 token 被删除：回退 None（调用方走默认路由）
+        tid = db.list_named_tokens()[0]["id"]
+        db.delete_named_token(tid)
+        assert db.get_repo_token("cann", "hccl") is None
 
     def test_migrate_folds_legacy_tables(self, tmp_path):
-        """旧库 auto_pr + repo_tokens 折叠进 repo_configs 后删表。
+        """旧库 auto_pr + repo_tokens 折叠进 repo_configs + named_tokens。
 
         auto_pr 分支粒度折叠为仓库粒度（任一分支启用则仓库启用，
-        org/repo 顺带小写归一）；repo_tokens 的 token 并入同仓条目。
+        org/repo 顺带小写归一）；repo_tokens 的内联 token 迁入
+        named_tokens（命名 migrated-<org>-<repo>）并让仓库条目引用。
         """
         path = tmp_path / "data" / "test.db"
         d = db_mod.init_db(path)
@@ -747,15 +759,17 @@ class TestRepoConfigs:
         try:
             entries = {e["repo"]: e for e in d.list_repo_configs()}
             assert set(entries) == {"hccl", "sip", "msprof"}
-            # hccl：master 启用 + dev 禁用 → 仓库启用；token 并入；小写归一
+            # hccl：master 启用 + dev 禁用 → 仓库启用；引用迁移 token
             assert entries["hccl"]["org"] == "cann"
             assert entries["hccl"]["enabled"] == 1
-            assert entries["hccl"]["token"] == "tok-hccl"
+            assert entries["hccl"]["token_name"] == "migrated-cann-hccl"
+            assert d.get_repo_token("cann", "hccl") == "tok-hccl"
             # sip：唯一条目禁用 → 保持禁用
             assert entries["sip"]["enabled"] == 0
             # 仅 repo_tokens 出现的仓：迁移为启用条目
             assert entries["msprof"]["enabled"] == 1
-            assert entries["msprof"]["token"] == "tok-msprof"
+            assert entries["msprof"]["token_name"] == "migrated-ascend-msprof"
+            assert d.get_repo_token("ascend", "msprof") == "tok-msprof"
             # 旧表已删
             tables = {r["name"] for r in d._all(
                 "SELECT name FROM sqlite_master WHERE type = 'table'")}
@@ -766,28 +780,60 @@ class TestRepoConfigs:
         d = db_mod.init_db(path)
         try:
             assert len(d.list_repo_configs()) == 3
+            assert len(d.list_named_tokens()) == 2
+        finally:
+            d.close()
+
+    def test_migrate_inline_token_to_named(self, tmp_path):
+        """中间版 repo_configs（内联 token 列）重建为 token_name 引用。"""
+        path = tmp_path / "data" / "test.db"
+        d = db_mod.init_db(path)
+        # 模拟中间版结构：删 token_name 加 token，插一条带内联 token 的
+        d._conn.execute("ALTER TABLE repo_configs RENAME TO repo_configs_old")
+        d._conn.execute(
+            "CREATE TABLE repo_configs (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " org TEXT NOT NULL, repo TEXT NOT NULL,"
+            " enabled INTEGER NOT NULL DEFAULT 1,"
+            " token TEXT NOT NULL DEFAULT '',"
+            " created_at TEXT, updated_at TEXT, UNIQUE(org, repo))")
+        d._conn.execute(
+            "INSERT INTO repo_configs (org, repo, enabled, token)"
+            " SELECT org, repo, enabled, '' FROM repo_configs_old")
+        d._conn.execute("DROP TABLE repo_configs_old")
+        d._conn.execute("INSERT INTO repo_configs (org, repo, enabled, token)"
+                        " VALUES ('cann', 'hccl', 1, 'tok-inline')")
+        d._conn.execute("INSERT INTO repo_configs (org, repo, enabled, token)"
+                        " VALUES ('cann', 'sip', 0, '')")
+        d._conn.commit()
+        d.close()
+        d = db_mod.init_db(path)  # 重开触发迁移
+        try:
+            entries = {e["repo"]: e for e in d.list_repo_configs()}
+            assert entries["hccl"]["token_name"] == "migrated-cann-hccl"
+            assert d.get_repo_token("cann", "hccl") == "tok-inline"
+            assert entries["sip"]["enabled"] == 0
+            assert entries["sip"]["token_name"] == ""
         finally:
             d.close()
 
 
-class TestPathTokenRules:
-    """path_token_rules 表：Token 规则的增删查（关键字小写归一、保序）。"""
+class TestNamedTokens:
+    """named_tokens 表：命名 token 的增删查（名称小写归一、唯一）。"""
 
     def test_upsert_list_delete(self, db):
-        id1 = db.upsert_path_token_rule("Ascend", "tok-a")
-        id2 = db.upsert_path_token_rule(" cann ", "tok-c")
-        rules = db.list_path_token_rules()
-        assert [r["keyword"] for r in rules] == ["ascend", "cann"]
-        assert rules[0]["token"] == "tok-a"
-        # 保序（resolve_token 取第一个命中，顺序即优先级）
-        assert [r["id"] for r in rules] == [id1, id2]
-        # 冲突更新（大小写不敏感关键字去重）
-        assert db.upsert_path_token_rule("ASCEND", "tok-a2") == id1
-        rules = db.list_path_token_rules()
-        assert len(rules) == 2 and rules[0]["token"] == "tok-a2"
+        id1 = db.upsert_named_token("Bot-A", "tok-a")
+        id2 = db.upsert_named_token(" cann-bot ", "tok-c")
+        tokens = db.list_named_tokens()
+        assert [t["name"] for t in tokens] == ["bot-a", "cann-bot"]
+        assert tokens[0]["token"] == "tok-a"
+        # 冲突更新（大小写不敏感名称去重）
+        assert db.upsert_named_token("BOT-A", "tok-a2") == id1
+        tokens = db.list_named_tokens()
+        assert len(tokens) == 2 and tokens[0]["token"] == "tok-a2"
+        # 存在性校验（仓库配置引用前检查用）
+        assert db.token_name_exists("Bot-A") is True
+        assert db.token_name_exists("nope") is False
         # 删除
-        assert db.delete_path_token_rule(id1) is True
-        assert db.delete_path_token_rule(999) is False
-        assert [r["keyword"] for r in db.list_path_token_rules()] == ["cann"]
-
-
+        assert db.delete_named_token(id1) is True
+        assert db.delete_named_token(999) is False
+        assert [t["name"] for t in db.list_named_tokens()] == ["cann-bot"]

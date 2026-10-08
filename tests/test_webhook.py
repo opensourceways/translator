@@ -552,9 +552,12 @@ class TestRepoSettings:
         settings = _make_settings(tmp_path, admin_token="adm")
         headers = {"X-Admin-Token": "adm"}
         with _client(settings, monkeypatch) as (client, app, _, _):
+            client.post("/api/settings/tokens",
+                        json={"name": "hccl-bot", "token": self.SECRET},
+                        headers=headers)
             r = client.post("/api/settings/repos",
                             json={"org": "CANN", "repo": "HCCL",
-                                  "token": self.SECRET},
+                                  "token_name": "hccl-bot"},
                             headers=headers)
             assert r.status_code == 200
             entry = r.json()
@@ -562,22 +565,21 @@ class TestRepoSettings:
             db = app.state.db
             assert db.is_auto_pr_enabled("cann", "hccl") is True
             assert db.get_repo_token("cann", "hccl") == self.SECRET
-            # 列表只回掩码，明文不出现在响应里
-            body = client.get("/api/settings/repos")
-            assert self.SECRET not in body.text
-            entries = body.json()["entries"]
-            assert entries[0]["token_masked"] == "tok-***"
+            # 列表回 token_name 引用，无 token 字段
+            entries = client.get("/api/settings/repos").json()["entries"]
+            assert entries[0]["token_name"] == "hccl-bot"
             assert "token" not in entries[0]
-            # 设置页同样只渲染掩码
-            page = client.get("/settings")
-            assert self.SECRET not in page.text
-            assert "tok-***" in page.text
-            # 不带 token 的 upsert 保留已有 token
+            # 不带 token_name 的 upsert 保留已有引用
             r = client.post("/api/settings/repos",
                             json={"org": "cann", "repo": "hccl"},
                             headers=headers)
             assert r.json()["id"] == entry["id"]
             assert db.get_repo_token("cann", "hccl") == self.SECRET
+            # 引用不存在的命名 token：422
+            assert client.post("/api/settings/repos",
+                               json={"org": "cann", "repo": "hccl",
+                                     "token_name": "nope"},
+                               headers=headers).status_code == 422
             # 切换开关
             r = client.post(f"/api/settings/repos/{entry['id']}",
                             json={"enabled": False}, headers=headers)
@@ -669,55 +671,55 @@ class TestStartupRecovery:
             assert client.get("/healthz").json()["status"] == "ok"
 
 
-class TestTokenRuleSettings:
-    """Token 规则端点：明文永不出库（列表与页面均为掩码）。"""
+class TestNamedTokenSettings:
+    """命名 Token 池端点：明文永不出库（列表与页面均为掩码）。"""
 
-    SECRET = "rule-plaintext-secret"
+    SECRET = "named-plaintext-secret"
 
     def test_add_list_masked_delete_flow(self, tmp_path, monkeypatch):
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
-            r = client.post("/api/settings/token-rules",
-                            json={"keyword": "Ascend", "token": self.SECRET})
+            r = client.post("/api/settings/tokens",
+                            json={"name": "Cann-Bot", "token": self.SECRET})
             assert r.status_code == 200
-            assert r.json()["keyword"] == "ascend"  # 小写规范化
+            assert r.json()["name"] == "cann-bot"  # 小写规范化
             entry_id = r.json()["id"]
-            rules = app.state.db.list_path_token_rules()
-            assert rules[0]["token"] == self.SECRET
+            tokens = app.state.db.list_named_tokens()
+            assert tokens[0]["token"] == self.SECRET
             # 列表只回掩码，明文不出现在响应里
-            body = client.get("/api/settings/token-rules")
+            body = client.get("/api/settings/tokens")
             assert self.SECRET not in body.text
             entries = body.json()["entries"]
-            assert entries[0]["token_masked"] == "rule***"
+            assert entries[0]["token_masked"] == "name***"
             assert "token" not in entries[0]
-            # 设置页同样只渲染掩码
+            # 设置页同样只渲染掩码；仓库表单下拉包含该名称
             page = client.get("/settings")
-            assert "Token 规则" in page.text
+            assert "Token 池" in page.text
             assert self.SECRET not in page.text
-            assert "rule***" in page.text
+            assert "name***" in page.text
+            assert 'value="cann-bot"' in page.text
             # 删除
-            r = client.delete(f"/api/settings/token-rules/{entry_id}")
+            r = client.delete(f"/api/settings/tokens/{entry_id}")
             assert r.json()["deleted"] is True
-            assert app.state.db.list_path_token_rules() == []
+            assert app.state.db.list_named_tokens() == []
 
     def test_add_validation_422_and_404(self, tmp_path, monkeypatch):
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
-            assert client.post("/api/settings/token-rules",
-                               json={"keyword": "k"}).status_code == 422
-            assert client.post("/api/settings/token-rules",
+            assert client.post("/api/settings/tokens",
+                               json={"name": "n"}).status_code == 422
+            assert client.post("/api/settings/tokens",
                                json={"token": "t"}).status_code == 422
-            assert client.delete(
-                "/api/settings/token-rules/999").status_code == 404
+            assert client.delete("/api/settings/tokens/999"
+                                 ).status_code == 404
 
     def test_403_with_wrong_admin_token(self, tmp_path, monkeypatch):
         settings = _make_settings(tmp_path, admin_token="adm")
         with _client(settings, monkeypatch) as (client, app, _, _):
-            assert client.post("/api/settings/token-rules",
-                               json={"keyword": "k",
-                                     "token": "t"}).status_code == 403
-            assert client.delete("/api/settings/token-rules/1"
-                                 ).status_code == 403
-            assert client.get("/api/settings/token-rules").status_code == 200
+            assert client.post("/api/settings/tokens",
+                               json={"name": "n", "token": "t"}
+                               ).status_code == 403
+            assert client.delete("/api/settings/tokens/1").status_code == 403
+            assert client.get("/api/settings/tokens").status_code == 200
 
 

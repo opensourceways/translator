@@ -9,7 +9,7 @@
 - Dashboard 页面与 /api/* 只读 JSON：TC_DASH_TOKEN 未配置时放开，配置后
   要求 X-Dash-Token 头或 ?token= query
 - POST /api/runs、/api/config/shadow、/api/settings/*（仓库配置、
-  token 规则）：
+  命名 token 池）：
   X-Admin-Token 管理端点；admin_token 未配置时放开（内部工具，默认
   内网部署），配置后校验
 
@@ -361,8 +361,6 @@ def create_app(settings=None):
     async def page_settings(request: Request):
         db = request.app.state.db
         entries = db.list_repo_configs()
-        for e in entries:
-            e["token_masked"] = _mask_token(e.pop("token"))
         known = {(e["org"], e["repo"]) for e in entries}
         suggestions = []
         seen = set()
@@ -371,31 +369,29 @@ def create_app(settings=None):
             if key not in known and key not in seen:
                 seen.add(key)
                 suggestions.append(r)
-        token_rules = db.list_path_token_rules()
-        for r in token_rules:
-            r["token_masked"] = _mask_token(r.pop("token"))
+        named_tokens = db.list_named_tokens()
+        for t in named_tokens:
+            t["token_masked"] = _mask_token(t.pop("token"))
         return templates.TemplateResponse(
             request, "settings.html",
             _ctx(request, entries=entries,
                  suggestions=suggestions,
-                 token_rules=token_rules,
+                 named_tokens=named_tokens,
                  admin_auth=bool(settings.admin_token)))
 
     @app.get("/api/settings/repos", dependencies=dash)
     async def api_list_repo_configs(request: Request):
-        """仓库配置列表；token 值只回掩码（前 4 位 + ***），不出库。"""
-        entries = request.app.state.db.list_repo_configs()
-        for e in entries:
-            e["token_masked"] = _mask_token(e.pop("token"))
-        return {"entries": entries}
+        """仓库配置列表（token_name 为引用名，无敏感值）。"""
+        return {"entries": request.app.state.db.list_repo_configs()}
 
     @app.post("/api/settings/repos",
               dependencies=[Depends(require_admin)])
     async def api_upsert_repo_config(request: Request):
-        """新增/更新仓库配置：{org, repo, enabled?, token?}。
+        """新增/更新仓库配置：{org, repo, enabled?, token_name?}。
 
-        enabled/token 缺省表示保持不变（新条目默认 enabled=True、无
-        专属 token）；token 传空串表示清空专属 token。
+        enabled/token_name 缺省表示保持不变（新条目默认 enabled=True、
+        不引用命名 token）；token_name 传空串表示清除引用（回退
+        token_rules.json / 默认 token）。
         """
         try:
             body = await request.json()
@@ -410,15 +406,19 @@ def create_app(settings=None):
         enabled = body.get("enabled")
         if enabled is not None and not isinstance(enabled, bool):
             raise HTTPException(422, "enabled 必须是布尔值")
-        token = body.get("token")
-        if token is not None:
-            token = str(token).strip()
+        token_name = body.get("token_name")
+        if token_name is not None:
+            token_name = str(token_name).strip()
         db = request.app.state.db
+        if token_name and not db.token_name_exists(token_name):
+            raise HTTPException(
+                422, f"命名 Token「{token_name}」不存在，请先在 Token 池添加")
         entry_id = db.upsert_repo_config(org, repo, enabled=enabled,
-                                         token=token)
-        log.info("仓库配置 upsert：%s/%s enabled=%s token=%s",
+                                         token_name=token_name)
+        log.info("仓库配置 upsert：%s/%s enabled=%s token_name=%s",
                  org.lower(), repo.lower(), enabled,
-                 "更新" if token else ("清空" if token == "" else "不变"))
+                 "清除" if token_name == ""
+                 else (token_name if token_name else "不变"))
         return {"id": entry_id, "org": org.lower(), "repo": repo.lower()}
 
     @app.post("/api/settings/repos/{entry_id}",
@@ -448,45 +448,43 @@ def create_app(settings=None):
         log.info("仓库配置条目 #%d 已删除", entry_id)
         return {"id": entry_id, "deleted": True}
 
-    # ── Token 规则（设置页自助配置） ─────────────────────────
-    # DB 非空即覆盖来源仓 token_rules.json；DB 为空时回退读文件
-    #（runner/prsync 生效语义）
+    # ── 命名 Token 池（设置页自助配置） ─────────────────────
+    # token 起名字保存，仓库配置通过 token_name 下拉引用
 
-
-    @app.get("/api/settings/token-rules", dependencies=dash)
-    async def api_list_token_rules(request: Request):
-        """Token 规则列表；token 值只回掩码（前 4 位 + ***），不出库。"""
-        entries = request.app.state.db.list_path_token_rules()
+    @app.get("/api/settings/tokens", dependencies=dash)
+    async def api_list_named_tokens(request: Request):
+        """命名 token 列表；token 值只回掩码（前 4 位 + ***），不出库。"""
+        entries = request.app.state.db.list_named_tokens()
         for e in entries:
             e["token_masked"] = _mask_token(e.pop("token"))
         return {"entries": entries}
 
-    @app.post("/api/settings/token-rules",
+    @app.post("/api/settings/tokens",
               dependencies=[Depends(require_admin)])
-    async def api_add_token_rule(request: Request):
-        """新增/更新 Token 规则：{keyword, token}，两者必填。"""
+    async def api_upsert_named_token(request: Request):
+        """新增/更新命名 token：{name, token}，两者必填。"""
         try:
             body = await request.json()
         except Exception:
             body = {}
         if not isinstance(body, dict):
             body = {}
-        keyword = str(body.get("keyword") or "").strip()
+        name = str(body.get("name") or "").strip()
         token = str(body.get("token") or "").strip()
-        if not keyword or not token:
-            raise HTTPException(422, "body 需要非空字段 keyword 与 token")
+        if not name or not token:
+            raise HTTPException(422, "body 需要非空字段 name 与 token")
         db = request.app.state.db
-        entry_id = db.upsert_path_token_rule(keyword, token)
-        log.info("Token 规则 upsert：%s（值不落日志）", keyword.lower())
-        return {"id": entry_id, "keyword": keyword.lower()}
+        entry_id = db.upsert_named_token(name, token)
+        log.info("命名 Token upsert：%s（值不落日志）", name.lower())
+        return {"id": entry_id, "name": name.lower()}
 
-    @app.delete("/api/settings/token-rules/{entry_id}",
+    @app.delete("/api/settings/tokens/{entry_id}",
                 dependencies=[Depends(require_admin)])
-    async def api_delete_token_rule(request: Request, entry_id: int):
+    async def api_delete_named_token(request: Request, entry_id: int):
         db = request.app.state.db
-        if not db.delete_path_token_rule(entry_id):
+        if not db.delete_named_token(entry_id):
             raise HTTPException(404, "条目不存在")
-        log.info("Token 规则条目 #%d 已删除", entry_id)
+        log.info("命名 Token 条目 #%d 已删除", entry_id)
         return {"id": entry_id, "deleted": True}
 
     # ── 管理端点 ─────────────────────────────────────────────

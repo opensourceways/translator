@@ -79,16 +79,12 @@ def _poll_once(db, settings):
 
 
 def _ensure_rules(db, default_token):
-    """取 Token 规则：设置页 DB 配置优先，其次进程内缓存（runner 每次
-    run 后写入）。
+    """取 Token 规则：优先进程内缓存（runner 每次 run 后写入）。
 
-    DB 与缓存均为空（如服务重启后尚无 run 且未自助配置）时回退 API
-    模式加载一次并回填缓存；加载失败只告警，本轮全部使用默认 Token
-    继续。
+    缓存为空（如服务重启后尚无 run）时回退 API 模式加载一次并回填缓存；
+    加载失败只告警，本轮全部使用默认 Token 继续。db 参数保留仅为
+    调用方兼容（命名 token 的解析在 resolve_repo_token 内按仓查询）。
     """
-    db_rules = db.list_path_token_rules()
-    if db_rules:
-        return db_rules
     rules = rules_cache.get_rules()
     if rules:
         return rules
