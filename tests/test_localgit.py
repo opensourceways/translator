@@ -101,3 +101,18 @@ class TestReadFile:
                    return_value=b'{"rules": []}'):
             assert localgit.read_file(
                 "/repo", "token_rules.json") == b'{"rules": []}'
+
+
+class TestQuotePath:
+    """git 默认 core.quotepath=true 会把中文路径输出为 C 风格转义串
+    （"…\\346\\233\\264…"），解析后会拼出不存在的 org/repo；所有 git
+    子命令必须显式带 -c core.quotepath=false。"""
+
+    def test_run_git_bytes_disables_quotepath(self):
+        completed = subprocess.CompletedProcess(args=[], returncode=0,
+                                                stdout=b"", stderr=b"")
+        with patch("translator_ci.localgit.subprocess.run",
+                   return_value=completed) as run_mock:
+            localgit._run_git_bytes("/repo", "ls-tree", "-r", "HEAD")
+            cmd = run_mock.call_args.args[0]
+            assert cmd[:4] == ["git", "-c", "core.quotepath=false", "-C"]

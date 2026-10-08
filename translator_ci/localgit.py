@@ -255,9 +255,13 @@ def _run_git(repo_dir, *args):
 
 
 def _run_git_bytes(repo_dir, *args):
+    # core.quotepath=false：禁止 git 把非 ASCII 路径输出为 C 风格转义串
+    # （"…\346\233\264…"），否则 ls-tree/diff 的路径解析会得到带引号的
+    # 垃圾路径，进而拼出不存在的 org/repo（中文目录曾因此导致 400）
     try:
         proc = subprocess.run(
-            ["git", "-C", repo_dir, *args], check=True, capture_output=True)
+            ["git", "-c", "core.quotepath=false", "-C", repo_dir, *args],
+            check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
         raise client.GitCodeError(
             200, f"git {' '.join(args)} 失败: "
