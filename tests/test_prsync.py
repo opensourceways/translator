@@ -369,3 +369,30 @@ class TestPoller:
         poller.join(timeout=5)
         assert calls
         assert not poller.is_alive()
+
+
+# ── _ensure_rules：设置页 DB 规则优先 ────────────────────────
+
+
+class TestEnsureRules:
+    def test_db_rules_win(self, db, monkeypatch):
+        """DB 有条目时直接用 DB，不查缓存也不回退 API 加载。"""
+        db.upsert_path_token_rule("cann", "tok-cann")
+        load = prsync.service.load_token_rules
+        rules = prsync._ensure_rules(db, "default-token")
+        assert [r["keyword"] for r in rules] == ["cann"]
+        load.assert_not_called()
+
+    def test_empty_db_falls_back_to_cache(self, db, monkeypatch):
+        monkeypatch.setattr(prsync.rules_cache, "get_rules",
+                            lambda: [{"keyword": "k", "token": "t"}])
+        rules = prsync._ensure_rules(db, "default-token")
+        assert rules == [{"keyword": "k", "token": "t"}]
+        prsync.service.load_token_rules.assert_not_called()
+
+    def test_empty_db_and_cache_falls_back_to_api(self, db, monkeypatch):
+        load = MagicMock(return_value=[{"keyword": "a", "token": "t"}])
+        monkeypatch.setattr(prsync.service, "load_token_rules", load)
+        rules = prsync._ensure_rules(db, "default-token")
+        assert rules == [{"keyword": "a", "token": "t"}]
+        load.assert_called_once()

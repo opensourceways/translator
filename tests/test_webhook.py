@@ -699,3 +699,103 @@ class TestStartupRecovery:
         with _client(settings, monkeypatch) as (client, app, _, _):
             assert app.state.queue.pending_count() == 0
             assert client.get("/healthz").json()["status"] == "ok"
+
+
+class TestTokenRuleSettings:
+    """Token 规则端点：明文永不出库（列表与页面均为掩码）。"""
+
+    SECRET = "rule-plaintext-secret"
+
+    def test_add_list_masked_delete_flow(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.post("/api/settings/token-rules",
+                            json={"keyword": "Ascend", "token": self.SECRET})
+            assert r.status_code == 200
+            assert r.json()["keyword"] == "ascend"  # 小写规范化
+            entry_id = r.json()["id"]
+            rules = app.state.db.list_path_token_rules()
+            assert rules[0]["token"] == self.SECRET
+            # 列表只回掩码，明文不出现在响应里
+            body = client.get("/api/settings/token-rules")
+            assert self.SECRET not in body.text
+            entries = body.json()["entries"]
+            assert entries[0]["token_masked"] == "rule***"
+            assert "token" not in entries[0]
+            # 设置页同样只渲染掩码
+            page = client.get("/settings")
+            assert "Token 规则" in page.text
+            assert self.SECRET not in page.text
+            assert "rule***" in page.text
+            # 删除
+            r = client.delete(f"/api/settings/token-rules/{entry_id}")
+            assert r.json()["deleted"] is True
+            assert app.state.db.list_path_token_rules() == []
+
+    def test_add_validation_422_and_404(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            assert client.post("/api/settings/token-rules",
+                               json={"keyword": "k"}).status_code == 422
+            assert client.post("/api/settings/token-rules",
+                               json={"token": "t"}).status_code == 422
+            assert client.delete(
+                "/api/settings/token-rules/999").status_code == 404
+
+    def test_403_with_wrong_admin_token(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path, admin_token="adm")
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            assert client.post("/api/settings/token-rules",
+                               json={"keyword": "k",
+                                     "token": "t"}).status_code == 403
+            assert client.delete("/api/settings/token-rules/1"
+                                 ).status_code == 403
+            assert client.get("/api/settings/token-rules").status_code == 200
+
+
+class TestPathListSettings:
+    """黑/白名单端点：kind 校验、路径归一、页面渲染。"""
+
+    def test_add_list_delete_flow(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.post("/api/settings/path-lists",
+                            json={"kind": "blacklist", "path": "/CANN/hccl/"})
+            assert r.status_code == 200
+            assert r.json()["path"] == "CANN/hccl"
+            entry_id = r.json()["id"]
+            client.post("/api/settings/path-lists",
+                        json={"kind": "whitelist", "path": "Ascend/msprof"})
+            body = client.get("/api/settings/path-lists").json()
+            assert [e["path"] for e in body["blacklist"]] == ["CANN/hccl"]
+            assert [e["path"] for e in body["whitelist"]] == ["Ascend/msprof"]
+            # 设置页渲染
+            page = client.get("/settings")
+            assert "拉黑名单" in page.text and "CANN/hccl" in page.text
+            assert "开放白名单" in page.text and "Ascend/msprof" in page.text
+            # 删除
+            r = client.delete(f"/api/settings/path-lists/{entry_id}")
+            assert r.json()["deleted"] is True
+            assert app.state.db.list_path_list("blacklist") == []
+
+    def test_validation_422_and_404(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            assert client.post("/api/settings/path-lists",
+                               json={"kind": "gray", "path": "a"}
+                               ).status_code == 422
+            assert client.post("/api/settings/path-lists",
+                               json={"kind": "blacklist"}
+                               ).status_code == 422
+            assert client.delete("/api/settings/path-lists/999"
+                                 ).status_code == 404
+
+    def test_403_with_wrong_admin_token(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path, admin_token="adm")
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            assert client.post("/api/settings/path-lists",
+                               json={"kind": "blacklist", "path": "a"}
+                               ).status_code == 403
+            assert client.delete("/api/settings/path-lists/1"
+                                 ).status_code == 403
+            assert client.get("/api/settings/path-lists").status_code == 200

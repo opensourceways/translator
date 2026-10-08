@@ -205,13 +205,20 @@ curl -X POST http://localhost:8000/api/config/shadow \
 - `/settings`：自动提 PR 开关页。只有在此**添加并启用**的
   社区/仓库/分支（分支留空=该仓全部分支）才会在 active 模式下真正创建
   PR，未列出的仓库一律跳过（默认拒绝）；社区/仓库名大小写不敏感
-  （统一按小写存储）。同页还可配置**仓库专属 Token**（提交与轮询时
-  优先于 token_rules.json 规则和默认 GITCODE_TOKEN；保存在 SQLite，
-  只显示掩码不回显明文）。`TC_ADMIN_TOKEN` 未配置时修改
-  操作无需鉴权（内部工具，默认内网部署），配置后需在页面顶部输入 token
-  （仅存浏览器 localStorage）
+  （统一按小写存储）。同页还可自助配置：
+  - **仓库专属 Token**（提交与轮询时优先于 Token 规则和默认
+    GITCODE_TOKEN；保存在 SQLite，只显示掩码不回显明文）
+  - **Token 规则**（目录关键字 → Token，匹配大小写不敏感、按添加顺序
+    取第一个命中；表非空即覆盖来源仓 token_rules.json，为空回退读文件）
+  - **拉黑名单 / 开放白名单**（目录路径列表；某类非空即覆盖来源仓
+    blacklist.json / whitelist.json，为空回退读文件）
+
+  `TC_ADMIN_TOKEN` 未配置时修改操作无需鉴权（内部工具，默认内网部署），
+  配置后需在页面顶部输入 token（仅存浏览器 localStorage）
 - 只读 JSON：`/api/summary`、`/api/runs`、`/api/runs/{id}`、
-  `/api/runs/{id}/log`、`/api/prs`、`/api/settings/auto-pr`
+  `/api/runs/{id}/log`、`/api/prs`、`/api/settings/auto-pr`、
+  `/api/settings/tokens`、`/api/settings/token-rules`、
+  `/api/settings/path-lists`
 - 配置 `TC_DASH_TOKEN` 后页面与只读 API 都需鉴权；留空则放开（默认
   部署在内网/反代后）
 - 手动触发（Build Now 替代）：
@@ -225,9 +232,13 @@ curl -X POST http://localhost:8000/api/runs \
 
 ### 规则 Token 运维
 
-`token_rules.json` 加一行规则后，`.env` 加同名变量（变量名必须与规则的
-`token_env` 一致），然后 `docker compose up -d --build` 重建容器——env
-进程级固定，不热加载。缺失的规则 token 只会告警跳过该规则，不会放大权限。
+推荐直接在 `/settings` 页配置「Token 规则」（关键字 → Token 值，立即
+生效、无需重建容器；表非空即覆盖来源仓 token_rules.json）。
+
+文件方式仍保留：`token_rules.json` 加一行规则后，`.env` 加同名变量
+（变量名必须与规则的 `token_env` 一致），然后
+`docker compose up -d --build` 重建容器——env 进程级固定，不热加载。
+缺失的规则 token 只会告警跳过该规则，不会放大权限。
 
 ## 项目结构
 

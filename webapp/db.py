@@ -9,9 +9,10 @@
 - prs.mergeable 三态：None 存 NULL（服务端尚未计算）
 - prs.labels_json/draft/review_total/review_accepted 为原始信号，
   派生状态（CI 未通过/待评审等）由 webapp.prstatus 在展示层计算
-- 任何 token 值不进日志/其他表：唯一的例外是 repo_tokens 表
-  （设置页配置的仓库专属 token，按用户明确要求落库，见
-  list/get/upsert_repo_token）；该表之外本模块接口不接收 token 参数
+- 任何 token 值不进日志/其他表：例外是 repo_tokens 与
+  path_token_rules 两张表（设置页自助配置的 token，按用户明确要求
+  落库，见 list/get/upsert_repo_token 与 list/upsert_path_token_rule）；
+  两表之外本模块接口不接收 token 参数
 """
 
 import json
@@ -125,6 +126,21 @@ CREATE TABLE IF NOT EXISTS repo_tokens (
     created_at TEXT,
     updated_at TEXT,
     UNIQUE(org, repo)
+);
+CREATE TABLE IF NOT EXISTS path_token_rules (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword    TEXT NOT NULL,
+    token      TEXT NOT NULL,
+    created_at TEXT,
+    updated_at TEXT,
+    UNIQUE(keyword)
+);
+CREATE TABLE IF NOT EXISTS path_lists (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    created_at TEXT,
+    UNIQUE(kind, path)
 );
 """
 
@@ -618,15 +634,14 @@ class Database:
             (branch or "").strip()
         now = _utcnow()
         with self._lock:
-            cur = self._conn.execute(
+            self._conn.execute(
                 "INSERT INTO auto_pr (org, repo, branch, enabled,"
                 " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(org, repo, branch) DO UPDATE SET"
                 " enabled = excluded.enabled, updated_at = excluded.updated_at",
                 (org, repo, branch, 1 if enabled else 0, now, now))
             self._conn.commit()
-            if cur.lastrowid:
-                return cur.lastrowid
+            # 不依赖 cur.lastrowid：ON CONFLICT 走 UPDATE 分支时它是陈旧值
             row = self._one(
                 "SELECT id FROM auto_pr WHERE org = ? AND repo = ?"
                 " AND branch = ?", (org, repo, branch))
@@ -681,15 +696,14 @@ class Database:
             (token or "").strip()
         now = _utcnow()
         with self._lock:
-            cur = self._conn.execute(
+            self._conn.execute(
                 "INSERT INTO repo_tokens (org, repo, token, created_at,"
                 " updated_at) VALUES (?, ?, ?, ?, ?)"
                 " ON CONFLICT(org, repo) DO UPDATE SET"
                 " token = excluded.token, updated_at = excluded.updated_at",
                 (org, repo, token, now, now))
             self._conn.commit()
-            if cur.lastrowid:
-                return cur.lastrowid
+            # 不依赖 cur.lastrowid：ON CONFLICT 走 UPDATE 分支时它是陈旧值
             row = self._one(
                 "SELECT id FROM repo_tokens WHERE org = ? AND repo = ?",
                 (org, repo))
@@ -710,6 +724,83 @@ class Database:
                 "SELECT token FROM repo_tokens WHERE org = ? AND repo = ?",
                 ((org or "").lower(), (repo or "").lower()))
         return row["token"] if row else None
+
+    # ── Token 规则与黑/白名单（path_token_rules / path_lists，设置页
+    #    自助配置；非空即覆盖来源仓里的同名 JSON 文件，为空回退文件） ──
+
+    def list_path_token_rules(self):
+        """全部 Token 规则条目，按 id（添加顺序）排序——resolve_token 取
+        第一个命中，顺序即优先级。返回行含明文 token，展示层负责脱敏。"""
+        with self._lock:
+            return self._all(
+                "SELECT * FROM path_token_rules ORDER BY id")
+
+    def upsert_path_token_rule(self, keyword, token):
+        """新增或更新 Token 规则（keyword 唯一）；返回条目 id。
+
+        keyword 规范化为小写：resolve_token 的包含匹配本身就是大小写
+        不敏感的，小写化避免「Ascend」/「ascend」两条等价规则并存。
+        """
+        keyword, token = (keyword or "").strip().lower(), (token or "").strip()
+        now = _utcnow()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO path_token_rules (keyword, token, created_at,"
+                " updated_at) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(keyword) DO UPDATE SET"
+                " token = excluded.token, updated_at = excluded.updated_at",
+                (keyword, token, now, now))
+            self._conn.commit()
+            # 不依赖 cur.lastrowid：ON CONFLICT 走 UPDATE 分支时它是陈旧值
+            row = self._one(
+                "SELECT id FROM path_token_rules WHERE keyword = ?",
+                (keyword,))
+            return row["id"]
+
+    def delete_path_token_rule(self, entry_id):
+        """按 id 删除条目；不存在返回 False。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM path_token_rules WHERE id = ?", (entry_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def list_path_list_entries(self, kind):
+        """某类名单（blacklist/whitelist）的全部条目（含 id，设置页用）。"""
+        with self._lock:
+            return self._all(
+                "SELECT * FROM path_lists WHERE kind = ? ORDER BY id",
+                (kind,))
+
+    def list_path_list(self, kind):
+        """某类名单的路径列表（runner 用，与 load_blacklist 返回同构）。"""
+        return [r["path"] for r in self.list_path_list_entries(kind)]
+
+    def add_path_list_entry(self, kind, path):
+        """新增名单条目（kind+path 唯一，重复添加幂等返回已有 id）。
+
+        path 规范化与 rules._load_path_list 一致：去空格、去首尾斜杠。
+        """
+        path = (path or "").strip().strip("/")
+        now = _utcnow()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO path_lists (kind, path, created_at)"
+                " VALUES (?, ?, ?)", (kind, path, now))
+            self._conn.commit()
+            # 不依赖 cur.lastrowid：IGNORE 跳过时它是陈旧值
+            row = self._one(
+                "SELECT id FROM path_lists WHERE kind = ? AND path = ?",
+                (kind, path))
+            return row["id"]
+
+    def delete_path_list_entry(self, entry_id):
+        """按 id 删除名单条目；不存在返回 False。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM path_lists WHERE id = ?", (entry_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
 
     # ── kv 配置（shadow 开关等） ─────────────────────────────
 

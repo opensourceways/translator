@@ -8,7 +8,8 @@
   （重启后也准确），不依赖 Worker 内存状态
 - Dashboard 页面与 /api/* 只读 JSON：TC_DASH_TOKEN 未配置时放开，配置后
   要求 X-Dash-Token 头或 ?token= query
-- POST /api/runs、/api/config/shadow、/api/settings/auto-pr*：
+- POST /api/runs、/api/config/shadow、/api/settings/*（auto-pr 开关、
+  仓库专属 token、token 规则、黑/白名单）：
   X-Admin-Token 管理端点；admin_token 未配置时放开（内部工具，默认
   内网部署），配置后校验
 
@@ -362,10 +363,17 @@ def create_app(settings=None):
         for t in tokens:
             v = t.pop("token")
             t["token_masked"] = (v[:4] + "***") if len(v) > 4 else "***"
+        token_rules = db.list_path_token_rules()
+        for r in token_rules:
+            v = r.pop("token")
+            r["token_masked"] = (v[:4] + "***") if len(v) > 4 else "***"
         return templates.TemplateResponse(
             request, "settings.html",
             _ctx(request, entries=db.list_auto_pr_entries(),
                  suggestions=suggestions, tokens=tokens,
+                 token_rules=token_rules,
+                 blacklist=db.list_path_list_entries("blacklist"),
+                 whitelist=db.list_path_list_entries("whitelist"),
                  admin_auth=bool(settings.admin_token)))
 
     @app.get("/api/settings/auto-pr", dependencies=dash)
@@ -463,6 +471,85 @@ def create_app(settings=None):
         if not db.delete_repo_token(entry_id):
             raise HTTPException(404, "条目不存在")
         log.info("仓库专属 Token 条目 #%d 已删除", entry_id)
+        return {"id": entry_id, "deleted": True}
+
+    # ── Token 规则与黑/白名单（设置页自助配置） ───────────────
+    # DB 非空即覆盖来源仓 token_rules.json / blacklist.json /
+    # whitelist.json；DB 为空时回退读文件（runner/prsync 生效语义）
+
+    @app.get("/api/settings/token-rules", dependencies=dash)
+    async def api_list_token_rules(request: Request):
+        """Token 规则列表；token 值只回掩码（前 4 位 + ***），不出库。"""
+        entries = request.app.state.db.list_path_token_rules()
+        for e in entries:
+            t = e.pop("token")
+            e["token_masked"] = (t[:4] + "***") if len(t) > 4 else "***"
+        return {"entries": entries}
+
+    @app.post("/api/settings/token-rules",
+              dependencies=[Depends(require_admin)])
+    async def api_add_token_rule(request: Request):
+        """新增/更新 Token 规则：{keyword, token}，两者必填。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        keyword = str(body.get("keyword") or "").strip()
+        token = str(body.get("token") or "").strip()
+        if not keyword or not token:
+            raise HTTPException(422, "body 需要非空字段 keyword 与 token")
+        db = request.app.state.db
+        entry_id = db.upsert_path_token_rule(keyword, token)
+        log.info("Token 规则 upsert：%s（值不落日志）", keyword.lower())
+        return {"id": entry_id, "keyword": keyword.lower()}
+
+    @app.delete("/api/settings/token-rules/{entry_id}",
+                dependencies=[Depends(require_admin)])
+    async def api_delete_token_rule(request: Request, entry_id: int):
+        db = request.app.state.db
+        if not db.delete_path_token_rule(entry_id):
+            raise HTTPException(404, "条目不存在")
+        log.info("Token 规则条目 #%d 已删除", entry_id)
+        return {"id": entry_id, "deleted": True}
+
+    @app.get("/api/settings/path-lists", dependencies=dash)
+    async def api_list_path_lists(request: Request):
+        """黑/白名单条目：{blacklist: [...], whitelist: [...]}。"""
+        db = request.app.state.db
+        return {"blacklist": db.list_path_list_entries("blacklist"),
+                "whitelist": db.list_path_list_entries("whitelist")}
+
+    @app.post("/api/settings/path-lists",
+              dependencies=[Depends(require_admin)])
+    async def api_add_path_list(request: Request):
+        """新增名单条目：{kind, path}，kind ∈ blacklist/whitelist。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        kind = str(body.get("kind") or "").strip()
+        path = str(body.get("path") or "").strip().strip("/")
+        if kind not in ("blacklist", "whitelist"):
+            raise HTTPException(422, "kind 必须是 blacklist 或 whitelist")
+        if not path:
+            raise HTTPException(422, "body 需要非空字段 path")
+        db = request.app.state.db
+        entry_id = db.add_path_list_entry(kind, path)
+        label = "拉黑名单" if kind == "blacklist" else "开放白名单"
+        log.info("%s新增条目：%s", label, path)
+        return {"id": entry_id, "kind": kind, "path": path}
+
+    @app.delete("/api/settings/path-lists/{entry_id}",
+                dependencies=[Depends(require_admin)])
+    async def api_delete_path_list(request: Request, entry_id: int):
+        db = request.app.state.db
+        if not db.delete_path_list_entry(entry_id):
+            raise HTTPException(404, "条目不存在")
+        log.info("名单条目 #%d 已删除", entry_id)
         return {"id": entry_id, "deleted": True}
 
     # ── 管理端点 ─────────────────────────────────────────────

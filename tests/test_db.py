@@ -791,3 +791,44 @@ class TestRepoTokens:
         assert db.delete_repo_token(entry_id) is True
         assert db.delete_repo_token(999) is False
         assert db.list_repo_tokens() == []
+
+
+class TestPathTokenRules:
+    """path_token_rules 表：Token 规则的增删查（关键字小写归一、保序）。"""
+
+    def test_upsert_list_delete(self, db):
+        id1 = db.upsert_path_token_rule("Ascend", "tok-a")
+        id2 = db.upsert_path_token_rule(" cann ", "tok-c")
+        rules = db.list_path_token_rules()
+        assert [r["keyword"] for r in rules] == ["ascend", "cann"]
+        assert rules[0]["token"] == "tok-a"
+        # 保序（resolve_token 取第一个命中，顺序即优先级）
+        assert [r["id"] for r in rules] == [id1, id2]
+        # 冲突更新（大小写不敏感关键字去重）
+        assert db.upsert_path_token_rule("ASCEND", "tok-a2") == id1
+        rules = db.list_path_token_rules()
+        assert len(rules) == 2 and rules[0]["token"] == "tok-a2"
+        # 删除
+        assert db.delete_path_token_rule(id1) is True
+        assert db.delete_path_token_rule(999) is False
+        assert [r["keyword"] for r in db.list_path_token_rules()] == ["cann"]
+
+
+class TestPathLists:
+    """path_lists 表：黑/白名单条目的增删查（kind 隔离、路径归一、幂等）。"""
+
+    def test_add_list_delete(self, db):
+        id1 = db.add_path_list_entry("blacklist", " /CANN/hccl/ ")
+        id2 = db.add_path_list_entry("blacklist", "Ascend/msprof")
+        id3 = db.add_path_list_entry("whitelist", "CANN/hccl")
+        assert db.list_path_list("blacklist") == [
+            "CANN/hccl", "Ascend/msprof"]
+        assert db.list_path_list("whitelist") == ["CANN/hccl"]
+        # 重复添加幂等，返回已有 id
+        assert db.add_path_list_entry("blacklist", "CANN/hccl") == id1
+        assert len(db.list_path_list_entries("blacklist")) == 2
+        # 删除
+        assert db.delete_path_list_entry(id2) is True
+        assert db.delete_path_list_entry(999) is False
+        assert db.list_path_list("blacklist") == ["CANN/hccl"]
+        assert db.list_path_list("whitelist") == ["CANN/hccl"]

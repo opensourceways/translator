@@ -561,3 +561,56 @@ class TestWorker:
         worker.stop()
         worker.join(timeout=5)
         assert not worker.alive
+
+
+class TestDbConfigOverride:
+    """设置页自助配置优先：DB 非空即覆盖来源仓同名文件，为空回退文件。"""
+
+    def test_db_token_rules_override_file(
+            self, settings, db, token_env, engine, auto_pr_on):
+        set_shadow(db, False)
+        db.upsert_path_token_rule("msprof", RULE_TOKEN)
+        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
+        execute_run(_push_trigger(), settings, db)
+        # 文件加载未被调用
+        engine.load_rules.assert_not_called()
+        assert engine.submit_repo.call_args.args[4] == RULE_TOKEN
+        # DB 规则也写进了 rules_cache（供 prsync）
+        from webapp import rules_cache
+        assert rules_cache.get_rules()[0]["keyword"] == "msprof"
+        assert rules_cache.get_rules()[0]["token"] == RULE_TOKEN
+
+    def test_empty_db_falls_back_to_file(
+            self, settings, db, token_env, engine):
+        set_shadow(db, True)
+        execute_run(_push_trigger(), settings, db)
+        engine.load_rules.assert_called_once()
+        engine.load_blacklist.assert_called_once()
+        engine.load_whitelist.assert_called_once()
+
+    def test_db_lists_override_file(
+            self, settings, db, token_env, engine):
+        set_shadow(db, True)
+        db.add_path_list_entry("blacklist", "CANN/hccl")
+        db.add_path_list_entry("whitelist", "Ascend/msprof")
+        execute_run(_push_trigger(), settings, db)
+        engine.load_blacklist.assert_not_called()
+        engine.load_whitelist.assert_not_called()
+        kw = engine.scan_changed.call_args.kwargs
+        assert kw["blacklist"] == ["CANN/hccl"]
+        assert kw["whitelist"] == ["Ascend/msprof"]
+
+    def test_db_rule_token_masked_in_log(
+            self, settings, db, token_env, engine, auto_pr_on):
+        """DB 规则里的 token 与其他秘密一样全链路脱敏。"""
+        set_shadow(db, False)
+        db.upsert_path_token_rule("msprof", RULE_TOKEN)
+        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
+        engine.submit_repo.side_effect = Exception(
+            f"push 失败 https://{RULE_TOKEN}@gitcode.com/x/y")
+        execute_run(_push_trigger(), settings, db)
+        run = db.list_runs()[0]
+        assert run["status"] == "partial"
+        repo = db.get_run_repos(run["id"])[0]
+        assert RULE_TOKEN not in (db.get_run(run["id"])["log"] or "")
+        assert RULE_TOKEN not in (repo["error"] or "")

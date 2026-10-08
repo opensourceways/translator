@@ -68,7 +68,7 @@ class Poller(threading.Thread):
 def _poll_once(db, settings):
     """执行一轮轮询：规则 → 已知 open PR 状态 → 影子模式 PR 发现 → 收尾。"""
     default_token = os.environ.get("GITCODE_TOKEN", "")
-    rules = _ensure_rules(default_token)
+    rules = _ensure_rules(db, default_token)
     used, polled = _poll_open_prs(db, rules, default_token,
                                   MAX_REPOS_PER_POLL)
     if is_shadow(db) and used < MAX_REPOS_PER_POLL:
@@ -78,12 +78,17 @@ def _poll_once(db, settings):
     db.cleanup_old_runs(CLEANUP_DAYS)
 
 
-def _ensure_rules(default_token):
-    """取 Token 规则：优先进程内缓存（runner 每次 run 后写入）。
+def _ensure_rules(db, default_token):
+    """取 Token 规则：设置页 DB 配置优先，其次进程内缓存（runner 每次
+    run 后写入）。
 
-    缓存为空（如服务重启后尚无 run）时回退 API 模式加载一次并回填缓存；
-    加载失败只告警，本轮全部使用默认 Token 继续。
+    DB 与缓存均为空（如服务重启后尚无 run 且未自助配置）时回退 API
+    模式加载一次并回填缓存；加载失败只告警，本轮全部使用默认 Token
+    继续。
     """
+    db_rules = db.list_path_token_rules()
+    if db_rules:
+        return db_rules
     rules = rules_cache.get_rules()
     if rules:
         return rules
