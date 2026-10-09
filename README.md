@@ -2,15 +2,18 @@
 
 译稿权威仓库（GitCode 私有仓库
 `Computing_Ecosystem_Docs/Computing_Ecosystem_Docs-EN`）有 Push 时，
-由 GitCode Webhook 触发 Jenkins 任务，无人值守地扫描译稿变更并向
-对应的目标社区仓库批量提交 Pull Request。
+GitCode Webhook 直接打到本服务，无人值守地扫描译稿变更并向对应的目标
+社区仓库批量提交 Pull Request；自带 Dashboard 监控每次运行与 PR 状态。
 
 ```mermaid
 flowchart LR
-    A[译稿权威仓库 Push] -->|Webhook: Push 事件| B[Jenkins Generic Webhook Trigger]
+    A[译稿权威仓库 Push] -->|Webhook: Push 事件| B[translator 服务<br/>合并队列 + Worker]
     B --> C[扫描: 全量 blob sha 对比]
     C -->|有变更的仓库| D[幂等提交: Fork → 固定分支 → 写文件 → PR]
     D --> E[目标社区仓库的 Pull Request]
+    B --> F[(SQLite)]
+    F --> G[Dashboard: 概览 / Runs / PR / 设置]
+    E -->|Poller 轮询状态| F
 ```
 
 ## 工作方式
@@ -20,146 +23,27 @@ flowchart LR
 - **单 commit 提交（幂等）**：同一仓库使用固定分支
   `translator/auto-<目标分支>`，每次以目标分支为基点本地重建该分支——
   全部变更译稿合并为**单个 commit** 后 force push（分支为工具独占，
-  重建安全；历史遗留的多 commit 分支也会被强制压缩为单 commit）。
-  内容无变化时不强推；目标仓库已存在同一 head/base 的未合并 PR 时
-  不重复创建，PR diff 随分支重建自动更新
+  重建安全）。内容无变化时不强推；目标仓库已存在同一 head/base 的
+  未合并 PR 时不重复创建，PR diff 随分支重建自动更新
 - **目标路径按仓改写**：个别目标仓库的内容根与源目录结构不同，按
-  `index.py` 中的 `TARGET_PATH_RULES` 改写（`CANN/docs` 补 `docs/` 前缀；
-  `CANN/release-management` 只有 master 分支、版本号是文件夹，拍平
-  `en/` 语言目录并在扩展名前补 `_en` 与中文并存）；未登记的仓库源路径
-  原样透传。对比与写入均用改写后的路径，下载译稿仍用源路径
+  `translator/index.py` 中的 `TARGET_PATH_RULES` 改写（`CANN/docs` 补
+  `docs/` 前缀；`CANN/release-management` 只有 master 分支、版本号是
+  文件夹，拍平 `en/` 语言目录并在扩展名前补 `_en` 与中文并存）；
+  未登记的仓库源路径原样透传。对比与写入均用改写后的路径
 - **Token 规则（权限管控）**：规则文件放在**译稿权威仓库**根目录
   `token_rules.json`，每次运行时读取；配置规则后只处理命中的仓库，
-  未配置时全部使用默认 Token
-- **开放白名单（范围管控）**：名单文件放在**译稿权威仓库**根目录
-  `whitelist.json`，每次运行时读取；名单非空时只处理命中的仓库
-  （目录路径相等或前缀匹配），未配置或名单为空时不限制开放范围。
-  用于「功能先只对某个仓库开放」这类灰度收口
-- **运行期无持久状态**：克隆与临时目录每次运行重建、结束即清，不在
-  Jenkins agent 上留缓存；API 只保留 Fork/同步/建 PR 等少量调用，
-  目录索引、文件对比、批量写入全部走本地 git（git 协议不受 API 限流约束）
+  未配置时全部使用默认 Token。服务模式下推荐改用设置页的
+  Token 池 + 仓库配置（见下文），精确到仓库且即时生效
+- **增量加速**：push 触发携带 before/after sha 时走增量 diff 缩小
+  扫描范围；sha 缺失或 diff 失败自动回退全量，宁多勿漏
 
-## 部署步骤
+## 部署（服务模式，推荐）
 
-### 1. 准备 GitCode 机器人账号与 Token
+常驻服务：内存队列合并入队 → 唯一 Worker 线程执行扫描/提交 → SQLite
+落库 → Dashboard 展示。默认**影子模式**（只记录、不提 PR），验证通过后
+运行时切换。
 
-PR 作者就是 Token 所属账号，请使用机器人账号而非个人账号。Token 需要：
-
-- 默认 Token：对译稿权威仓库有**读权限**，对未命中规则的目标社区仓库有
-  Fork/PR 权限
-- 规则 Token：对命中的目标社区仓库有 Fork/PR 权限（无需权威仓库读权限）
-
-### 2. Jenkins 侧配置
-
-1. 安装 **Generic Webhook Trigger** 插件
-2. 新建 Pipeline 任务，「Pipeline script from SCM」指向本仓库，
-   Script Path 填 `Jenkinsfile`
-3. 任务配置勾选「This project is parameterized」，添加 **Password Parameter**：
-   - Name：`GITCODE_TOKEN`，Default Value：默认 Token
-   - 每套规则 Token 再加一个密码参数，参数名与规则文件中的 `token_env`
-     一致（如 `GITCODE_TOKEN_MINDSTUDIO`）
-   - 密码参数在界面和构建日志中都会打码；参数会自动注入为构建环境变量
-
-### 3. GitCode 侧配置 Webhook
-
-译稿权威仓库 → 设置 → WebHooks → 添加：
-
-```
-https://<jenkins地址>/generic-webhook-trigger/invoke?token=translator-auto-pr
-```
-
-勾选 **Push 事件**。token 参数值与 Jenkinsfile 中 `GenericTrigger` 的
-`token` 一致，可自定义。
-
-### 4. 配置 Token 规则（可选）
-
-在**译稿权威仓库**根目录添加 `token_rules.json`：
-
-```json
-{
-  "rules": [
-    {"keyword": "MindStudio", "token_env": "GITCODE_TOKEN_MINDSTUDIO"},
-    {"keyword": "CANN", "token_env": "GITCODE_TOKEN_CANN"}
-  ]
-}
-```
-
-- `keyword`：对译稿目录完整路径（如 `Ascend/26.1.0/MindStudio/msprof`）
-  做大小写不敏感的包含匹配，命中第一条规则即生效
-- `token_env`：该规则 Token 的环境变量名（Jenkins 凭据注入），
-  **Token 本体不写入任何仓库**
-- 文件不存在时任务正常运行（全部使用默认 Token）；配置有效规则后，
-  未命中规则的仓库一律跳过不处理
-
-新增一套规则 = 规则文件加一行 + 任务配置加一个同名 Password Parameter。
-
-### 5. 配置开放白名单（可选，范围管控）
-
-> 注：本节约束 Jenkins/CLI 模式。服务化部署（Docker）不适用——哪些仓库
-> 参与统一由 `/settings` 页的仓库配置开关控制。
-
-需要在灰度阶段把功能收口到个别仓库（如「先只对 `sip` 仓库开放」）时，
-在**译稿权威仓库**根目录添加 `whitelist.json`：
-
-```json
-{
-  "repos": [
-    "CANN/9.1.0/sip"
-  ]
-}
-```
-
-- `repos`：开放的仓库级目录完整路径（与 `blacklist.json` 同构），
-  按「相等或前缀」匹配——条目为仓库级目录时精确命中，条目为高层目录
-  （如 `CANN/9.1.0`）时其下所有仓库级目录都放行
-- 名单**非空**时只处理命中的仓库，名单外一律跳过（不做对比也不建 PR）；
-  文件不存在或名单为空时不限制开放范围，全部仓库正常处理
-- 放开更多仓库 = 名单加一行；恢复全量 = 清空（或删除）文件，无需改代码
-- 与拉黑名单（`blacklist.json`）同时命中时**拉黑优先**（仍跳过）
-
-### 6. 没有权威仓库权限？用自己的 Fork 做来源
-
-没有权威仓库的管理权限（配不了 Webhook）时，可以把来源指向自己的 Fork：
-
-1. 在 GitCode 上 Fork `Computing_Ecosystem_Docs/Computing_Ecosystem_Docs-EN`
-   到自己的账号
-2. Webhook 配在 **Fork** 上（设置 → WebHooks → Push 事件），地址同上
-3. Jenkins 任务加一个 String Parameter：`GITCODE_SOURCE_REPO`，
-   Default Value 填 Fork 的完整路径（如 `myname/Computing_Ecosystem_Docs-EN`）
-4. Jenkinsfile 的运行命令加 `--sync-source`：Fork 不会自动跟进上游，
-   扫描前先同步，否则对比的是旧内容
-
-注意：Fork 模式下 Webhook 只对「推到 Fork 的提交」触发。生产环境的正道
-仍是让权威仓库管理员把 Webhook 加到权威仓库；过渡期可用 Fork +
-定时构建（cron）代替 Webhook。
-
-## 本地运行与测试
-
-```bash
-pip install -r requirements.txt
-export GITCODE_TOKEN=<默认 Token>
-python -m translator                 # 全量扫描并提交
-python -m translator --keyword msprof  # 按关键字缩小范围（调试）
-
-pip install -e ".[dev]"
-python -m pytest -v                     # 运行测试（全部 mock，不触网）
-```
-
-## 退出码
-
-| 退出码 | 含义 |
-|--------|------|
-| 0 | 成功（含「没有变更」） |
-| 1 | 运行失败：Token 缺失、规则文件损坏、扫描失败等 |
-| 2 | 扫描成功但部分仓库提交失败（Jenkins 判红，逐仓错误见日志） |
-
-## 服务化部署（Docker，替换 Jenkins）
-
-常驻服务模式：GitCode Webhook 直接打到本服务，内存队列合并入队后由唯一
-Worker 线程执行扫描/提交，SQLite 落库，自带 Dashboard 监控页面。
-默认**影子模式**（只记录、不提 PR），验证通过后运行时切换。
-
-### 快速开始
+### 快速开始（Docker Compose）
 
 ```bash
 cp .env.example .env
@@ -168,13 +52,18 @@ docker compose up -d --build
 curl http://localhost:8000/healthz   # {"status":"ok","shadow":true,...}
 ```
 
-### GitCode Webhook 配置
-
-译稿权威仓库 → 设置 → WebHooks → 添加（勾选 Push 事件）：
+GitCode Webhook 配置：译稿权威仓库 → 设置 → WebHooks → 添加
+（勾选 Push 事件）：
 
 ```
 http://<服务地址>:8000/webhook/gitcode?token=<TR_WEBHOOK_TOKEN 的值>
 ```
+
+### K8s 部署
+
+清单在 `deploy/k8s/`（Namespace/ConfigMap/PVC/Deployment/Service，
+Secret 仅模板需自行生成）。要点：单副本 + `Recreate` 策略 + RWO PVC
+挂 `/data`。数据迁移用 SQLite `.backup` 导出后 kubectl cp 进 PVC。
 
 ### 单实例约束（硬性）
 
@@ -188,7 +77,7 @@ http://<服务地址>:8000/webhook/gitcode?token=<TR_WEBHOOK_TOKEN 的值>
 ### 影子模式与切换流程
 
 - 默认 `TR_SHADOW=1`：run 照常克隆、扫描、落库，结果记为
-  `would_submit` 而不实际提 PR，用于与 Jenkins 并行验证
+  `would_submit` 而不实际提 PR，用于与旧 Jenkins 流水线并行验证
 - 切换为实际提交（影子开关持久化在 SQLite，重启不丢）：
 
 ```bash
@@ -198,13 +87,14 @@ curl -X POST http://localhost:8000/api/config/shadow \
   -d '{"enabled": false}'
 ```
 
-切换时**同时禁用 Jenkins job**（引擎幂等，短暂双跑会收敛），确认稳定后
-再删除 GitCode 上的 Jenkins webhook 并归档 Jenkins job。
+从 Jenkins 切换时**同时禁用 Jenkins job**（引擎幂等，短暂双跑会收敛），
+确认稳定后再删除 GitCode 上的 Jenkins webhook 并归档 Jenkins job。
 
-### Dashboard 与 API
+## Dashboard 与 API
 
-- 浏览器打开 `http://localhost:8000/`：汇总页；`/runs`、`/runs/{id}`、
-  `/prs` 为运行记录与 PR 状态页（`/prs` 按 社区 → 仓库 两级 tab 浏览）
+- 浏览器打开 `http://<服务地址>:8000/`：概览；`/runs`、`/runs/{id}`、
+  `/prs` 为运行记录与 PR 状态页（`/prs` 按 社区 → 仓库 两级 tab 浏览，
+  PR 状态含 CI 标签派生与下一步指引）
 - `/settings`：设置页，全部运行期配置都可在此自助修改：
   - **Token 池**：给 GitCode Token 起名保存，一个 token 可复用于多个
     仓库，轮换只改一处；保存在 SQLite，只显示掩码不回显明文
@@ -219,8 +109,7 @@ curl -X POST http://localhost:8000/api/config/shadow \
 - 只读 JSON：`/api/summary`、`/api/runs`、`/api/runs/{id}`、
   `/api/runs/{id}/log`、`/api/prs`、`/api/settings/repos`、
   `/api/settings/tokens`
-- 配置 `TR_DASH_TOKEN` 后页面与只读 API 都需鉴权；留空则放开（默认
-  部署在内网/反代后）
+- 配置 `TR_DASH_TOKEN` 后页面与只读 API 都需鉴权；留空则放开
 - 手动触发（Build Now 替代）：
 
 ```bash
@@ -230,15 +119,56 @@ curl -X POST http://localhost:8000/api/runs \
   -d '{"full_scan": true}'
 ```
 
-### 规则 Token 运维
+- 失败重提：run 详情页对 `submit_failed`/`error` 的仓库结果提供
+  「重试」按钮（整 run 也有「重试失败项」），对应
+  `POST /api/runs/{id}/retry`（`{path}` 重试单行走关键字扫，不带则
+  重试全部失败行）
 
-推荐在 `/settings` 页操作：Token 池里保存命名 Token，仓库配置里下拉
+### run 状态口径
+
+success / **partial**（扫描有 errors 或提交有 failed，非致命）/
+failed（致命）/ interrupted（重启僵尸恢复）。排查 partial：run 详情页
+仓库结果表的 error/submit_failed 行 + 完整日志（`/api/runs/{id}/log`，
+尾部保留 200KB，已脱敏）。
+
+### Token 运维
+
+推荐在 `/settings` 页操作：Token 池保存命名 Token，仓库配置下拉
 引用——立即生效、无需重建容器，控制精确到仓库。
 
 文件方式仍保留（批量/兜底）：`token_rules.json` 加一行规则后，`.env`
 加同名变量（变量名必须与规则的 `token_env` 一致），然后
 `docker compose up -d --build` 重建容器——env 进程级固定，不热加载。
 缺失的规则 token 只会告警跳过该规则，不会放大权限。
+
+## CLI / Jenkins 模式（历史）
+
+引擎包可脱离服务单独跑（Jenkinsfile 为 translator-ci 时代的存档参考）：
+
+```bash
+pip install -r requirements.txt
+export GITCODE_TOKEN=<默认 Token>
+python -m translator                   # 全量扫描并提交
+python -m translator --keyword msprof  # 按关键字缩小范围（调试）
+```
+
+CLI 模式额外支持权威仓根目录的 `whitelist.json`（开放白名单，相等或前缀
+匹配）与 `blacklist.json`（拉黑名单，两者同时命中时拉黑优先）——
+**均只在 CLI 模式生效**；服务模式的开放范围统一由设置页仓库配置开关
+控制（默认拒绝），等价且粒度更细。
+
+没有权威仓库的 Webhook 权限时，可用自己的 Fork 做来源：
+`GITCODE_SOURCE_REPO` 指向 Fork 完整路径，CLI 加 `--sync-source`
+（Fork 不会自动跟进上游，扫描前先同步）。
+
+退出码：0 成功（含「没有变更」）；1 运行失败；2 部分仓库提交失败。
+
+## 测试
+
+```bash
+pip install -e ".[dev]"
+python -m pytest -v                  # 全部 mock，不触网
+```
 
 ## 项目结构
 
@@ -247,19 +177,29 @@ translator/
 ├── Dockerfile             # python:3.12-slim + git，uvicorn 工厂模式（workers=1）
 ├── docker-compose.yml     # env_file + ./data:/data 持久化
 ├── .env.example           # 全部配置项模板（token 本体不落仓库）
-├── Jenkinsfile            # 声明式流水线（Webhook 触发，禁止并发构建）
-├── translator/
+├── Jenkinsfile            # 历史存档（translator-ci 时代），勿用于新部署
+├── CLAUDE.md              # AI 助手上手文档（硬性约束、配置约定）
+├── translator/            # 引擎包
 │   ├── cli.py             # 命令行入口（参数、退出码、stdout 日志）
-│   ├── service.py         # 业务编排：规则加载/扫描对比/幂等提交/Token 路由
-│   └── client.py          # GitCode REST API v5 客户端
-├── webapp/                # 常驻服务（FastAPI）
+│   ├── service.py         # 门面导出：规则加载/扫描对比/幂等提交/Token 路由
+│   ├── scan.py            # 变更扫描（全量 blob 对比 / 增量 diff）
+│   ├── submit.py          # 幂等提交：Fork → 固定分支 → 单 commit → PR
+│   ├── rules.py           # token_rules.json / whitelist / blacklist
+│   ├── localgit.py        # 目标仓本地浅克隆索引（git 协议，不受 API 限流）
+│   ├── index.py           # 目标路径改写规则 TARGET_PATH_RULES
+│   ├── client.py          # GitCode REST API v5 客户端
+│   └── common.py          # 公共常量（AUTO_BRANCH_PREFIX 等）
+├── webapp/                # 常驻服务（FastAPI，前后端一体化）
 │   ├── api.py             # create_app(settings)：webhook/Dashboard/API/启动恢复
 │   ├── runner.py          # Worker 线程：克隆→扫描→影子门控/逐仓提交→落库
 │   ├── prsync.py          # Poller 线程：轮询 open PR 状态
+│   ├── prstatus.py        # PR 派生状态（CI 标签 → 状态 + 下一步指引）
+│   ├── queueing.py        # push 合并队列（容量 1，latest-wins）
 │   ├── db.py              # SQLite 状态层（WAL + 单连接）
-│   ├── queueing.py        # 合并队列（latest-wins）
 │   ├── config.py          # Settings.from_env()
+│   ├── rules_cache.py     # 命名 token 路由缓存
 │   └── templates/         # Dashboard 页面（Jinja2 服务端渲染）
+├── deploy/k8s/            # K8s 清单（单副本 Recreate + RWO PVC）
 ├── tests/                 # pytest 单元测试（全部 mock，不发起真实请求）
 ├── pyproject.toml
 └── requirements.txt
