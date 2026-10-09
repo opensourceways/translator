@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docsync
+  namespace: docsync
+  labels:
+    app: docsync
+spec:
+  # 硬性约束：内存队列 + 全局唯一 Worker + 单 SQLite 连接，不可多副本
+  replicas: 1
+  # 滚动更新会造成新旧两实例同时写 SQLite，必须 Recreate
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: docsync
+  template:
+    metadata:
+      labels:
+        app: docsync
+    spec:
+      containers:
+        - name: docsync
+          image: docsync:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: docsync-config
+            - secretRef:
+                name: docsync-secret
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: docsync-data
