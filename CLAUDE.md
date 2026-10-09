@@ -1,0 +1,65 @@
+# CLAUDE.md
+
+本文件为 AI 助手（及新接手开发者）提供 translator 仓库的全局上下文。
+
+## 这是什么
+
+translator：GitCode 译稿自动提 PR 服务。监听译稿权威仓
+（Computing_Ecosystem_Docs/Computing_Ecosystem_Docs-EN）的 push webhook，
+扫描变更后向各社区目标仓自动 Fork/提交 PR，并提供 Dashboard 监控 PR 状态。
+替代原 Jenkins 流水线（translator-ci）。
+
+曾用名 translator-ci → docsync → translator（2026-10 两次改名，env 前缀
+相应为 TC_ → DS_ → TR_）。历史方案文档：
+/home/tools/.trae/documents/translator-服务化改造计划.md
+
+## 仓库结构
+
+| 目录/文件 | 说明 |
+| --- | --- |
+| `translator/` | 引擎包：client.py（GitCode API）、scan.py（变更扫描）、submit.py（提 PR）、rules.py（token 规则）、localgit.py（本地克隆索引）、service.py（门面导出）、cli.py |
+| `webapp/` | 服务层（FastAPI）：api.py（webhook/Dashboard/管理端点）、runner.py（Worker 执行编排）、queueing.py（push 合并队列）、prsync.py（PR 状态轮询）、prstatus.py（PR 派生状态）、db.py（SQLite）、rules_cache.py、templates/（Jinja2 页面） |
+| `tests/` | pytest，全部 mock 不触网 |
+| `deploy/k8s/` | K8s 清单（Namespace/ConfigMap/PVC/Deployment/Service；Secret 仅模板） |
+| `Dockerfile` `docker-compose.yml` | 一体化容器（前后端同进程，无独立前端） |
+| `Jenkinsfile` | 历史遗留（translator-ci 时代），仅存档参考，勿用于新部署 |
+
+## 常用命令
+
+```bash
+python3 -m pytest tests/ -q        # 全量测试（必须全绿再提交）
+docker compose up -d --build       # 本地运行（模板打进镜像，改代码/模板必须重建）
+curl localhost:8000/healthz        # 探活 + 影子状态 + 队列深度
+```
+
+## 硬性约束（改动前必读）
+
+- **单实例**：内存队列 + 全局唯一 Worker + 单 SQLite 连接。uvicorn 必须
+  `workers=1`，部署不可多副本；K8s 用单副本 + Recreate + RWO PVC
+- **SQLite 单写者**：改 db 文件名/路径前先停容器（`docker compose down`，
+  确认容器已删再动 data/，否则 WAL 里最近的 run 记录会丢）
+- **Secret 脱敏**：任何落库/落日志文本必须先过 `SecretMasker`；
+  clone 失败的 GitCodeError 会携带含 token 的 URL，是历史事故点
+- **`AUTO_BRANCH_PREFIX = "translator/auto-"` 不可改**：已有 open PR 的
+  head 分支去重依赖该前缀
+- git 命令统一 `-c core.quotepath=false`（中文路径否则解析出垃圾目录名，
+  见 commit 86c1746）
+
+## 配置约定
+
+- env 前缀 `TR_*`（见 .env）；`GITCODE_TOKEN` 为默认 token（必需）
+- 影子模式：`TR_SHADOW` 仅作首启种子，运行时真值在库中
+  （`POST /api/config/shadow` 或页面切换）；影子=全流程照跑但不建 PR
+- Token 路由优先级：仓库配置引用的命名 token（设置页维护）>
+  来源仓 token_rules.json > 默认 GITCODE_TOKEN
+- 仓库自动提 PR 门控：设置页 repo_configs，无条目/已禁用默认拒绝
+  （noop，stage=auto_pr_off）
+- 管理端点：`TR_ADMIN_TOKEN` 空则放开（内网默认）；前端 localStorage
+  键 `tc_admin_token` 与设置页共用
+
+## run 状态口径
+
+success / partial（扫描有 errors 或提交有 failed，非致命）/ failed（致命）/
+interrupted（重启僵尸恢复）。排查 partial：run 详情页仓库结果表
+error/submit_failed 行 + 完整日志（`/api/runs/{id}/log`，尾部 200KB）。
+失败项可在 run 详情页一键重试（`POST /api/runs/{id}/retry`）。
