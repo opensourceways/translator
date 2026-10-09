@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Run #{{ run.id }} - docsync{% endblock %}
 {% block content %}
-<h1>Run #{{ run.id }} <span class="badge {{ run.status }}" id="run-status">{{ run.status }}</span>{% if run.shadow %} <span class="badge shadow">影子</span>{% endif %}</h1>
+<h1>Run #{{ run.id }} <span class="badge {{ run.status }}" id="run-status">{{ run.status }}</span>{% if run.shadow %} <span class="badge shadow">影子</span>{% endif %}
+{% if run.status != 'running' and (run.failed_count or run.error_count) %}
+<button id="retry-all" class="btn" style="margin-left:12px">重试失败项</button>
+{% endif %}</h1>
 <dl class="meta">
   <dt>触发</dt><dd>{{ run.trigger }}</dd>
   {% if run.keyword %}<dt>关键字</dt><dd>{{ run.keyword }}</dd>{% endif %}
@@ -15,7 +18,7 @@
 </dl>
 <h2>仓库结果</h2>
 <table>
-<thead><tr><th>路径</th><th>仓库</th><th>分支</th><th>状态</th><th>新增/更新</th><th>PR</th><th>原因/错误</th></tr></thead>
+<thead><tr><th>路径</th><th>仓库</th><th>分支</th><th>状态</th><th>新增/更新</th><th>PR</th><th>原因/错误</th><th>操作</th></tr></thead>
 <tbody>
 {% for r in repos %}
 <tr>
@@ -26,9 +29,10 @@
   <td>+{{ r.new_count }} ~{{ r.update_count }}</td>
   <td>{% if r.pr_url %}<a href="{{ r.pr_url }}">#{{ r.pr_number }}</a>{% elif r.pr_number %}#{{ r.pr_number }}{% endif %}</td>
   <td>{{ r.reason or r.error or '' }}</td>
+  <td>{% if run.status != 'running' and r.status in ('submit_failed', 'error') %}<button class="btn small retry-btn" data-path="{{ r.path or '' }}">重试</button>{% endif %}</td>
 </tr>
 {% else %}
-<tr><td colspan="7" class="muted">无仓库结果</td></tr>
+<tr><td colspan="8" class="muted">无仓库结果</td></tr>
 {% endfor %}
 </tbody>
 </table>
@@ -38,6 +42,40 @@
 {% block script %}
 <script>
 const RUN_ID = {{ run.id }};
+
+// 重试失败项：入队一次新 run（单路径走关键字扫，全部失败项视路径数而定）。
+// admin token 与设置页共用 localStorage；未配置 admin token 的部署直接放行。
+function adminHeaders() {
+  return { 'Content-Type': 'application/json',
+           'X-Admin-Token': localStorage.getItem('tc_admin_token') || '' };
+}
+async function retry(path) {
+  const label = path ? ('「' + path + '」') : '全部失败项';
+  if (!confirm('确认重试' + label + '？将入队一次新的扫描/提交 run。')) return;
+  try {
+    const r = await fetch(withToken('/api/runs/' + RUN_ID + '/retry'), {
+      method: 'POST', headers: adminHeaders(),
+      body: JSON.stringify(path ? { path: path } : {}) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      if (r.status === 403) {
+        alert('需要管理 token：请到「设置」页输入 DS_ADMIN_TOKEN 后再试');
+      } else {
+        alert('重试失败：' + (data.detail || r.status));
+      }
+      return;
+    }
+    alert('已入队' + (data.keyword ? ('（关键字：' + data.keyword + '）')
+                                   : '（全量扫描）') +
+          '，新 run 稍后出现在 Runs 列表');
+    location.href = withToken('/runs');
+  } catch (e) { alert('重试请求失败：' + e); }
+}
+const retryAll = document.getElementById('retry-all');
+if (retryAll) retryAll.addEventListener('click', () => retry(''));
+document.querySelectorAll('.retry-btn').forEach(b =>
+  b.addEventListener('click', () => retry(b.dataset.path)));
+
 async function refresh() {
   try {
     const detail = await (await fetch(withToken('/api/runs/' + RUN_ID))).json();

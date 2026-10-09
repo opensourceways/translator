@@ -505,6 +505,52 @@ def create_app(settings=None):
         return JSONResponse({"queued": queued, "full_scan": trigger.full_scan,
                              "keyword": trigger.keyword}, status_code=202)
 
+    @app.post("/api/runs/{run_id}/retry",
+              dependencies=[Depends(require_admin)])
+    async def api_retry_run(request: Request, run_id: int):
+        """重提失败项：把该 run 中失败（submit_failed/error）的仓库重新入队。
+
+        body 可带 {path} 精确重试单行；不带 path 则重试全部失败行。
+        重试复用关键字扫描：单路径 keyword=path（子串匹配，可能带出同
+        前缀的兄弟路径，多扫无害）；多个失败路径关键字互不覆盖，入队
+        全量扫（与队列合并语义一致，宁多勿漏，未变更的仓库扫描后自然
+        unchanged 不会重复提 PR）。新 run 按当前影子开关执行。
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        path = str(body.get("path") or "").strip()
+        db = request.app.state.db
+        run = db.get_run(run_id)
+        if run is None:
+            raise HTTPException(404, "run 不存在")
+        if run["status"] == "running":
+            raise HTTPException(409, "run 仍在执行中，结束后再重试")
+        failed = [r for r in db.get_run_repos(run_id)
+                  if r["status"] in ("submit_failed", "error")]
+        if path:
+            if not any(r.get("path") == path for r in failed):
+                raise HTTPException(
+                    422, f"路径 {path!r} 不是该 run 的失败项，不能重试")
+            trigger = Trigger.manual(keyword=path)
+        else:
+            if not failed:
+                raise HTTPException(422, "该 run 没有可重试的失败项")
+            paths = {r.get("path") for r in failed if r.get("path")}
+            trigger = (Trigger.manual(keyword=paths.pop())
+                       if len(paths) == 1
+                       else Trigger.manual(full_scan=True))
+        queued = request.app.state.queue.push(trigger)
+        log.info("run #%d 重试入队：keyword=%r full_scan=%s（来源 %s）",
+                 run_id, trigger.keyword, trigger.full_scan,
+                 path or "全部失败项")
+        return JSONResponse(
+            {"queued": queued, "keyword": trigger.keyword,
+             "full_scan": trigger.full_scan}, status_code=202)
+
     @app.post("/api/config/shadow", dependencies=[Depends(require_admin)])
     async def api_set_shadow(request: Request):
         """影子开关：{enabled: bool} 持久化到 config 表。"""
