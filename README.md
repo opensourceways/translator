@@ -174,7 +174,7 @@ python -m pytest -v                  # 全部 mock，不触网
 
 ```
 translator/
-├── Dockerfile             # python:3.12-slim + git，uvicorn 工厂模式（workers=1）
+├── Dockerfile             # openEuler 24.03 + git（Python 3.11），uvicorn 工厂模式（workers=1）
 ├── docker-compose.yml     # env_file + ./data:/data 持久化
 ├── .env.example           # 全部配置项模板（token 本体不落仓库）
 ├── Jenkinsfile            # 历史存档（translator-ci 时代），勿用于新部署
