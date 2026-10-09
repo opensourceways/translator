@@ -51,15 +51,15 @@ Ascend/26.1.0/MindStudio/msprof/docs/en/guide.md：
 任意阶段失败立即返回错误信息，已写入的文件不会回滚。
 """
 
-from docsync import client
-from docsync.common import (
+from translator import client
+from translator.common import (
     DEFAULT_RULES_PATH,
     DEFAULT_BLACKLIST_PATH,
     DEFAULT_WHITELIST_PATH,
     ConfigError,
 )
-from docsync.rules import (
+from translator.rules import (
     load_token_rules, load_blacklist, load_whitelist)
-from docsync.index import sync_source
-from docsync.scan import scan_changed
-from docsync.submit import submit_repo, submit_all
+from translator.index import sync_source
+from translator.scan import scan_changed
+from translator.submit import submit_repo, submit_all

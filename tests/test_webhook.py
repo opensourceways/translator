@@ -755,7 +755,7 @@ def _seed_failed_run(db_path, paths, run_status="partial"):
 class TestRetryRun:
     def test_retry_single_path_keyword(self, tmp_path, monkeypatch):
         """带 path 重试：入队该路径的关键字扫（非全量）。"""
-        run_id = _seed_failed_run(tmp_path / "data" / "docsync.db",
+        run_id = _seed_failed_run(tmp_path / "data" / "translator.db",
                                   ["Ascend/MindCluster", "Kunpeng/docs"])
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
@@ -769,7 +769,7 @@ class TestRetryRun:
 
     def test_retry_all_single_failed_path(self, tmp_path, monkeypatch):
         """不带 path 且只有一个失败路径：入队关键字扫。"""
-        run_id = _seed_failed_run(tmp_path / "data" / "docsync.db",
+        run_id = _seed_failed_run(tmp_path / "data" / "translator.db",
                                   ["Ascend/MindCluster"])
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
@@ -780,7 +780,7 @@ class TestRetryRun:
 
     def test_retry_all_multiple_paths_full_scan(self, tmp_path, monkeypatch):
         """多个失败路径：关键字互不覆盖，入队全量扫（宁多勿漏）。"""
-        run_id = _seed_failed_run(tmp_path / "data" / "docsync.db",
+        run_id = _seed_failed_run(tmp_path / "data" / "translator.db",
                                   ["Ascend/MindCluster", "Kunpeng/docs"])
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
@@ -792,7 +792,7 @@ class TestRetryRun:
 
     def test_retry_no_failed_rows_422(self, tmp_path, monkeypatch):
         """run 无失败项：422 且不入队。"""
-        run_id = _seed_run(tmp_path / "data" / "docsync.db")
+        run_id = _seed_run(tmp_path / "data" / "translator.db")
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
             r = client.post(f"/api/runs/{run_id}/retry", json={})
@@ -801,7 +801,7 @@ class TestRetryRun:
 
     def test_retry_path_not_failed_422(self, tmp_path, monkeypatch):
         """path 不属于该 run 的失败项：422。"""
-        run_id = _seed_failed_run(tmp_path / "data" / "docsync.db",
+        run_id = _seed_failed_run(tmp_path / "data" / "translator.db",
                                   ["Ascend/MindCluster"])
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
@@ -812,7 +812,7 @@ class TestRetryRun:
 
     def test_retry_running_conflict_409(self, tmp_path, monkeypatch):
         """run 仍在执行中：409 不入队。"""
-        run_id = _seed_failed_run(tmp_path / "data" / "docsync.db",
+        run_id = _seed_failed_run(tmp_path / "data" / "translator.db",
                                   ["Ascend/MindCluster"])
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
@@ -831,7 +831,7 @@ class TestRetryRun:
 
     def test_retry_requires_admin_token(self, tmp_path, monkeypatch):
         """配置 admin_token 后：缺/错 token 一律 403。"""
-        run_id = _seed_failed_run(tmp_path / "data" / "docsync.db",
+        run_id = _seed_failed_run(tmp_path / "data" / "translator.db",
                                   ["Ascend/MindCluster"])
         settings = _make_settings(tmp_path, admin_token="adm")
         with _client(settings, monkeypatch) as (client, app, _, _):

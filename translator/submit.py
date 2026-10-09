@@ -18,9 +18,9 @@ import shutil
 import tempfile
 import time
 
-from docsync import client, localgit
-from docsync.common import AUTO_BRANCH_PREFIX
-from docsync.rules import resolve_token, _effective_rules
+from translator import client, localgit
+from translator.common import AUTO_BRANCH_PREFIX
+from translator.rules import resolve_token, _effective_rules
 
 
 def _find_existing_fork(org, repo, username, token):
@@ -291,7 +291,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
     head_branch = f"{AUTO_BRANCH_PREFIX}{branch}"
     dest_dir = os.path.join(
         tempfile.gettempdir(),
-        f"docsync-{org}-{repo}-{head_branch}".replace(os.sep, "-"))
+        f"translator-{org}-{repo}-{head_branch}".replace(os.sep, "-"))
     log(f"正在写入 {len(files)} 个文件（合并为单个 commit）...")
     try:
         result = localgit.rebuild_branch(
@@ -340,7 +340,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
 
     # ── 阶段 6：创建 Pull Request ──
     pr_title, pr_body = _make_pr_title_body(succeeded)
-    marker = "由 docsync 服务自动提交"
+    marker = "由 translator 服务自动提交"
     pr_body = f"{pr_body}\n\n---\n{marker}" if pr_body else marker
 
     log("正在创建 PR...")

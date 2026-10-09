@@ -18,8 +18,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from docsync import client, common, index, localgit, rules, scan, submit
-from docsync.client import GitCodeError
+from translator import client, common, index, localgit, rules, scan, submit
+from translator.client import GitCodeError
 
 SILENT = lambda msg: None  # 测试中静默日志
 
@@ -31,8 +31,8 @@ def _patch_scan_client(client_mock):
     目录索引（_list_subdirs/_collect_dirs/_walk_files）在 index 模块、
     文件对比在 scan 模块，两个模块的 client 都要替换，避免真实网络请求。
     """
-    with patch("docsync.scan.client", client_mock), \
-            patch("docsync.index.client", client_mock):
+    with patch("translator.scan.client", client_mock), \
+            patch("translator.index.client", client_mock):
         yield
 
 
@@ -201,7 +201,7 @@ class TestLoadTokenRules:
     def test_file_missing_returns_empty(self):
         client_mock = _make_client_mock()
         client_mock.get_file_text.side_effect = GitCodeError(404, "Not Found")
-        with patch("docsync.rules.client", client_mock):
+        with patch("translator.rules.client", client_mock):
             loaded = rules.load_token_rules("tok", log=SILENT)
             assert loaded == []
 
@@ -210,7 +210,7 @@ class TestLoadTokenRules:
         text = json.dumps({"rules": [
             {"keyword": "MindStudio", "token_env": "GITCODE_TOKEN_MINDSTUDIO"},
         ]})
-        with patch("docsync.rules.client",
+        with patch("translator.rules.client",
                    self._mock_with_rules(text)):
             loaded = rules.load_token_rules("tok", log=SILENT)
             assert loaded == [{"keyword": "MindStudio", "token": "tokA"}]
@@ -220,7 +220,7 @@ class TestLoadTokenRules:
         text = json.dumps({"rules": [
             {"keyword": "MindStudio", "token_env": "GITCODE_TOKEN_MINDSTUDIO"},
         ]})
-        with patch("docsync.rules.client",
+        with patch("translator.rules.client",
                    self._mock_with_rules(text)):
             loaded = rules.load_token_rules("tok", log=SILENT)
             assert loaded == []
@@ -230,19 +230,19 @@ class TestLoadTokenRules:
             {"keyword": "MindStudio"},
             "not-a-dict",
         ]})
-        with patch("docsync.rules.client",
+        with patch("translator.rules.client",
                    self._mock_with_rules(text)):
             loaded = rules.load_token_rules("tok", log=SILENT)
             assert loaded == []
 
     def test_invalid_json_raises_config_error(self):
-        with patch("docsync.rules.client",
+        with patch("translator.rules.client",
                    self._mock_with_rules("{not json")):
             with pytest.raises(common.ConfigError):
                 rules.load_token_rules("tok", log=SILENT)
 
     def test_missing_rules_key_raises_config_error(self):
-        with patch("docsync.rules.client",
+        with patch("translator.rules.client",
                    self._mock_with_rules(json.dumps({"foo": []}))):
             with pytest.raises(common.ConfigError):
                 rules.load_token_rules("tok", log=SILENT)
@@ -259,7 +259,7 @@ class TestBlacklist:
     def test_file_missing_returns_empty(self):
         client_mock = _make_client_mock()
         client_mock.get_file_text.side_effect = GitCodeError(404, "Not Found")
-        with patch("docsync.rules.client", client_mock):
+        with patch("translator.rules.client", client_mock):
             loaded = rules.load_blacklist("tok", log=SILENT)
             assert loaded == []
 
@@ -268,26 +268,26 @@ class TestBlacklist:
             "Ascend/docs",
             "Ascend/release-management",
         ]})
-        with patch("docsync.rules.client",
+        with patch("translator.rules.client",
                    self._mock_with_blacklist(text)):
             loaded = rules.load_blacklist("tok", log=SILENT)
             assert loaded == ["Ascend/docs", "Ascend/release-management"]
 
     def test_empty_or_blank_entries_skipped(self):
         text = json.dumps({"repos": ["Ascend/docs", "", "  "]})
-        with patch("docsync.rules.client",
+        with patch("translator.rules.client",
                    self._mock_with_blacklist(text)):
             loaded = rules.load_blacklist("tok", log=SILENT)
             assert loaded == ["Ascend/docs"]
 
     def test_invalid_json_raises_config_error(self):
-        with patch("docsync.rules.client",
+        with patch("translator.rules.client",
                    self._mock_with_blacklist("{not json")):
             with pytest.raises(common.ConfigError):
                 rules.load_blacklist("tok", log=SILENT)
 
     def test_missing_repos_key_raises_config_error(self):
-        with patch("docsync.rules.client",
+        with patch("translator.rules.client",
                    self._mock_with_blacklist(json.dumps({"foo": []}))):
             with pytest.raises(common.ConfigError):
                 rules.load_blacklist("tok", log=SILENT)
@@ -305,33 +305,33 @@ class TestWhitelist:
         """白名单缺失视为不限制开放范围（与黑名单缺失一致，不报错）。"""
         client_mock = _make_client_mock()
         client_mock.get_file_text.side_effect = GitCodeError(404, "Not Found")
-        with patch("docsync.rules.client", client_mock):
+        with patch("translator.rules.client", client_mock):
             loaded = rules.load_whitelist("tok", log=SILENT)
             assert loaded == []
 
     def test_valid_whitelist_loaded(self):
         text = json.dumps({"repos": ["CANN/9.1.0/sip"]})
-        with patch("docsync.rules.client",
+        with patch("translator.rules.client",
                    self._mock_with_whitelist(text)):
             loaded = rules.load_whitelist("tok", log=SILENT)
             assert loaded == ["CANN/9.1.0/sip"]
 
     def test_empty_or_blank_entries_skipped(self):
         text = json.dumps({"repos": ["CANN/9.1.0/sip", "", "  "]})
-        with patch("docsync.rules.client",
+        with patch("translator.rules.client",
                    self._mock_with_whitelist(text)):
             loaded = rules.load_whitelist("tok", log=SILENT)
             assert loaded == ["CANN/9.1.0/sip"]
 
     def test_invalid_json_raises_config_error(self):
         """配置损坏不能静默放行（否则可能意外放开全部仓库）。"""
-        with patch("docsync.rules.client",
+        with patch("translator.rules.client",
                    self._mock_with_whitelist("{not json")):
             with pytest.raises(common.ConfigError):
                 rules.load_whitelist("tok", log=SILENT)
 
     def test_missing_repos_key_raises_config_error(self):
-        with patch("docsync.rules.client",
+        with patch("translator.rules.client",
                    self._mock_with_whitelist(json.dumps({"foo": []}))):
             with pytest.raises(common.ConfigError):
                 rules.load_whitelist("tok", log=SILENT)
@@ -372,7 +372,7 @@ class TestSyncSource:
     def test_authoritative_source_skips(self, monkeypatch):
         monkeypatch.delenv("GITCODE_SOURCE_REPO", raising=False)
         client_mock = self._client_mock()
-        with patch("docsync.index.client", client_mock):
+        with patch("translator.index.client", client_mock):
             index.sync_source("tok", log=SILENT)
             client_mock.sync_repo.assert_not_called()
 
@@ -380,7 +380,7 @@ class TestSyncSource:
         monkeypatch.setenv("GITCODE_SOURCE_REPO", "user/fork")
         client_mock = self._client_mock()
         client_mock.get_sync_status.return_value = {"repo_sync_result": True}
-        with patch("docsync.index.client", client_mock):
+        with patch("translator.index.client", client_mock):
             index.sync_source("tok", log=SILENT)
             client_mock.sync_repo.assert_called_once_with("user", "fork", "tok")
             client_mock.get_sync_status.assert_called_once()
@@ -389,7 +389,7 @@ class TestSyncSource:
         monkeypatch.setenv("GITCODE_SOURCE_REPO", "user/fork")
         client_mock = self._client_mock()
         client_mock.sync_repo.side_effect = GitCodeError(400, "not a fork")
-        with patch("docsync.index.client", client_mock):
+        with patch("translator.index.client", client_mock):
             index.sync_source("tok", log=SILENT)  # 不应抛异常
 
 
@@ -775,8 +775,8 @@ class TestSubmitRepo:
         # 提交：files 原样传给 rebuild_branch（base64 字节流不解码不重编码）
         submit_client = _make_submit_client_mock()
         localgit_mock = _make_localgit_mock()
-        with patch("docsync.submit.client", submit_client), \
-                patch("docsync.submit.localgit", localgit_mock):
+        with patch("translator.submit.client", submit_client), \
+                patch("translator.submit.localgit", localgit_mock):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", [gif_entry], "tok", log=SILENT)
         assert result["ok"] is True
@@ -787,8 +787,8 @@ class TestSubmitRepo:
     def test_success_rebuilds_branch_and_creates_pr(self):
         client_mock = _make_submit_client_mock()
         localgit_mock = _make_localgit_mock()
-        with patch("docsync.submit.client", client_mock), \
-                patch("docsync.submit.localgit", localgit_mock):
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit", localgit_mock):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
@@ -809,7 +809,7 @@ class TestSubmitRepo:
             assert pr_kwargs.args[3] == "bot:translator/auto-26.1.0"
             assert pr_kwargs.args[4] == "26.1.0"
             assert pr_kwargs.kwargs["fork_path"] == "bot/MindStudio-Profiler"
-            assert "docsync" in pr_kwargs.args[5]
+            assert "translator" in pr_kwargs.args[5]
 
     def test_legacy_history_rewrite_reported_as_push(self):
         """存量碎 commit 分支的历史压缩：rebuild 返回 pushed=True、written 空，
@@ -822,8 +822,8 @@ class TestSubmitRepo:
             "head": {"label": "bot:translator/auto-26.1.0"},
             "base": {"ref": "26.1.0"},
         }]
-        with patch("docsync.submit.client", client_mock), \
-                patch("docsync.submit.localgit", localgit_mock):
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit", localgit_mock):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
@@ -834,8 +834,8 @@ class TestSubmitRepo:
         """历史压缩后无已开 PR：没有可展示的 diff，不创建空 PR。"""
         client_mock = _make_submit_client_mock()
         localgit_mock = _make_localgit_mock(pushed=True, written=[])
-        with patch("docsync.submit.client", client_mock), \
-                patch("docsync.submit.localgit", localgit_mock):
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit", localgit_mock):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
@@ -860,8 +860,8 @@ class TestSubmitRepo:
         """分支内容已是最新（rebuild 未推送）且无 PR：纯幂等空转。"""
         client_mock = _make_submit_client_mock()
         localgit_mock = _make_localgit_mock(pushed=False, written=[])
-        with patch("docsync.submit.client", client_mock), \
-                patch("docsync.submit.localgit", localgit_mock):
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit", localgit_mock):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
@@ -879,8 +879,8 @@ class TestSubmitRepo:
                      "ref": "translator/auto-26.1.0"},
             "base": {"ref": "26.1.0"},
         }]
-        with patch("docsync.submit.client", client_mock), \
-                patch("docsync.submit.localgit", _make_localgit_mock()):
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit", _make_localgit_mock()):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
@@ -902,8 +902,8 @@ class TestSubmitRepo:
             "head": {"label": "bot:translator/auto-master"},
             "base": {"ref": "master"},
         }]
-        with patch("docsync.submit.client", client_mock), \
-                patch("docsync.submit.localgit", _make_localgit_mock()):
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit", _make_localgit_mock()):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["pr_existed"] is False
@@ -918,8 +918,8 @@ class TestSubmitRepo:
             "head": {"label": "bot:translator/auto-26.1.0"},
             "base": {"ref": "26.1.0"},
         }]
-        with patch("docsync.submit.client", client_mock), \
-                patch("docsync.submit.localgit",
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit",
                       _make_localgit_mock(pushed=False, written=[])):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
@@ -933,8 +933,8 @@ class TestSubmitRepo:
         client_mock.create_pr.side_effect = GitCodeError(
             409, '{"error_code":409,"error_message":"Another open merge '
                  'request already exists for this source branch: !443"}')
-        with patch("docsync.submit.client", client_mock), \
-                patch("docsync.submit.localgit", _make_localgit_mock()):
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit", _make_localgit_mock()):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
@@ -948,8 +948,8 @@ class TestSubmitRepo:
         client_mock.list_branches.side_effect = (
             lambda owner, repo, token: [{"name": "master"}]
         )
-        with patch("docsync.submit.client", client_mock), \
-                patch("docsync.submit.localgit", _make_localgit_mock()):
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit", _make_localgit_mock()):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is False
@@ -961,8 +961,8 @@ class TestSubmitRepo:
         localgit_mock = _make_localgit_mock()
         localgit_mock.rebuild_branch.side_effect = GitCodeError(
             200, "git checkout -B 失败: 分支不存在")
-        with patch("docsync.submit.client", client_mock), \
-                patch("docsync.submit.localgit", localgit_mock):
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit", localgit_mock):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is False
@@ -972,8 +972,8 @@ class TestSubmitRepo:
     def test_get_user_failure(self):
         client_mock = _make_submit_client_mock()
         client_mock.get_user.side_effect = GitCodeError(401, "Unauthorized")
-        with patch("docsync.submit.client", client_mock), \
-                patch("docsync.submit.localgit", _make_localgit_mock()):
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit", _make_localgit_mock()):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is False
@@ -989,8 +989,8 @@ class TestSubmitRepo:
         # 全量同步后目标分支立即出现在 Fork 上（免于轮询等待）
         client_mock.list_branches.side_effect = lambda owner, repo, token: [
             {"name": "26.1.0", "commit": {"sha": "abc123"}}]
-        with patch("docsync.submit.client", client_mock), \
-                patch("docsync.submit.localgit", _make_localgit_mock()):
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit", _make_localgit_mock()):
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
@@ -1015,9 +1015,9 @@ class TestSubmitRepo:
             return [{"name": "26.1.0"}] if calls["n"] >= 3 else []
 
         client_mock.list_branches.side_effect = list_branches
-        with patch("docsync.submit.client", client_mock), \
-                patch("docsync.submit.localgit", _make_localgit_mock()), \
-                patch("docsync.submit.time.sleep") as sleep_mock:
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit", _make_localgit_mock()), \
+                patch("translator.submit.time.sleep") as sleep_mock:
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
@@ -1271,7 +1271,7 @@ class TestListTree:
 
     def test_walks_contents_recursively(self):
         """从根目录出发递归收集全部文件路径，目录不入结果。"""
-        from docsync import client as client_mod
+        from translator import client as client_mod
 
         dirs = {
             "": [
@@ -1296,7 +1296,7 @@ class TestListTree:
 
     def test_walk_failure_propagates(self):
         """任一目录查询失败即抛错，由调用方跳过清理（宁可不删，不可误删）。"""
-        from docsync import client as client_mod
+        from translator import client as client_mod
 
         def list_dir(owner, repo, path, ref, token):
             if path == "en":
@@ -1395,9 +1395,9 @@ def _local_mode_mocks(source_tree, target_trees, source_dir="/src"):
         return target_trees.get(os.path.basename(repo_dir), {})
 
     patches = [
-        patch("docsync.localgit.clone", clone_mock),
-        patch("docsync.localgit.tree_map", side_effect=tree_map),
-        patch("docsync.localgit.cat_blob", cat_blob_mock),
+        patch("translator.localgit.clone", clone_mock),
+        patch("translator.localgit.tree_map", side_effect=tree_map),
+        patch("translator.localgit.cat_blob", cat_blob_mock),
     ]
     return patches, clone_mock, cat_blob_mock
 
@@ -1413,8 +1413,8 @@ def _incremental_mocks(changed_paths, error=None):
     diff_mock = MagicMock(
         side_effect=error) if error else MagicMock(return_value=changed_paths)
     patches = [
-        patch("docsync.localgit.fetch_commit", fetch_mock),
-        patch("docsync.localgit.diff_paths", diff_mock),
+        patch("translator.localgit.fetch_commit", fetch_mock),
+        patch("translator.localgit.diff_paths", diff_mock),
     ]
     return patches, fetch_mock, diff_mock
 
@@ -1597,7 +1597,7 @@ class TestScanChangedLocalMode:
         patches, clone_mock, cat_blob_mock = _local_mode_mocks(
             source_tree, {})
         cat_blob_mock.return_value = big
-        with patch("docsync.scan.MAX_TOTAL_SIZE", 40 * 1024 * 1024), \
+        with patch("translator.scan.MAX_TOTAL_SIZE", 40 * 1024 * 1024), \
                 _patch_scan_client(client_mock), ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
@@ -1828,7 +1828,7 @@ class TestLoadTokenRulesLocal:
     """本地化模式：规则文件从本地克隆读取（git show），失败路径同 API。"""
 
     def test_reads_from_local_clone(self):
-        with patch("docsync.localgit.read_file",
+        with patch("translator.localgit.read_file",
                    return_value=b'{"rules": []}') as read_mock:
             loaded = rules.load_token_rules("tok", log=SILENT,
                                             source_repo_dir="/src")
@@ -1836,7 +1836,7 @@ class TestLoadTokenRulesLocal:
             read_mock.assert_called_once_with("/src", "token_rules.json")
 
     def test_missing_file_returns_empty(self):
-        with patch("docsync.localgit.read_file",
+        with patch("translator.localgit.read_file",
                    side_effect=GitCodeError(404, "missing")):
             loaded = rules.load_token_rules("tok", log=SILENT,
                                             source_repo_dir="/src")
@@ -1847,14 +1847,14 @@ class TestLoadTokenRulesLocal:
         text = json.dumps({"rules": [
             {"keyword": "MindStudio", "token_env": "GITCODE_TOKEN_MINDSTUDIO"},
         ]})
-        with patch("docsync.localgit.read_file",
+        with patch("translator.localgit.read_file",
                    return_value=text.encode("utf-8")):
             loaded = rules.load_token_rules("tok", log=SILENT,
                                             source_repo_dir="/src")
             assert loaded == [{"keyword": "MindStudio", "token": "tokA"}]
 
     def test_invalid_json_raises_config_error(self):
-        with patch("docsync.localgit.read_file",
+        with patch("translator.localgit.read_file",
                    return_value=b"{not json"):
             with pytest.raises(common.ConfigError):
                 rules.load_token_rules("tok", log=SILENT,
@@ -1865,7 +1865,7 @@ class TestLoadBlacklistLocal:
     """本地化模式：拉黑名单从本地克隆读取（git show），失败路径同 API。"""
 
     def test_reads_from_local_clone(self):
-        with patch("docsync.localgit.read_file",
+        with patch("translator.localgit.read_file",
                    return_value=b'{"repos": ["Ascend/docs"]}') as read_mock:
             loaded = rules.load_blacklist("tok", log=SILENT,
                                           source_repo_dir="/src")
@@ -1873,14 +1873,14 @@ class TestLoadBlacklistLocal:
             read_mock.assert_called_once_with("/src", "blacklist.json")
 
     def test_missing_file_returns_empty(self):
-        with patch("docsync.localgit.read_file",
+        with patch("translator.localgit.read_file",
                    side_effect=GitCodeError(404, "missing")):
             loaded = rules.load_blacklist("tok", log=SILENT,
                                           source_repo_dir="/src")
             assert loaded == []
 
     def test_invalid_json_raises_config_error(self):
-        with patch("docsync.localgit.read_file",
+        with patch("translator.localgit.read_file",
                    return_value=b"{not json"):
             with pytest.raises(common.ConfigError):
                 rules.load_blacklist("tok", log=SILENT,
@@ -1891,7 +1891,7 @@ class TestLoadWhitelistLocal:
     """本地化模式：开放白名单从本地克隆读取（git show），失败路径同 API。"""
 
     def test_reads_from_local_clone(self):
-        with patch("docsync.localgit.read_file",
+        with patch("translator.localgit.read_file",
                    return_value=b'{"repos": ["CANN/9.1.0/sip"]}') as read_mock:
             loaded = rules.load_whitelist("tok", log=SILENT,
                                           source_repo_dir="/src")
@@ -1899,14 +1899,14 @@ class TestLoadWhitelistLocal:
             read_mock.assert_called_once_with("/src", "whitelist.json")
 
     def test_missing_file_returns_empty(self):
-        with patch("docsync.localgit.read_file",
+        with patch("translator.localgit.read_file",
                    side_effect=GitCodeError(404, "missing")):
             loaded = rules.load_whitelist("tok", log=SILENT,
                                           source_repo_dir="/src")
             assert loaded == []
 
     def test_invalid_json_raises_config_error(self):
-        with patch("docsync.localgit.read_file",
+        with patch("translator.localgit.read_file",
                    return_value=b"{not json"):
             with pytest.raises(common.ConfigError):
                 rules.load_whitelist("tok", log=SILENT,
@@ -1928,9 +1928,9 @@ class TestNetworkErrorRetry:
 
     def test_retry_then_success(self):
         ok = _ok_response({"id": 1})
-        with patch("docsync.client._throttle"), \
-                patch("docsync.client.time.sleep") as sleep_mock, \
-                patch("docsync.client.requests.request",
+        with patch("translator.client._throttle"), \
+                patch("translator.client.time.sleep") as sleep_mock, \
+                patch("translator.client.requests.request",
                       side_effect=[requests.exceptions.ReadTimeout("t"), ok]) \
                 as req_mock:
             result = client._do_request("POST", "http://api/pulls", "tok")
@@ -1939,9 +1939,9 @@ class TestNetworkErrorRetry:
         sleep_mock.assert_called_once()
 
     def test_retry_exhausted_raises_gitcode_error(self):
-        with patch("docsync.client._throttle"), \
-                patch("docsync.client.time.sleep"), \
-                patch("docsync.client.requests.request",
+        with patch("translator.client._throttle"), \
+                patch("translator.client.time.sleep"), \
+                patch("translator.client.requests.request",
                       side_effect=requests.exceptions.ConnectionError("down")):
             with pytest.raises(GitCodeError) as ei:
                 client._do_request("POST", "http://api/pulls", "tok")
@@ -1950,8 +1950,8 @@ class TestNetworkErrorRetry:
     def test_create_pr_uses_slow_timeout(self):
         """创建 PR 属慢操作（服务端逐文件计算大 PR 变更），用 SLOW_TIMEOUT。"""
         ok = _ok_response({"number": 1})
-        with patch("docsync.client._throttle"), \
-                patch("docsync.client.requests.request",
+        with patch("translator.client._throttle"), \
+                patch("translator.client.requests.request",
                       return_value=ok) as req_mock:
             client.create_pr("cann", "docs", "t", "u:br", "master", "b", "tok",
                              fork_path="u/docs")
@@ -1969,8 +1969,8 @@ class TestPaginateBrokenPaging:
     def test_full_page_each_time_returns_batch_once(self):
         """返回条数 > per_page：服务端一次性返回全量，直接返回该批。"""
         full = [self._file_entry(i) for i in range(120)]
-        with patch("docsync.client._throttle"), \
-                patch("docsync.client.requests.request",
+        with patch("translator.client._throttle"), \
+                patch("translator.client.requests.request",
                       side_effect=lambda *a, **k: _ok_response(full)) as req:
             result = client._paginate("http://api/files", "tok", {})
         assert len(result) == 120
@@ -1980,8 +1980,8 @@ class TestPaginateBrokenPaging:
         """返回条数 == per_page 但 page 参数被忽略（每页内容相同）：
         第二页首条与第一页相同时终止，不重复计入。"""
         same_page = [self._file_entry(i) for i in range(100)]
-        with patch("docsync.client._throttle"), \
-                patch("docsync.client.requests.request",
+        with patch("translator.client._throttle"), \
+                patch("translator.client.requests.request",
                       side_effect=lambda *a, **k: _ok_response(same_page)) as req:
             result = client._paginate("http://api/files", "tok", {})
         assert len(result) == 100
@@ -1992,8 +1992,8 @@ class TestPaginateBrokenPaging:
         （平台单页上限 100，合法分页响应不会超过 per_page。）"""
         pages = [[self._file_entry(i) for i in range(100)],
                  [self._file_entry(i) for i in range(100, 140)]]
-        with patch("docsync.client._throttle"), \
-                patch("docsync.client.requests.request",
+        with patch("translator.client._throttle"), \
+                patch("translator.client.requests.request",
                       side_effect=[_ok_response(p) for p in pages]) as req:
             result = client._paginate("http://api/branches", "tok", {})
         assert len(result) == 140

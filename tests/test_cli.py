@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
-from docsync import cli, service
-from docsync.client import GitCodeError
+from translator import cli, service
+from translator.client import GitCodeError
 
 
 @pytest.fixture(autouse=True)

@@ -1,11 +1,11 @@
 services:
-  docsync:
+  translator:
     build: .
-    container_name: docsync
+    container_name: translator
     env_file: .env
     ports:
       - "8000:8000"
     volumes:
-      # SQLite 库与 run 工作目录持久化（DS_DATA_DIR=/data）
+      # SQLite 库与 run 工作目录持久化（TR_DATA_DIR=/data）
       - ./data:/data
     restart: unless-stopped

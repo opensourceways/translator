@@ -25,7 +25,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 
-from docsync import common, localgit, rules, service
+from translator import common, localgit, rules, service
 
 from webapp import rules_cache
 from webapp.db import is_shadow
@@ -44,7 +44,7 @@ class SecretMasker:
     """token 脱敏器：把集合中每个非空秘密值替换为 ``***``。
 
     脱敏集合动态包含：默认 token（GITCODE_TOKEN）+ 每条已加载规则的
-    解析后 token + DS_ADMIN_TOKEN / DS_WEBHOOK_TOKEN / DS_DASH_TOKEN。
+    解析后 token + TR_ADMIN_TOKEN / TR_WEBHOOK_TOKEN / TR_DASH_TOKEN。
     规则 token 在每次 run 加载规则后才能确定，故支持 add_secrets 运行
     时追加。线程安全（Worker 写、log 回调读）。
     """
@@ -267,7 +267,7 @@ class Worker:
         self._poll_timeout = poll_timeout
         self._stopping = threading.Event()
         self._thread = threading.Thread(
-            target=self._loop, name="docsync-worker", daemon=True)
+            target=self._loop, name="translator-worker", daemon=True)
 
     def start(self):
         """启动 Worker 线程。"""

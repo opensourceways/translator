@@ -6,7 +6,7 @@
   一致；所有到达事件（含被拒绝的）均落 push_events，接受的入队返回 202
 - GET /healthz：无鉴权探活；busy 以库中是否存在 running run 判定
   （重启后也准确），不依赖 Worker 内存状态
-- Dashboard 页面与 /api/* 只读 JSON：DS_DASH_TOKEN 未配置时放开，配置后
+- Dashboard 页面与 /api/* 只读 JSON：TR_DASH_TOKEN 未配置时放开，配置后
   要求 X-Dash-Token 头或 ?token= query
 - POST /api/runs、/api/config/shadow、/api/settings/*（仓库配置、
   命名 token 池）：
@@ -31,7 +31,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
-from docsync import client, common
+from translator import client, common
 
 from webapp.config import Settings
 from webapp.db import init_db, init_shadow, is_shadow, set_shadow
@@ -192,7 +192,7 @@ def create_app(settings=None):
             poller.join()
             db.close()
 
-    app = FastAPI(title="docsync", lifespan=lifespan)
+    app = FastAPI(title="translator", lifespan=lifespan)
 
     # ── 鉴权依赖 ─────────────────────────────────────────────
 

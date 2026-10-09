@@ -1,4 +1,4 @@
-# docsync：译稿自动提 PR 服务
+# translator：译稿自动提 PR 服务
 
 译稿权威仓库（GitCode 私有仓库
 `Computing_Ecosystem_Docs/Computing_Ecosystem_Docs-EN`）有 Push 时，
@@ -138,8 +138,8 @@ https://<jenkins地址>/generic-webhook-trigger/invoke?token=translator-auto-pr
 ```bash
 pip install -r requirements.txt
 export GITCODE_TOKEN=<默认 Token>
-python -m docsync                 # 全量扫描并提交
-python -m docsync --keyword msprof  # 按关键字缩小范围（调试）
+python -m translator                 # 全量扫描并提交
+python -m translator --keyword msprof  # 按关键字缩小范围（调试）
 
 pip install -e ".[dev]"
 python -m pytest -v                     # 运行测试（全部 mock，不触网）
@@ -163,7 +163,7 @@ Worker 线程执行扫描/提交，SQLite 落库，自带 Dashboard 监控页面
 
 ```bash
 cp .env.example .env
-# 编辑 .env：至少填 GITCODE_TOKEN、DS_WEBHOOK_TOKEN（DS_ADMIN_TOKEN 可选）
+# 编辑 .env：至少填 GITCODE_TOKEN、TR_WEBHOOK_TOKEN（TR_ADMIN_TOKEN 可选）
 docker compose up -d --build
 curl http://localhost:8000/healthz   # {"status":"ok","shadow":true,...}
 ```
@@ -173,7 +173,7 @@ curl http://localhost:8000/healthz   # {"status":"ok","shadow":true,...}
 译稿权威仓库 → 设置 → WebHooks → 添加（勾选 Push 事件）：
 
 ```
-http://<服务地址>:8000/webhook/gitcode?token=<DS_WEBHOOK_TOKEN 的值>
+http://<服务地址>:8000/webhook/gitcode?token=<TR_WEBHOOK_TOKEN 的值>
 ```
 
 ### 单实例约束（硬性）
@@ -187,13 +187,13 @@ http://<服务地址>:8000/webhook/gitcode?token=<DS_WEBHOOK_TOKEN 的值>
 
 ### 影子模式与切换流程
 
-- 默认 `DS_SHADOW=1`：run 照常克隆、扫描、落库，结果记为
+- 默认 `TR_SHADOW=1`：run 照常克隆、扫描、落库，结果记为
   `would_submit` 而不实际提 PR，用于与 Jenkins 并行验证
 - 切换为实际提交（影子开关持久化在 SQLite，重启不丢）：
 
 ```bash
 curl -X POST http://localhost:8000/api/config/shadow \
-  -H "X-Admin-Token: <DS_ADMIN_TOKEN 的值>" \
+  -H "X-Admin-Token: <TR_ADMIN_TOKEN 的值>" \
   -H "Content-Type: application/json" \
   -d '{"enabled": false}'
 ```
@@ -214,18 +214,18 @@ curl -X POST http://localhost:8000/api/config/shadow \
     分支统一受控）；社区/仓库名大小写不敏感（统一按小写存储）。
     指定 token 后优先于来源仓 token_rules.json 规则和默认 GITCODE_TOKEN
 
-  `DS_ADMIN_TOKEN` 未配置时修改操作无需鉴权（内部工具，默认内网部署），
+  `TR_ADMIN_TOKEN` 未配置时修改操作无需鉴权（内部工具，默认内网部署），
   配置后需在页面顶部输入 token（仅存浏览器 localStorage）
 - 只读 JSON：`/api/summary`、`/api/runs`、`/api/runs/{id}`、
   `/api/runs/{id}/log`、`/api/prs`、`/api/settings/repos`、
   `/api/settings/tokens`
-- 配置 `DS_DASH_TOKEN` 后页面与只读 API 都需鉴权；留空则放开（默认
+- 配置 `TR_DASH_TOKEN` 后页面与只读 API 都需鉴权；留空则放开（默认
   部署在内网/反代后）
 - 手动触发（Build Now 替代）：
 
 ```bash
 curl -X POST http://localhost:8000/api/runs \
-  -H "X-Admin-Token: <DS_ADMIN_TOKEN 的值>" \
+  -H "X-Admin-Token: <TR_ADMIN_TOKEN 的值>" \
   -H "Content-Type: application/json" \
   -d '{"full_scan": true}'
 ```
@@ -243,12 +243,12 @@ curl -X POST http://localhost:8000/api/runs \
 ## 项目结构
 
 ```
-docsync/
+translator/
 ├── Dockerfile             # python:3.12-slim + git，uvicorn 工厂模式（workers=1）
 ├── docker-compose.yml     # env_file + ./data:/data 持久化
 ├── .env.example           # 全部配置项模板（token 本体不落仓库）
 ├── Jenkinsfile            # 声明式流水线（Webhook 触发，禁止并发构建）
-├── docsync/
+├── translator/
 │   ├── cli.py             # 命令行入口（参数、退出码、stdout 日志）
 │   ├── service.py         # 业务编排：规则加载/扫描对比/幂等提交/Token 路由
 │   └── client.py          # GitCode REST API v5 客户端

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Run #{{ run.id }} - docsync{% endblock %}
+{% block title %}Run #{{ run.id }} - translator{% endblock %}
 {% block content %}
 <h1>Run #{{ run.id }} <span class="badge {{ run.status }}" id="run-status">{{ run.status }}</span>{% if run.shadow %} <span class="badge shadow">影子</span>{% endif %}
 {% if run.status != 'running' and (run.failed_count or run.error_count) %}
@@ -59,7 +59,7 @@ async function retry(path) {
     const data = await r.json().catch(() => ({}));
     if (!r.ok) {
       if (r.status === 403) {
-        alert('需要管理 token：请到「设置」页输入 DS_ADMIN_TOKEN 后再试');
+        alert('需要管理 token：请到「设置」页输入 TR_ADMIN_TOKEN 后再试');
       } else {
         alert('重试失败：' + (data.detail || r.status));
       }

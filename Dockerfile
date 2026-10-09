@@ -6,7 +6,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY pyproject.toml README.md ./
-COPY docsync ./docsync
+COPY translator ./translator
 COPY webapp ./webapp
 RUN pip install --no-cache-dir ".[services]"
 

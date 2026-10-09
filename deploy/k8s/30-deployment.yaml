@@ -1,10 +1,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: docsync
-  namespace: docsync
+  name: translator
+  namespace: translator
   labels:
-    app: docsync
+    app: translator
 spec:
   # 硬性约束：内存队列 + 全局唯一 Worker + 单 SQLite 连接，不可多副本
   replicas: 1
@@ -13,23 +13,23 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: docsync
+      app: translator
   template:
     metadata:
       labels:
-        app: docsync
+        app: translator
     spec:
       containers:
-        - name: docsync
-          image: docsync:latest
+        - name: translator
+          image: translator:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
           envFrom:
             - configMapRef:
-                name: docsync-config
+                name: translator-config
             - secretRef:
-                name: docsync-secret
+                name: translator-secret
           volumeMounts:
             - name: data
               mountPath: /data
@@ -55,4 +55,4 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: docsync-data
+            claimName: translator-data

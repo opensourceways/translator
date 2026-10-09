@@ -22,8 +22,8 @@ import os
 import shutil
 import subprocess
 
-from docsync import client
-from docsync.common import GIT_HOST
+from translator import client
+from translator.common import GIT_HOST
 
 
 def _auth_url(owner, repo, token):

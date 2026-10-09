@@ -1,14 +1,14 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: docsync-config
-  namespace: docsync
+  name: translator-config
+  namespace: translator
 data:
   # SQLite 库与 run 工作目录根（PVC 挂载点）
-  DS_DATA_DIR: "/data"
+  TR_DATA_DIR: "/data"
   # Poller 轮询 open PR 状态的间隔秒数
-  DS_POLL_INTERVAL: "300"
+  TR_POLL_INTERVAL: "300"
   # 影子模式初始值种子（之后以库中值为准，运行时页面/接口切换）
-  DS_SHADOW: "1"
+  TR_SHADOW: "1"
   # 来源仓覆盖：留空即权威仓 Computing_Ecosystem_Docs/Computing_Ecosystem_Docs-EN
   GITCODE_SOURCE_REPO: ""

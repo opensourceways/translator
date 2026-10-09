@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from docsync import client
+from translator import client
 
 
 @pytest.fixture(autouse=True)

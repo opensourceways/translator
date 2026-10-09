@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "docsync"
+name = "translator"
 version = "1.0.0"
 description = "译稿自动提 PR 服务 — 译稿仓库更新时由 Jenkins 触发，扫描变更并幂等提交 GitCode Pull Request"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-docsync = "docsync.cli:main"
+translator = "translator.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -25,9 +25,9 @@ services = [
     "jinja2>=3.1",
 ]
 
-# 显式列出两个顶层包（webapp 与 docsync 平级），并打包 Dashboard 模板
+# 显式列出两个顶层包（webapp 与 translator 平级），并打包 Dashboard 模板
 [tool.setuptools]
-packages = ["docsync", "webapp"]
+packages = ["translator", "webapp"]
 
 [tool.setuptools.package-data]
 webapp = ["templates/*.html"]

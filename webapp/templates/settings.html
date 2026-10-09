@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}设置 - docsync{% endblock %}
+{% block title %}设置 - translator{% endblock %}
 {% block content %}
 <style>
 .switch { position: relative; display: inline-block; width: 40px; height: 22px; vertical-align: middle; }
@@ -63,11 +63,11 @@ form.add-entry button:hover { background: #1d4ed8; }
 </p>
 
 {% if not admin_auth %}
-<p class="muted hint">当前未配置 DS_ADMIN_TOKEN，修改操作无需鉴权（内网部署模式）。配置后需在下方输入 token 才能修改。</p>
+<p class="muted hint">当前未配置 TR_ADMIN_TOKEN，修改操作无需鉴权（内网部署模式）。配置后需在下方输入 token 才能修改。</p>
 {% else %}
 <div class="token-bar">
   <span>Admin Token：</span>
-  <input type="password" id="admin-token" placeholder="输入 DS_ADMIN_TOKEN 后可修改" autocomplete="off">
+  <input type="password" id="admin-token" placeholder="输入 TR_ADMIN_TOKEN 后可修改" autocomplete="off">
   <span class="muted hint" style="margin-top:0">仅保存在本浏览器 localStorage，随请求以 X-Admin-Token 头发送</span>
 </div>
 {% endif %}
