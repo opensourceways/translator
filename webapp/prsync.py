@@ -15,11 +15,10 @@
 """
 
 import logging
-import os
 import threading
 from datetime import datetime, timezone
 
-from translator import client, service
+from translator import client, secrets, service
 from translator.common import AUTO_BRANCH_PREFIX
 
 from webapp import rules_cache
@@ -67,7 +66,7 @@ class Poller(threading.Thread):
 
 def _poll_once(db, settings):
     """执行一轮轮询：规则 → 已知 open PR 状态 → 影子模式 PR 发现 → 收尾。"""
-    default_token = os.environ.get("GITCODE_TOKEN", "")
+    default_token = secrets.get("GITCODE_TOKEN", "")
     rules = _ensure_rules(db, default_token)
     used, polled = _poll_open_prs(db, rules, default_token,
                                   MAX_REPOS_PER_POLL)

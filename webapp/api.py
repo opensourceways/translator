@@ -31,7 +31,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
-from translator import client, common
+from translator import client, common, secrets
 
 from webapp.config import Settings
 from webapp.db import init_db, init_shadow, is_shadow, set_shadow
@@ -121,7 +121,7 @@ def _recover_missed_pushes(settings, db, queue):
     入队一次全量扫描；无基线（全新库）、无 GITCODE_TOKEN 或查询远端失败
     （网络异常）都跳过——绝不影响启动。
     """
-    token = os.environ.get("GITCODE_TOKEN", "").strip()
+    token = secrets.get("GITCODE_TOKEN", "").strip()
     if not token:
         log.info("停机补偿跳过：GITCODE_TOKEN 未配置")
         return

@@ -1,13 +1,17 @@
 """服务配置：从环境变量加载 Settings。
 
-GITCODE_TOKEN / GITCODE_SOURCE_REPO 由引擎（translator）自行读取，
-本模块不接管。TR_SHADOW 仅作影子开关的初始值种子——运行时真值存
-SQLite config 表（见 db.is_shadow/set_shadow），支持 POST
+凭据项（TR_WEBHOOK_TOKEN / TR_ADMIN_TOKEN / TR_DASH_TOKEN）优先读 secrets
+文件（/vault/secrets/.env，见 translator.secrets），文件中无该键时回退环境
+变量——生产环境凭据不进进程环境。GITCODE_TOKEN / GITCODE_SOURCE_REPO 由引擎
+（translator）自行读取，本模块不接管。TR_SHADOW 仅作影子开关的初始值种子
+——运行时真值存 SQLite config 表（见 db.is_shadow/set_shadow），支持 POST
 /api/config/shadow 运行时切换并持久化，env 只在库中无记录时生效。
 """
 
 import os
 from dataclasses import dataclass
+
+from translator import secrets
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
@@ -59,16 +63,27 @@ class Settings:
     shadow: bool = True
 
     @classmethod
-    def from_env(cls, env=None):
-        """从环境变量构造 Settings（默认读 os.environ，可注入字典测试）。"""
+    def from_env(cls, env=None, secrets_map=None):
+        """构造 Settings：非敏感项读环境变量，凭据项优先读 secrets 文件。
+
+        env 默认 os.environ；secrets_map 默认读 secrets 文件
+        （/vault/secrets/.env），两者均可注入字典便于测试。secrets 文件存在
+        但不可读时 load_env 抛 RuntimeError，启动即失败（fail-fast）。
+        """
         env = os.environ if env is None else env
+        if secrets_map is None:
+            secrets_map = secrets.load_env()
+
+        def pick(key, default=""):
+            return secrets_map[key] if key in secrets_map else env.get(key, default)
+
         return cls(
             data_dir=env.get("TR_DATA_DIR", "./data"),
             port=_parse_int(env.get("TR_PORT"), 8000),
             poll_interval=_parse_int(env.get("TR_POLL_INTERVAL"), 300),
-            webhook_token=env.get("TR_WEBHOOK_TOKEN", ""),
-            admin_token=env.get("TR_ADMIN_TOKEN", ""),
-            dash_token=env.get("TR_DASH_TOKEN", ""),
+            webhook_token=pick("TR_WEBHOOK_TOKEN", ""),
+            admin_token=pick("TR_ADMIN_TOKEN", ""),
+            dash_token=pick("TR_DASH_TOKEN", ""),
             shadow=_parse_bool(env.get("TR_SHADOW"), True),
         )
 

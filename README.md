@@ -76,10 +76,19 @@ Secret 仅模板需自行生成）。要点：单副本 + `Recreate` 策略 + RW
   `fsGroup` 使 PVC 属组归 1000 且组可写；helm chart 需在同一处落实
 - **compose（本地）**：绑定挂载 `./data` 的属主由宿主机决定，首次需
   `chown -R 1000:1000 ./data`，否则 SQLite 无法写入
-- **`/vault/secrets`**：Vault 注入的 `.env` 默认对 uid 1000 可读；启动命令在文件
-  存在但不可读时立即非零退出（不静默以空 token 运行）。若平台 Injector 未把 pod 的
+- **`/vault/secrets`**：Vault Agent Injector 注入的 `.env` 默认对 uid 1000 可读；
+  应用启动时**直接读取该文件**（不再 `source` 成环境变量），文件存在但不可读时
+  启动即失败（fail-fast，不静默以空 token 运行）。若平台 Injector 未把 pod 的
   `runAsUser` 传播到注入容器，可补注解
   `vault.hashicorp.com/agent-run-as-user: "1000"` / `agent-run-as-group: "1000"`
+
+### 凭据读取（不明文进进程环境）
+
+凭据读取顺序为 **secrets 文件 > 环境变量**：`Settings.from_env`、引擎与处理链
+统一经 `translator/secrets.py` 取值，优先读 `/vault/secrets/.env`（路径可用
+`TR_SECRETS_FILE` 覆盖），文件不存在时回退 `os.environ`。生产（K8s + Vault 注入）
+凭据因此**不进入进程环境**，避免经 `/proc/<pid>/environ`、`ps e` 读取或被 git 等
+子进程继承；本地/compose 仍沿用 `.env` + `env_file` 方式。
 
 ### 单实例约束（硬性）
 

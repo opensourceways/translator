@@ -45,12 +45,16 @@ curl localhost:8000/healthz        # 探活 + 影子状态 + 队列深度
 - git 命令统一 `-c core.quotepath=false`（中文路径否则解析出垃圾目录名，
   见 commit 86c1746）
 - **以非 root（uid/gid 1000）运行**：`/data` 属主不由镜像决定，K8s 靠
-  `securityContext.fsGroup=1000`、compose 需一次性 `chown -R 1000:1000 ./data`；
-  `/vault/secrets/.env` 存在但不可读时启动命令 fail-fast（不得静默以空 token 运行）
+  `securityContext.fsGroup=1000`、compose 需一次性 `chown -R 1000:1000 ./data`
+- **凭据不进进程环境**：应用直接读 `/vault/secrets/.env`（`translator/secrets.py`，
+  文件优先、env 回退），启动脚本不再 `source` 成环境变量；该文件存在但不可读时
+  启动即失败（fail-fast），不得静默以空 token 运行
 
 ## 配置约定
 
 - env 前缀 `TR_*`（见 .env）；`GITCODE_TOKEN` 为默认 token（必需）
+- 凭据读取顺序：secrets 文件（`/vault/secrets/.env`，可用 `TR_SECRETS_FILE`
+  覆盖）> 环境变量；生产由 Vault 注入文件，凭据不落 env
 - 影子模式：`TR_SHADOW` 仅作首启种子，运行时真值在库中
   （`POST /api/config/shadow` 或页面切换）；影子=全流程照跑但不建 PR
 - Token 路由优先级：仓库配置引用的命名 token（设置页维护）>

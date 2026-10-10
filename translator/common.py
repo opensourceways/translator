@@ -10,8 +10,9 @@ rules / index / scan / submit 都从本模块获取共享定义，避免子模�
 """
 
 import hashlib
-import os
 import re
+
+from translator import secrets
 
 # 译稿权威来源仓库（默认）；可用 GITCODE_SOURCE_REPO 环境变量覆盖为
 # 自己的 Fork（如 "lei0308/Computing_Ecosystem_Docs-EN"），便于在
@@ -40,7 +41,7 @@ def _source_repo():
     对环境变量的写法做宽容解析：允许粘贴完整 URL
     （https://gitcode.com/owner/repo）或带 .git 后缀，只取最后两段。
     """
-    full = os.environ.get("GITCODE_SOURCE_REPO", "").strip()
+    full = secrets.get("GITCODE_SOURCE_REPO", "").strip()
     if full:
         full = re.sub(r"^https?://[^/]+/", "", full)
         full = full.removesuffix(".git").strip("/")

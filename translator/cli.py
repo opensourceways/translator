@@ -3,7 +3,8 @@
 用法：
     translator [--keyword 关键字] [--rules-path token_rules.json]
 
-凭据全部来自环境变量（Jenkins 凭据注入），不读任何本地配置文件：
+凭据优先读 secrets 文件（/vault/secrets/.env，见 translator.secrets），文件
+不存在时回退环境变量（Jenkins 凭据注入），不读任何本地配置文件：
     GITCODE_TOKEN            默认 Token（必需；读译稿权威仓库、未命中
                              规则的仓库也用它）
     规则文件中的 token_env   各规则 Token 对应的环境变量名
@@ -24,7 +25,7 @@ import argparse
 import os
 import sys
 
-from translator import service
+from translator import secrets, service
 
 
 def _log(msg):
@@ -61,9 +62,9 @@ def main(argv=None):
                         help="强制全量扫描（忽略增量参数，手动构建重试用）")
     args = parser.parse_args(argv)
 
-    token = os.environ.get("GITCODE_TOKEN", "").strip()
+    token = secrets.get("GITCODE_TOKEN", "").strip()
     if not token:
-        _log("错误：未配置 GITCODE_TOKEN 环境变量（默认 Token）")
+        _log("错误：未配置 GITCODE_TOKEN（secrets 文件或环境变量，默认 Token）")
         return 1
 
     # 本地化模式：权威仓库已在 agent 上克隆（Jenkinsfile 注入）

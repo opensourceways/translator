@@ -7,13 +7,13 @@ blacklist.json、whitelist.json），每次运行时读取；Token 规则文件�
 有效规则或白名单时只处理命中的仓库。
 
 规则文件只保存 keyword → 环境变量名（token_env）的映射，Token 本体
-不落任何仓库，运行时从环境变量解析（Jenkins 凭据注入）。
+不落任何仓库，运行时优先从 secrets 文件（/vault/secrets/.env）、其次环境
+变量解析（Jenkins 凭据注入）。
 """
 
 import json
-import os
 
-from translator import client, localgit
+from translator import client, localgit, secrets
 from translator.common import (
     _source_repo, DEFAULT_RULES_PATH, DEFAULT_BLACKLIST_PATH,
     DEFAULT_WHITELIST_PATH, ConfigError,
@@ -107,9 +107,9 @@ def load_token_rules(token, rules_path=DEFAULT_RULES_PATH, log=print,
         if not keyword or not env_name:
             log(f"  [警告] 第 {i} 条规则缺少 keyword 或 token_env，已跳过")
             continue
-        value = os.environ.get(env_name, "").strip()
+        value = secrets.get(env_name, "").strip()
         if not value:
-            log(f"  [警告] 规则「{keyword}」对应的环境变量 {env_name} 未配置，已跳过")
+            log(f"  [警告] 规则「{keyword}」对应的 {env_name} 未配置，已跳过")
             continue
         # 打印脱敏指纹（前 3 位 + 长度），便于排查参数值配错的问题
         log(f"  规则「{keyword}」Token 指纹: {value[:3]}***（长度 {len(value)}）")

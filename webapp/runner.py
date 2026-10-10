@@ -25,7 +25,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 
-from translator import common, localgit, rules, service
+from translator import common, localgit, rules, secrets, service
 
 from webapp import rules_cache
 from webapp.db import is_shadow
@@ -118,7 +118,7 @@ def execute_run(trigger, settings, db):
     任何异常都不向上抛（Worker 线程必须存活）：run 记 failed，error
     与日志一律脱敏后落库。GITCODE_TOKEN 为空时直接 failed，不克隆。
     """
-    default_token = os.environ.get("GITCODE_TOKEN", "").strip()
+    default_token = secrets.get("GITCODE_TOKEN", "").strip()
     shadow = is_shadow(db)
     # 全量扫或手动触发时没有可信增量区间（Trigger 合并语义已保证手动
     # 触发 sha 为空，这里再兜一层）
