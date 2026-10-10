@@ -67,6 +67,20 @@ http://<服务地址>:8000/webhook/gitcode?token=<TR_WEBHOOK_TOKEN 的值>
 Secret 仅模板需自行生成）。要点：单副本 + `Recreate` 策略 + RWO PVC
 挂 `/data`。数据迁移用 SQLite `.backup` 导出后 kubectl cp 进 PVC。
 
+### 运行用户与权限（非 root）
+
+服务以非 root（uid/gid 1000）运行；`/data` 属主不由镜像决定，按部署形态处理：
+
+- **K8s**：Deployment 已设 pod 级 `securityContext`（`runAsNonRoot` /
+  `runAsUser` / `runAsGroup` / `fsGroup=1000` + `fsGroupChangePolicy: OnRootMismatch`），
+  `fsGroup` 使 PVC 属组归 1000 且组可写；helm chart 需在同一处落实
+- **compose（本地）**：绑定挂载 `./data` 的属主由宿主机决定，首次需
+  `chown -R 1000:1000 ./data`，否则 SQLite 无法写入
+- **`/vault/secrets`**：Vault 注入的 `.env` 默认对 uid 1000 可读；启动命令在文件
+  存在但不可读时立即非零退出（不静默以空 token 运行）。若平台 Injector 未把 pod 的
+  `runAsUser` 传播到注入容器，可补注解
+  `vault.hashicorp.com/agent-run-as-user: "1000"` / `agent-run-as-group: "1000"`
+
 ### 单实例约束（硬性）
 
 内存队列 + 全局唯一 Worker + 单 SQLite 连接决定了：

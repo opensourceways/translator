@@ -44,6 +44,9 @@ curl localhost:8000/healthz        # 探活 + 影子状态 + 队列深度
   head 分支去重依赖该前缀
 - git 命令统一 `-c core.quotepath=false`（中文路径否则解析出垃圾目录名，
   见 commit 86c1746）
+- **以非 root（uid/gid 1000）运行**：`/data` 属主不由镜像决定，K8s 靠
+  `securityContext.fsGroup=1000`、compose 需一次性 `chown -R 1000:1000 ./data`；
+  `/vault/secrets/.env` 存在但不可读时启动命令 fail-fast（不得静默以空 token 运行）
 
 ## 配置约定
 
