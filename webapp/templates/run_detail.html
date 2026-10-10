@@ -40,7 +40,7 @@
 <pre class="log" id="run-log">{{ run.log or '' }}</pre>
 {% endblock %}
 {% block script %}
-<script>
+<script nonce="{{ csp_nonce }}">
 const RUN_ID = {{ run.id }};
 
 // 重试失败项：入队一次新 run（单路径走关键字扫，全部失败项视路径数而定）。

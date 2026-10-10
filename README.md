@@ -90,6 +90,15 @@ Secret 仅模板需自行生成）。要点：单副本 + `Recreate` 策略 + RW
 凭据因此**不进入进程环境**，避免经 `/proc/<pid>/environ`、`ps e` 读取或被 git 等
 子进程继承；本地/compose 仍沿用 `.env` + `env_file` 方式。
 
+### Web 安全（XSS 加固）
+
+所有响应统一下发安全响应头：`Content-Security-Policy`、`X-Content-Type-Options:
+nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: same-origin`。CSP 取
+`default-src 'self'`，脚本仅允许同源 + 每请求 nonce（模板内联 `<script>` 均带该
+nonce）；样式因模板使用内联 `style` 保留 `'unsafe-inline'`。`/docs`、`/redoc`、
+`/openapi.json`（Swagger UI 依赖 CDN 资源）跳过 CSP。模板变量默认 HTML 转义
+（Jinja autoescape），服务端渲染与前端 `esc()` 双重防注入。
+
 ### 单实例约束（硬性）
 
 内存队列 + 全局唯一 Worker + 单 SQLite 连接决定了：

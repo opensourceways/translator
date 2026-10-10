@@ -49,6 +49,9 @@ curl localhost:8000/healthz        # 探活 + 影子状态 + 队列深度
 - **凭据不进进程环境**：应用直接读 `/vault/secrets/.env`（`translator/secrets.py`，
   文件优先、env 回退），启动脚本不再 `source` 成环境变量；该文件存在但不可读时
   启动即失败（fail-fast），不得静默以空 token 运行
+- **模板内联 `<script>` 必须带 `nonce="{{ csp_nonce }}"`**：CSP 脚本源仅同源 +
+  每请求 nonce，漏加 nonce 的脚本会被浏览器拦截（见 `webapp/api.py`
+  的 `security_headers` 中间件与 `_CSP`）
 
 ## 配置约定
 

@@ -5,6 +5,7 @@ client 调用（get_repo/list_branches）打桩；db 用 tmp_path 真库，
 TestClient 上下文触发真实 lifespan（启动恢复 + 关停 join）。
 """
 
+import re
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
@@ -841,3 +842,74 @@ class TestRetryRun:
             r = client.post(f"/api/runs/{run_id}/retry", json={},
                             headers={"X-Admin-Token": "adm"})
             assert r.status_code == 202
+
+
+# ── XSS 加固（安全响应头 / CSP nonce / 输出转义） ─────────────
+
+
+class TestSecurityHeaders:
+    def test_headers_on_pages_and_api(self, tmp_path, monkeypatch):
+        """页面与 JSON 响应均带安全响应头。"""
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            for path in ("/", "/healthz", "/api/summary"):
+                r = client.get(path)
+                assert r.status_code == 200
+                assert r.headers["x-content-type-options"] == "nosniff"
+                assert r.headers["x-frame-options"] == "DENY"
+                assert r.headers["referrer-policy"] == "same-origin"
+                assert "content-security-policy" in r.headers
+
+    def test_csp_nonce_matches_inline_script(self, tmp_path, monkeypatch):
+        """CSP 头里的 nonce 与模板内联 <script> 的 nonce 一致。"""
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.get("/")
+            m = re.search(r"'nonce-([^']+)'",
+                          r.headers["content-security-policy"])
+            assert m, r.headers["content-security-policy"]
+            nonce = m.group(1)
+            assert f'<script nonce="{nonce}">' in r.text
+            assert not re.search(r"<script>", r.text)  # 无裸 <script>
+            # 子页面（inherit base.html 的脚本 + 自身脚本）同样命中：
+            # 每请求 nonce 独立，按该响应自身的 CSP 头比对
+            settings_page = client.get("/settings")
+            m2 = re.search(r"'nonce-([^']+)'",
+                           settings_page.headers["content-security-policy"])
+            assert m2, settings_page.headers["content-security-policy"]
+            nonce2 = m2.group(1)
+            assert f'<script nonce="{nonce2}">' in settings_page.text
+            assert not re.search(r"<script>", settings_page.text)
+
+    def test_nonce_differs_per_request(self, tmp_path, monkeypatch):
+        """每次请求生成新 nonce（防重放/复用）。"""
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            def _nonce():
+                return re.search(
+                    r"'nonce-([^']+)'",
+                    client.get("/").headers[
+                        "content-security-policy"]).group(1)
+            n1, n2 = _nonce(), _nonce()
+            assert n1 and n2 and n1 != n2
+
+    def test_docs_exempt_from_csp(self, tmp_path, monkeypatch):
+        """Swagger 文档页跳过 CSP（其资源来自 CDN），其余安全头照常。"""
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.get("/docs")
+            assert r.status_code == 200
+            assert "content-security-policy" not in r.headers
+            assert r.headers["x-content-type-options"] == "nosniff"
+
+    def test_keyword_html_escaped(self, tmp_path, monkeypatch):
+        """恶意 keyword 服务端渲染时被 HTML 转义（防存储型 XSS）。"""
+        settings = _make_settings(tmp_path)
+        db = db_mod.init_db(settings.db_path)
+        db.create_run("manual", shadow=True,
+                      keyword="<script>alert(1)</script>")
+        db.close()
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            text = client.get("/").text
+            assert "<script>alert(1)</script>" not in text
+            assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text

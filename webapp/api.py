@@ -20,6 +20,7 @@ push_after 与来源仓远端默认分支 HEAD 比对，不一致入队一次全
 式停止两个线程并 join（Worker 正在执行的 run 会跑完）。
 """
 
+import base64
 import hmac
 import logging
 import os
@@ -47,6 +48,16 @@ log = logging.getLogger("webapp.api")
 _REF_PATTERN = re.compile(r"^(refs/heads/main|main|)$")
 
 _TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+
+# 内容安全策略：脚本仅允许同源 + 每请求 nonce（模板内联 <script> 均带该
+# nonce）；样式保留 'unsafe-inline'（模板大量使用内联 style 属性与 <style>
+# 块）。/docs、/redoc、/openapi.json 由 Swagger UI 从 CDN 加载资源，跳过 CSP
+# 以免破坏文档页（其余安全响应头照常下发）。
+_CSP = ("default-src 'self'; script-src 'self' 'nonce-{nonce}'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "connect-src 'self'; object-src 'none'; base-uri 'none'; "
+        "form-action 'self'; frame-ancestors 'none'")
+_CSP_EXEMPT_PATHS = frozenset({"/docs", "/redoc", "/openapi.json"})
 
 
 def _group_prs(prs, statuses):
@@ -164,6 +175,7 @@ def create_app(settings=None):
         settings = Settings.from_env()
     templates = Jinja2Templates(directory=_TEMPLATES_DIR)
     templates.env.filters["localtime"] = _localtime
+    templates.env.autoescape = True  # 显式声明：所有变量输出默认 HTML 转义
 
     @asynccontextmanager
     async def lifespan(app):
@@ -194,6 +206,26 @@ def create_app(settings=None):
 
     app = FastAPI(title="translator", lifespan=lifespan)
 
+    # ── 安全响应头 ───────────────────────────────────────────
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        """为每个响应下发安全头；每请求生成 CSP nonce 供模板内联脚本引用。
+
+        nonce 写入 request.state（scope["state"] 在中间件与路由间共享），
+        _ctx 据此注入 csp_nonce 变量。
+        """
+        nonce = base64.b64encode(os.urandom(16)).decode()
+        request.state.csp_nonce = nonce
+        response = await call_next(request)
+        if request.url.path not in _CSP_EXEMPT_PATHS:
+            response.headers.setdefault(
+                "Content-Security-Policy", _CSP.format(nonce=nonce))
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        return response
+
     # ── 鉴权依赖 ─────────────────────────────────────────────
 
     def require_dash(request: Request):
@@ -220,6 +252,7 @@ def create_app(settings=None):
         """模板公共上下文：shadow 角标 + dash token 是否启用（模板透传用）。"""
         return {"request": request,
                 "dash_auth": bool(settings.dash_token),
+                "csp_nonce": getattr(request.state, "csp_nonce", ""),
                 "shadow": is_shadow(request.app.state.db), **kw}
 
     # ── webhook ──────────────────────────────────────────────

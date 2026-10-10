@@ -59,7 +59,7 @@ dl.meta dd { margin: 0; }
 <main>
 {% block content %}{% endblock %}
 </main>
-<script>
+<script nonce="{{ csp_nonce }}">
 // dash token 透传：配置 TR_DASH_TOKEN 后页面经 ?token= 访问，
 // 页面内 fetch 与链接统一经 withToken 带上该参数
 const DASH_TOKEN = new URLSearchParams(location.search).get('token') || '';

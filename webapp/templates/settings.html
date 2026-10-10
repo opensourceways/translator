@@ -123,7 +123,7 @@ form.add-entry button:hover { background: #1d4ed8; }
 
 {% endblock %}
 {% block script %}
-<script>
+<script nonce="{{ csp_nonce }}">
 (function() {
   const msg = document.getElementById('op-msg');
   const tokenInput = document.getElementById('admin-token');

@@ -108,7 +108,7 @@
 </div>
 {% endblock %}
 {% block script %}
-<script>
+<script nonce="{{ csp_nonce }}">
 // tab 选中状态：社区用 activeOrg，仓库按社区各自记忆（刷新重绘后恢复）
 let activeOrg = null;
 const activeRepoByOrg = {};

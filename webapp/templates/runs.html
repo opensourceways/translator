@@ -24,7 +24,7 @@
 </table>
 {% endblock %}
 {% block script %}
-<script>
+<script nonce="{{ csp_nonce }}">
 async function refresh() {
   try {
     const data = await (await fetch(withToken('/api/runs?limit=100'))).json();
