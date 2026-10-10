@@ -33,7 +33,9 @@ flowchart LR
 - **Token 规则（权限管控）**：规则文件放在**译稿权威仓库**根目录
   `token_rules.json`，每次运行时读取；配置规则后只处理命中的仓库，
   未配置时全部使用默认 Token。服务模式下推荐改用设置页的
-  Token 池 + 仓库配置（见下文），精确到仓库且即时生效
+  Token 池 + 仓库配置（见下文），精确到仓库且即时生效。
+  两种方式并存，Token 路由优先级：仓库配置引用的命名 Token >
+  来源仓 `token_rules.json` 关键字 > 默认 `GITCODE_TOKEN`
 - **增量加速**：push 触发携带 before/after sha 时走增量 diff 缩小
   扫描范围；sha 缺失或 diff 失败自动回退全量，宁多勿漏
 
