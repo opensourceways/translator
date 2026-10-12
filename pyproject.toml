@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "translator"
 version = "1.0.0"
-description = "译稿自动提 PR 服务 — 译稿仓库更新时由 Jenkins 触发，扫描变更并幂等提交 GitCode Pull Request"
+description = "译稿自动提 PR 服务 — 译稿仓库更新时由 Jenkins 触发，扫描变更并幂等提交 AtomGit Pull Request"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.33.0",

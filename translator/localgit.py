@@ -1,6 +1,6 @@
 """本地 git 仓库集成：把远程仓库克隆到本地，用 git 命令做索引与读内容。
 
-本地化背景：GitCode API 有单账号 50 次/分钟限流，而旧实现的目录索引、
+本地化背景：AtomGit API 有单账号 50 次/分钟限流，而旧实现的目录索引、
 文件列举、逐文件对比会发起上百次请求，必然触发 429（即使有进程级限流
 也只能靠长时间等待硬扛）。改为在 agent 上用 git 协议浅克隆仓库后，用
 git 命令本地完成索引与对比——git 协议不经过 API，不受该限流约束，且
@@ -14,7 +14,7 @@ git 命令本地完成索引与对比——git 协议不经过 API，不受该�
   小、快），对比只需目录树，无需 blob；失败不拉取。
 
 git 命令全部走 subprocess，不在进程内解析 git 对象库格式；失败统一
-抛 client.GitCodeError，与 API 路径的错误口径一致。
+抛 client.AtomGitError，与 API 路径的错误口径一致。
 """
 
 import base64
@@ -27,9 +27,9 @@ from translator.common import GIT_HOST
 
 
 def _auth_url(owner, repo, token):
-    """构造带凭据的 git clone 地址（oauth2 用户名对应 GitCode 个人访问令牌）。
+    """构造带凭据的 git clone 地址（oauth2 用户名对应 AtomGit 个人访问令牌）。
 
-    与既有 gitcode remote 的写法一致；token 出现在克隆命令里，由 Jenkins
+    与既有 atomgit remote 的写法一致；token 出现在克隆命令里，由 Jenkins
     密码参数注入，构建日志中会被脱敏。
     """
     return f"https://oauth2:{token}@{GIT_HOST.lstrip('https://')}/{owner}/{repo}.git"
@@ -57,7 +57,7 @@ def clone(owner, repo, ref, token, dest_dir, log=print, blobs=False):
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        raise client.GitCodeError(
+        raise client.AtomGitError(
             200, f"克隆 {owner}/{repo}@{ref or '默认分支'} 失败: "
                  f"{e.stderr.strip() or e.stdout.strip()}")
     return dest_dir
@@ -109,7 +109,7 @@ def rebuild_branch(owner, repo, token, base_branch, head_branch, files,
              "--no-single-branch", url, dest_dir],
             check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        raise client.GitCodeError(
+        raise client.AtomGitError(
             200, f"克隆 Fork {owner}/{repo} 失败: "
                  f"{e.stderr.strip() or e.stdout.strip()}")
 
@@ -125,7 +125,7 @@ def rebuild_branch(owner, repo, token, base_branch, head_branch, files,
     # 地址会未通过；账号未暴露邮箱时才退化为 noreply 地址
     _run_git(dest_dir, "config", "user.name", owner)
     _run_git(dest_dir, "config", "user.email",
-             author_email or f"{owner}@noreply.gitcode.com")
+             author_email or f"{owner}@noreply.atomgit.com")
 
     # ── 2. 以目标分支为基点检出固定分支（目标分支不在 Fork 上时失败）──
     log(f"正在重建固定分支（单 commit）: {head_branch}")
@@ -142,11 +142,11 @@ def rebuild_branch(owner, repo, token, base_branch, head_branch, files,
             dest_dir, "log", "-1", "--format=%s", remote_ref).strip()
         remote_author = _run_git(
             dest_dir, "log", "-1", "--format=%ae", remote_ref).strip()
-    except client.GitCodeError:
+    except client.AtomGitError:
         remote_exists = False
         remote_tree = remote_subject = remote_author = None
     # 期望的 commit 作者邮箱（与上面 user.email 配置一致）
-    expect_author = author_email or f"{owner}@noreply.gitcode.com"
+    expect_author = author_email or f"{owner}@noreply.atomgit.com"
 
     # ── 4. 批量写入译稿（base64 解码后按原始字节落盘）──
     for f in files:
@@ -222,7 +222,7 @@ def fetch_commit(repo_dir, sha, token=None, log=print):
     """按需补取指定提交（增量对比需要 before 提交，浅克隆未包含）。
 
     不带凭据 fetch 公开仓库即可；token 保留参数位以备私有仓库需要。
-    拉取失败（如 webhook 传来的 sha 已不可达）抛 GitCodeError，由调用方
+    拉取失败（如 webhook 传来的 sha 已不可达）抛 AtomGitError，由调用方
     决定回退全量扫描。
     """
     _run_git(repo_dir, "fetch", "--depth=1", "origin", sha, "--quiet")
@@ -247,7 +247,7 @@ def diff_paths(repo_dir, before, after):
     """列出 before..after 之间的全部变更路径（含新增/删除/修改/改名）。
 
     git diff --name-only 直接给路径集合；before 不可达（对象不存在）
-    时 git 报错，由 _run_git 统一抛 GitCodeError，调用方回退全量。
+    时 git 报错，由 _run_git 统一抛 AtomGitError，调用方回退全量。
 
     Returns:
         set[str]: 变更文件/目录路径集合（无变更返回空集合）。
@@ -260,8 +260,8 @@ def read_file(repo_dir, path):
     """读取本地仓库 HEAD 上指定路径的原始字节（文件不存在视为 404）。"""
     try:
         return _run_git_bytes(repo_dir, "show", f"HEAD:{path}")
-    except client.GitCodeError:
-        raise client.GitCodeError(404, f"本地仓库不存在文件: {path}")
+    except client.AtomGitError:
+        raise client.AtomGitError(404, f"本地仓库不存在文件: {path}")
 
 
 def _run_git(repo_dir, *args):
@@ -277,7 +277,7 @@ def _run_git_bytes(repo_dir, *args):
             ["git", "-c", "core.quotepath=false", "-C", repo_dir, *args],
             check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
-        raise client.GitCodeError(
+        raise client.AtomGitError(
             200, f"git {' '.join(args)} 失败: "
                  f"{e.stderr.decode('utf-8', 'replace').strip()}")
     return proc.stdout

@@ -14,8 +14,8 @@ from translator import cli
 
 @pytest.fixture(autouse=True)
 def _default_token(monkeypatch):
-    """默认注入 GITCODE_TOKEN；不需要的用例可自行删除。"""
-    monkeypatch.setenv("GITCODE_TOKEN", "tok")
+    """默认注入 ATOMGIT_TOKEN；不需要的用例可自行删除。"""
+    monkeypatch.setenv("ATOMGIT_TOKEN", "tok")
 
 
 def _scan_result(changed=None):
@@ -44,7 +44,7 @@ class TestTokenValidation:
     """默认 Token 缺失直接失败，不发起任何请求。"""
 
     def test_missing_default_token(self, monkeypatch):
-        monkeypatch.delenv("GITCODE_TOKEN")
+        monkeypatch.delenv("ATOMGIT_TOKEN")
         with patch.object(cli.service, "scan_changed") as scan_mock:
             assert cli.main([]) == 1
             scan_mock.assert_not_called()
@@ -152,8 +152,8 @@ class TestLocalModeEnv:
     """本地化开关：由环境变量注入，透传到扫描。"""
 
     def test_local_env_passed_through(self, monkeypatch):
-        monkeypatch.setenv("GITCODE_LOCAL_SOURCE_DIR", "/src")
-        monkeypatch.setenv("GITCODE_CLONE_DIR", "/clones")
+        monkeypatch.setenv("ATOMGIT_LOCAL_SOURCE_DIR", "/src")
+        monkeypatch.setenv("ATOMGIT_CLONE_DIR", "/clones")
         with patch.object(cli.service, "scan_changed",
                           return_value=_scan_result()) as scan_mock:
             assert cli.main([]) == 0
@@ -162,8 +162,8 @@ class TestLocalModeEnv:
             assert kwargs["clone_root"] == "/clones"
 
     def test_no_local_env_defaults_none(self, monkeypatch):
-        monkeypatch.delenv("GITCODE_LOCAL_SOURCE_DIR", raising=False)
-        monkeypatch.delenv("GITCODE_CLONE_DIR", raising=False)
+        monkeypatch.delenv("ATOMGIT_LOCAL_SOURCE_DIR", raising=False)
+        monkeypatch.delenv("ATOMGIT_CLONE_DIR", raising=False)
         with patch.object(cli.service, "scan_changed",
                           return_value=_scan_result()) as scan_mock:
             assert cli.main([]) == 0

@@ -6,7 +6,7 @@
   scan:    扫描对比，筛出有变更的仓库
   submit:  幂等提交 PR（Fork/固定分支/去重）
 
-译稿权威来源为 GitCode 私有仓库
+译稿权威来源为 AtomGit 私有仓库
 Computing_Ecosystem_Docs/Computing_Ecosystem_Docs-EN。
 仓库内目录层级固定为「组织/版本/产品/仓库/目标路径」，例如
 Ascend/26.1.0/MindStudio/msprof/docs/en/guide.md：
@@ -23,12 +23,12 @@ Ascend/26.1.0/MindStudio/msprof/docs/en/guide.md：
   文件跳过写入、目标仓库已存在同一 head/base 的 open PR 时不重复创建
   （本次新写入的 commit 自动进入已开 PR）
 - Token 管控：扫描/提交统一使用调用方传入的 Token（CLI 用默认
-  GITCODE_TOKEN；服务侧由 webapp.token_router 按仓库配置解析命名 Token）
-- 来源可替换：默认读取权威仓库，可用 GITCODE_SOURCE_REPO 环境变量
+  ATOMGIT_TOKEN；服务侧由 webapp.token_router 按仓库配置解析命名 Token）
+- 来源可替换：默认读取权威仓库，可用 ATOMGIT_SOURCE_REPO 环境变量
   指向自己的 Fork（无权威仓库管理权限时测试用，Webhook 配在 Fork 上）；
   该模式下可用 sync_source 在扫描前先同步 Fork 与上游
 - 本地化模式（绕开 API 限流）：由 Jenkinsfile 把权威仓库克隆到 agent
-  （GITCODE_LOCAL_SOURCE_DIR）并指定目标克隆目录（GITCODE_CLONE_DIR），
+  （ATOMGIT_LOCAL_SOURCE_DIR）并指定目标克隆目录（ATOMGIT_CLONE_DIR），
   索引/列文件/对比走本地 git，API 只保留建 PR 等少量写操作；不设置
   则退回 API 模式（进程级限流兜底）
 

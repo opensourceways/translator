@@ -1,7 +1,7 @@
 """FastAPI Web 层：webhook 入口、Dashboard 与只读/管理 API。
 
 对应服务化改造计划「API 端点」表：
-- POST /webhook/gitcode：GitCode push 入口（?token= 鉴权，fail closed）；
+- POST /webhook/atomgit：AtomGit push 入口（?token= 鉴权，fail closed）；
   ref 过滤 ^(refs/heads/main|main|)$ 与 Jenkins regexpFilterExpression
   一致；所有到达事件（含被拒绝的）均落 push_events，接受的入队返回 202
 - GET /healthz：无鉴权探活；busy 以库中是否存在 running run 判定
@@ -70,7 +70,7 @@ def _group_prs(prs, statuses):
     （number 倒序）；仅在 run_repos 中出现但没有任何 PR 的仓库也会成组
     （prs 为空，模板据此显示「未发现 PR」）。org 与组内仓库均按字母序
     稳定排序；org 附 open/merged/closed 三态计数（徽标用）。
-    org/repo 分组大小写不敏感（GitCode 名称大小写不敏感，run_repos 与
+    org/repo 分组大小写不敏感（AtomGit 名称大小写不敏感，run_repos 与
     prs 两处来源可能大小写不一致），显示名取先见者的原始写法。
 
     Returns:
@@ -125,12 +125,12 @@ def _recover_missed_pushes(settings, db, queue):
     """停机补偿：最后一次成功 run 的 push_after 与来源仓远端 HEAD 比对。
 
     覆盖服务停机/重启窗口内丢失的 webhook（fire-and-forget）。不一致则
-    入队一次全量扫描；无基线（全新库）、无 GITCODE_TOKEN 或查询远端失败
+    入队一次全量扫描；无基线（全新库）、无 ATOMGIT_TOKEN 或查询远端失败
     （网络异常）都跳过——绝不影响启动。
     """
-    token = secrets.get("GITCODE_TOKEN", "").strip()
+    token = secrets.get("ATOMGIT_TOKEN", "").strip()
     if not token:
-        log.info("停机补偿跳过：GITCODE_TOKEN 未配置")
+        log.info("停机补偿跳过：ATOMGIT_TOKEN 未配置")
         return
     baseline = next(
         (r for r in db.list_runs(limit=50)
@@ -164,18 +164,18 @@ def _recover_missed_pushes(settings, db, queue):
 def _assert_source_commit(commit):
     """校验权威仓存在该 commit，否则 422 拒绝（单 commit 接口的可达性前置）。
 
-    用 contents 根目录列表探测：ref 指向未知 commit 时 GitCode 返回 404，
-    list_dir 统一抛 GitCodeError。此校验在请求线程内同步发起一次 API 调用
+    用 contents 根目录列表探测：ref 指向未知 commit 时 AtomGit 返回 404，
+    list_dir 统一抛 AtomGitError。此校验在请求线程内同步发起一次 API 调用
     （低频管理端点，可接受）。失败不静默回退全量——接口承诺单 commit 语义，
     作者期望明确知道该 commit 是否有效。
     """
     owner, repo = common._source_repo()
-    token = secrets.get("GITCODE_TOKEN", "").strip()
+    token = secrets.get("ATOMGIT_TOKEN", "").strip()
     if not token:
-        raise HTTPException(422, "GITCODE_TOKEN 未配置，无法校验 commit")
+        raise HTTPException(422, "ATOMGIT_TOKEN 未配置，无法校验 commit")
     try:
         client.list_dir(owner, repo, "", commit, token)
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         raise HTTPException(
             422, f"权威仓 {owner}/{repo} 中不存在 commit {commit}: {e}")
 
@@ -272,10 +272,10 @@ def create_app(settings=None):
 
     # ── webhook ──────────────────────────────────────────────
 
-    @app.post("/webhook/gitcode")
-    async def webhook_gitcode(request: Request,
+    @app.post("/webhook/atomgit")
+    async def webhook_atomgit(request: Request,
                               token: str = Query(default="")):
-        """GitCode push 入口：token 校验 → ref 过滤 → 落库 → 入队。
+        """AtomGit push 入口：token 校验 → ref 过滤 → 落库 → 入队。
 
         body 非 JSON 或缺字段时按 Jenkins 兜底语义处理：ref 视为空串
         （命中过滤正则），sha 为空 → 队列语义自动全量扫描。
@@ -437,7 +437,7 @@ def create_app(settings=None):
 
         enabled/token_name 缺省表示保持不变（新条目默认 enabled=True、
         不引用命名 token）；token_name 传空串表示清除引用（回退默认
-        GITCODE_TOKEN）；非空的 token_name 必须是 Vault 中已配置的命名
+        ATOMGIT_TOKEN）；非空的 token_name 必须是 Vault 中已配置的命名
         token 名称（TR_TOKEN_<名称>）。
         """
         try:

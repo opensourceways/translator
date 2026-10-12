@@ -6,7 +6,7 @@ _local_target_tree: 本地化模式下克隆目标仓库、生成本地文件映
 scan_changed:      扫描全部（或按关键字过滤的）仓库级目录 → 有变更清单
 
 两种工作模式：
-- API 模式（默认）：索引/列文件/对比全部走 GitCode API，进程级限流兜底。
+- API 模式（默认）：索引/列文件/对比全部走 AtomGit API，进程级限流兜底。
 - 本地化模式（source_repo_dir 非空）：权威仓库已在 agent 上克隆，索引、
   列文件与来源内容读取全走本地 git；目标仓库按需浅克隆后本地对比，
   彻底绕开 API 限流，API 只保留建 PR 等少量写操作。
@@ -51,7 +51,7 @@ def _fetch_repo_files(project, branch, token, log, tree=None):
         else:
             rel_files = sorted(_walk_files(project["path"], branch, token),
                                key=lambda f: f["path"])
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         return {"ok": False, "stage": "list_files", "error": str(e)}
     if not rel_files:
         return {"ok": True, "files": []}
@@ -105,13 +105,13 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
         source_path = f"{project['path']}/{rel_path}"
         if source_repo_dir:
             if not sha:
-                raise client.GitCodeError(
+                raise client.AtomGitError(
                     200, f"本地化模式缺少来源 blob sha: {rel_path}")
             log(f"  读取本地译稿: {rel_path}")
             try:
                 content = localgit.cat_blob(source_repo_dir, sha)
-            except client.GitCodeError as e:
-                raise client.GitCodeError(
+            except client.AtomGitError as e:
+                raise client.AtomGitError(
                     e.status_code, f"读取文件 {source_path} 失败: {e}")
         else:
             log(f"  下载译稿: {rel_path}")
@@ -120,16 +120,16 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
                 # 注意必须用权威仓库分支 source_branch，而非目标分支 target_branch
                 content = client.get_file_bytes(
                     *_source_repo(), source_path, source_branch, source_token)
-            except client.GitCodeError as e:
-                raise client.GitCodeError(
+            except client.AtomGitError as e:
+                raise client.AtomGitError(
                     e.status_code, f"下载文件 {source_path} 失败: {e.message}")
         if len(content) > MAX_FILE_SIZE:
-            raise client.GitCodeError(
+            raise client.AtomGitError(
                 200, f"文件 {rel_path} 大小 {len(content) / 1024 / 1024:.1f} MB "
                      f"超过单文件上限 {MAX_FILE_SIZE / 1024 / 1024:.0f} MB")
         total_size += len(content)
         if total_size > MAX_TOTAL_SIZE:
-            raise client.GitCodeError(
+            raise client.AtomGitError(
                 200, f"累计文件大小 {total_size / 1024 / 1024:.1f} MB 超过上限 "
                      f"{MAX_TOTAL_SIZE / 1024 / 1024:.0f} MB")
         return base64.b64encode(content).decode("ascii")
@@ -167,7 +167,7 @@ def _compare_files(project, files, cmp_token, source_token, source_branch,
     # ── API 路径（原有逻辑，保留为回退）──
     try:
         branches = client.list_branches(org, repo, cmp_token)
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         if e.status_code == 404:
             return {"status": "skipped",
                     "reason": f"目标仓库 {org}/{repo} 不存在或无权限"}
@@ -246,7 +246,7 @@ def _local_target_tree(project, cmp_token, clone_root, log):
     try:
         localgit.clone(org, repo, target_branch, cmp_token, dest, log=log)
         return localgit.tree_map(dest)
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         log(f"  目标仓库本地克隆失败，回退 API 对比: {e}")
         return None
 
@@ -266,7 +266,7 @@ def scan_changed(keyword="", token="", token_resolver=None, log=print,
     默认 token。
 
     本地化模式（source_repo_dir 非空，通常由 Jenkinsfile 克隆权威仓库
-    后通过 GITCODE_LOCAL_SOURCE_DIR 注入）：索引与列文件走本地 git，
+    后通过 ATOMGIT_LOCAL_SOURCE_DIR 注入）：索引与列文件走本地 git，
     目标仓库按需浅克隆（clone_root 指定目录）后本地对比，彻底绕开 API
     限流；clone_root 未设置时仅索引本地化、对比回退 API。
 
@@ -316,12 +316,12 @@ def scan_changed(keyword="", token="", token_resolver=None, log=print,
                 log("  变更命中根目录配置文件，回退全量扫描")
                 incremental = False
                 changed_paths = set()
-        except client.GitCodeError as e:
+        except client.AtomGitError as e:
             log(f"增量 diff 失败（{e}），回退全量扫描")
             incremental = False
             changed_paths = set()
     elif diff_before and diff_after:
-        log("增量参数需要本地化模式（GITCODE_LOCAL_SOURCE_DIR），忽略")
+        log("增量参数需要本地化模式（ATOMGIT_LOCAL_SOURCE_DIR），忽略")
 
     log("正在读取译稿权威仓库目录索引...")
     try:
@@ -340,7 +340,7 @@ def scan_changed(keyword="", token="", token_resolver=None, log=print,
             for i, d in enumerate(top_dirs, 1):
                 log(f"正在扫描产品目录 ({i}/{len(top_dirs)}): {d}")
                 _collect_dirs(d, branch, token, paths, log)
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         return {"ok": False, "stage": "load_index", "error": str(e)}
 
     projects = [_to_project(p) for p in sorted(paths)]
@@ -394,7 +394,7 @@ def scan_changed(keyword="", token="", token_resolver=None, log=print,
                 project, fetched["files"], cmp_token, token, branch, log,
                 target_tree=target_tree,
                 source_repo_dir=source_repo_dir if local_mode else None)
-        except client.GitCodeError as e:
+        except client.AtomGitError as e:
             errors.append({"path": project["path"], "error": str(e)})
             continue
 

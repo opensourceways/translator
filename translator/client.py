@@ -1,8 +1,8 @@
-"""GitCode REST API v5 客户端。
+"""AtomGit REST API v5 客户端。
 
-封装对 GitCode 平台所有需要的 API 调用，包括仓库信息查询、分支管理、
+封装对 AtomGit 平台所有需要的 API 调用，包括仓库信息查询、分支管理、
 文件读写、Fork 同步和 Pull Request 操作。所有函数通过 Bearer Token 鉴权，
-请求失败时统一抛出 GitCodeError。
+请求失败时统一抛出 AtomGitError。
 """
 
 import base64
@@ -13,14 +13,14 @@ from urllib.parse import quote
 
 import requests
 
-BASE_URL = "https://api.gitcode.com/api/v5"
+BASE_URL = "https://api.atomgit.com/api/v5"
 MAX_RETRIES = 4
 RETRY_DELAY = 5
 DEFAULT_TIMEOUT = 30          # 单次请求超时（秒），防止连接挂死
 SLOW_TIMEOUT = 120            # 慢操作超时（秒）：创建大 PR 时服务端需逐文件
                               # 计算变更，文件量大时响应远超普通接口
 
-# 进程级限流：GitCode 单账号 50 次/分钟，而默认 Token 与规则 Token 属于
+# 进程级限流：AtomGit 单账号 50 次/分钟，而默认 Token 与规则 Token 属于
 # 同一账号，全部请求共享同一配额。把任意 60 秒窗口内的请求数压在上限
 # 之下（留余量），从源头避免触发 429；指数退避只兜底窗口重置前的个别
 # 突发。上限按「每账号」而非「每 Token」计，因此全局共享一个计数器。
@@ -54,8 +54,8 @@ def _reset_rate_limit():
         _recent_requests.clear()
 
 
-class GitCodeError(Exception):
-    """GitCode API 返回的错误响应。"""
+class AtomGitError(Exception):
+    """AtomGit API 返回的错误响应。"""
 
     def __init__(self, status_code, message):
         self.status_code = status_code
@@ -103,19 +103,19 @@ def _do_request(method, url, token, timeout=None, **kwargs):
                 requests.exceptions.ConnectionError) as e:
             # 网络层异常（读超时/断连）多为瞬时故障：等待后重试。写操作若
             # 首次实际已在服务端成功，重试会收到 409，由上层按幂等口径
-            # 处理。重试耗尽仍失败时包装为 GitCodeError 抛出，让单仓
+            # 处理。重试耗尽仍失败时包装为 AtomGitError 抛出，让单仓
             # 失败不中断整个批次（此前裸 requests 异常会直接炸掉全程）。
             if attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY * (2 ** attempt))
                 continue
-            raise GitCodeError(0, f"网络错误（已重试 {MAX_RETRIES} 次）: {e}") from e
+            raise AtomGitError(0, f"网络错误（已重试 {MAX_RETRIES} 次）: {e}") from e
         if (r.status_code == 429 or
                 (method == "GET" and 500 <= r.status_code < 600)) \
                 and attempt < MAX_RETRIES - 1:
             time.sleep(_retry_delay(r, attempt))
             continue
         if not r.ok:
-            raise GitCodeError(r.status_code, _extract_error(r))
+            raise AtomGitError(r.status_code, _extract_error(r))
         return r.json()
 
 
@@ -141,7 +141,7 @@ def _paginate(url, token, params, per_page=100):
                             params={**params, "page": page,
                                     "per_page": per_page})
         if not isinstance(batch, list):
-            raise GitCodeError(200, f"分页响应不是数组: {url}")
+            raise AtomGitError(200, f"分页响应不是数组: {url}")
         if not batch:
             break
         if len(batch) > per_page:
@@ -172,7 +172,7 @@ def get_contents(owner, repo, path, ref, token):
         return _do_request("GET",
                            f"{BASE_URL}/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
                            token, params={"ref": ref})
-    except GitCodeError as e:
+    except AtomGitError as e:
         if e.status_code == 404:
             return None
         raise
@@ -190,7 +190,7 @@ def list_dir(owner, repo, path, ref, token):
         url += "/" + quote(path, safe="/")
     result = _do_request("GET", url, token, params={"ref": ref})
     if not isinstance(result, list):
-        raise GitCodeError(200, f"路径不是目录: {path or '/'}")
+        raise AtomGitError(200, f"路径不是目录: {path or '/'}")
     return result
 
 
@@ -198,7 +198,7 @@ def get_file_bytes(owner, repo, path, ref, token):
     """读取指定文件的原始字节内容（base64 解码，不假定文本编码）。
 
     兼容二进制文件（如图片）；文本文件同样适用。文件不存在时抛出
-    GitCodeError(404)。
+    AtomGitError(404)。
     """
     result = _do_request("GET",
                          f"{BASE_URL}/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
@@ -278,7 +278,7 @@ def get_sync_status(owner, repo, token, branch=None):
 def list_pull_requests(owner, repo, token, state="open", per_page=100):
     """列出仓库的 Pull Request（默认仅 open），自动分页拉取全量。
 
-    注意：GitCode 服务端不支持 head/base 过滤参数（带了会返回空
+    注意：AtomGit 服务端不支持 head/base 过滤参数（带了会返回空
     列表），调用方需拉全量 open PR 后自行按 head/base 过滤。
     """
     return _paginate(f"{BASE_URL}/repos/{owner}/{repo}/pulls", token,

@@ -40,7 +40,7 @@ def db(settings):
 @pytest.fixture
 def token_env(monkeypatch):
     """注入默认 token。"""
-    monkeypatch.setenv("GITCODE_TOKEN", DEFAULT_TOKEN)
+    monkeypatch.setenv("ATOMGIT_TOKEN", DEFAULT_TOKEN)
 
 
 def _changed_item(path="Ascend/26.1.0/MindStudio/msprof", org="Ascend",
@@ -133,7 +133,7 @@ class TestActiveMode:
                           repo="cann", branch="9.1.0"),
         ])
         engine.submit_repo.side_effect = [
-            {"ok": True, "pr_url": "https://gitcode.com/Ascend/msprof/merge_requests/42",
+            {"ok": True, "pr_url": "https://atomgit.com/Ascend/msprof/merge_requests/42",
              "pr_number": 42, "pr_existed": False,
              "head_branch": "translator/auto-26.1.0", "pr_title": "同步译稿"},
             {"ok": True, "noop": True, "head_branch": "translator/auto-9.1.0"},
@@ -167,7 +167,7 @@ class TestActiveMode:
         engine.scan_changed.return_value = _scan(changed=[_changed_item()])
         engine.submit_repo.return_value = {
             "ok": True, "pr_number": 7, "pr_existed": True,
-            "pr_url": "https://gitcode.com/Ascend/msprof/merge_requests/7",
+            "pr_url": "https://atomgit.com/Ascend/msprof/merge_requests/7",
             "head_branch": "translator/auto-26.1.0"}
         execute_run(_push_trigger(), settings, db)
         run = db.list_runs()[0]
@@ -205,7 +205,7 @@ class TestActiveMode:
                           repo="cann", branch="9.1.0"),
         ])
         engine.submit_repo.side_effect = [
-            client.GitCodeError(500, "boom"),
+            client.AtomGitError(500, "boom"),
             {"ok": True, "noop": True},
         ]
         execute_run(_push_trigger(), settings, db)
@@ -243,7 +243,7 @@ class TestNamedTokenRouting:
         engine.scan_changed.return_value = _scan(changed=[_changed_item()])
         engine.submit_repo.return_value = {
             "ok": False, "stage": "create_pr",
-            "error": f"推送失败: https://oauth2:{VAULT_TOKEN}@gitcode.com/x"}
+            "error": f"推送失败: https://oauth2:{VAULT_TOKEN}@atomgit.com/x"}
         execute_run(_push_trigger(), settings, db)
         run = db.list_runs()[0]
         repo = db.get_run_repos(run["id"])[0]
@@ -324,12 +324,12 @@ class TestStatusMapping:
 
     def test_missing_token_fails_without_clone(
             self, settings, db, monkeypatch, engine):
-        monkeypatch.delenv("GITCODE_TOKEN", raising=False)
+        monkeypatch.delenv("ATOMGIT_TOKEN", raising=False)
         execute_run(_push_trigger(), settings, db)
         engine.clone.assert_not_called()
         run = db.list_runs()[0]
         assert run["status"] == "failed"
-        assert "GITCODE_TOKEN" in run["error"]
+        assert "ATOMGIT_TOKEN" in run["error"]
 
 
 class TestIncrementalArgs:
@@ -401,7 +401,7 @@ class TestCommitTrigger:
             self, settings, db, token_env, engine, monkeypatch):
         """fetch 失败：run 判失败，绝不回退全量扫描。"""
         self._patch_git(
-            monkeypatch, fetch_side=client.GitCodeError(200, "bad object"))
+            monkeypatch, fetch_side=client.AtomGitError(200, "bad object"))
         execute_run(Trigger.commit_sha("c" * 40), settings, db)
         engine.scan_changed.assert_not_called()
         assert db.list_runs()[0]["status"] == "failed"
@@ -424,15 +424,15 @@ class TestMasking:
 
     def test_clone_error_masked_in_run_error_and_log(
             self, settings, db, token_env, engine):
-        """localgit.clone 抛含 token URL 的 GitCodeError：落库无明文。"""
-        url = f"https://oauth2:{DEFAULT_TOKEN}@gitcode.com/org/repo.git"
-        engine.clone.side_effect = client.GitCodeError(
+        """localgit.clone 抛含 token URL 的 AtomGitError：落库无明文。"""
+        url = f"https://oauth2:{DEFAULT_TOKEN}@atomgit.com/org/repo.git"
+        engine.clone.side_effect = client.AtomGitError(
             200, f"克隆 org/repo@默认分支 失败: fatal: {url} 鉴权失败")
         execute_run(_push_trigger(), settings, db)
         run = db.list_runs()[0]
         assert run["status"] == "failed"
         assert DEFAULT_TOKEN not in run["error"]
-        assert "oauth2:***@gitcode.com" in run["error"]
+        assert "oauth2:***@atomgit.com" in run["error"]
         assert DEFAULT_TOKEN not in db.get_run(run["id"])["log"]
 
     def test_scan_errors_masked(self, settings, db, token_env, engine):
@@ -586,7 +586,7 @@ class TestNamedTokenFailClosed:
         db.upsert_repo_config("Ascend", "msprof", token_name="msprof_bot")
         engine.scan_changed.return_value = _scan(changed=[_changed_item()])
         engine.submit_repo.side_effect = Exception(
-            f"push 失败 https://{VAULT_TOKEN}@gitcode.com/x/y")
+            f"push 失败 https://{VAULT_TOKEN}@atomgit.com/x/y")
         execute_run(_push_trigger(), settings, db)
         run = db.list_runs()[0]
         assert run["status"] == "partial"

@@ -45,7 +45,7 @@ def _client(settings, monkeypatch):
 @pytest.fixture(autouse=True)
 def _stubs(monkeypatch):
     """默认打桩：默认 token 固定；停机补偿的远端查询返回一致 sha（不补偿）。"""
-    monkeypatch.setenv("GITCODE_TOKEN", "default-token")
+    monkeypatch.setenv("ATOMGIT_TOKEN", "default-token")
     monkeypatch.setattr(api.client, "get_repo",
                         MagicMock(return_value={"default_branch": "main"}))
     monkeypatch.setattr(api.client, "list_branches",
@@ -76,9 +76,9 @@ class TestWebhookAuth:
     def test_wrong_token_403(self, tmp_path, monkeypatch):
         settings = _make_settings(tmp_path, webhook_token="wh-secret")
         with _client(settings, monkeypatch) as (client, app, _, _):
-            r = client.post("/webhook/gitcode?token=wrong", json={})
+            r = client.post("/webhook/atomgit?token=wrong", json={})
             assert r.status_code == 403
-            r = client.post("/webhook/gitcode", json={})
+            r = client.post("/webhook/atomgit", json={})
             assert r.status_code == 403
             assert _events(app) == []  # 鉴权失败不落事件
 
@@ -86,7 +86,7 @@ class TestWebhookAuth:
         """webhook_token 未配置时任何 token 都 403（fail closed）。"""
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
-            r = client.post("/webhook/gitcode?token=anything", json={})
+            r = client.post("/webhook/atomgit?token=anything", json={})
             assert r.status_code == 403
             assert _events(app) == []
 
@@ -96,7 +96,7 @@ class TestWebhookAuth:
 
 class TestWebhookEvents:
     SETTINGS_KW = {"webhook_token": "wh-secret"}
-    URL = "/webhook/gitcode?token=wh-secret"
+    URL = "/webhook/atomgit?token=wh-secret"
 
     def _post(self, client, **kw):
         return client.post(self.URL, **kw)
@@ -332,13 +332,13 @@ class TestPages:
         db.record_submit_results(run_id, [{
             "ok": True, "path": "Ascend/x", "org": "o1", "repo": "r1",
             "branch": "master", "pr_number": 7,
-            "pr_url": "http://gitcode/o1/r1/pulls/7"}])
+            "pr_url": "http://atomgit/o1/r1/pulls/7"}])
         db.close()
         with _client(settings, monkeypatch) as (client, app, _, _):
             r = client.get(f"/runs/{run_id}")
             assert r.status_code == 200
             assert "Ascend/x" in r.text
-            assert "http://gitcode/o1/r1/pulls/7" in r.text
+            assert "http://atomgit/o1/r1/pulls/7" in r.text
             assert "扫描完成" in r.text
             assert client.get("/runs/999").status_code == 404
 
@@ -360,10 +360,10 @@ class TestPages:
         with _client(settings, monkeypatch) as (client, app, _, _):
             app.state.db.upsert_pr(
                 "o1", "r1", 42, branch="master", path="Ascend/x",
-                url="http://gitcode/o1/r1/pulls/42", title="t", state="open")
+                url="http://atomgit/o1/r1/pulls/42", title="t", state="open")
             r = client.get("/prs")
             assert r.status_code == 200
-            assert "http://gitcode/o1/r1/pulls/42" in r.text
+            assert "http://atomgit/o1/r1/pulls/42" in r.text
             assert "repo-card" in r.text
             assert "would_submit" in r.text  # 最新 run 状态徽章
             assert f"/runs/{run_id}" in r.text  # 徽章链接到 run 详情页
@@ -919,7 +919,7 @@ class TestCreateRunCommit:
         with _client(settings, monkeypatch) as (client, app, _, _):
             monkeypatch.setattr(
                 api.client, "list_dir",
-                MagicMock(side_effect=api.client.GitCodeError(404, "not found")))
+                MagicMock(side_effect=api.client.AtomGitError(404, "not found")))
             r = client.post(self.URL, json={"commit": "c" * 40})
             assert r.status_code == 422
             assert "commit" in r.json()["detail"]

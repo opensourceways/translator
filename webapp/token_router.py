@@ -4,7 +4,7 @@
 ``TR_TOKEN_<名称大写>``），服务侧 SQLite 只保存名称引用
 （``repo_configs.token_name``），因此本模块不含任何缓存。
 
-未配置名称的仓库使用默认 ``GITCODE_TOKEN``；配置了名称但 Vault 中取不到
+未配置名称的仓库使用默认 ``ATOMGIT_TOKEN``；配置了名称但 Vault 中取不到
 值时判为配置错误，由调用方按失败处理（fail-closed，不静默回退默认 token，
 避免用错误的身份向目标仓库提交 PR）。
 """

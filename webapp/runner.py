@@ -16,7 +16,7 @@
 - 命名 Token 明文只存 Vault（TR_TOKEN_<名称>），服务侧 DB 只存名称引用；
   引用的名称在 Vault 缺失时该仓判失败（fail-closed，不回退默认 Token）
 - 日志缓冲落库（50 行/2 秒批量 append_log）+ 全链路 token 脱敏：
-  localgit.clone 失败会把含 token 的 URL 包进 GitCodeError（Jenkins
+  localgit.clone 失败会把含 token 的 URL 包进 AtomGitError（Jenkins
   曾有 token 明文落构建日志的事故），所有落库文本必须先过 SecretMasker
 - finally 阶段回写 last_run_at、回填 push 事件、清理 workdir
 """
@@ -46,7 +46,7 @@ def _utcnow():
 class SecretMasker:
     """token 脱敏器：把集合中每个非空秘密值替换为 ``***``。
 
-    脱敏集合动态包含：默认 token（GITCODE_TOKEN）+ 全部命名 token
+    脱敏集合动态包含：默认 token（ATOMGIT_TOKEN）+ 全部命名 token
     （Vault 中 TR_TOKEN_<名称> 的值）+ TR_ADMIN_TOKEN /
     TR_WEBHOOK_TOKEN / TR_DASH_TOKEN。命名 token 在每次 run 通过
     secrets.list_token_values() 枚举后追加。线程安全（Worker 写、log
@@ -120,9 +120,9 @@ def execute_run(trigger, settings, db):
     """执行一次 run：克隆 → 扫描 → 影子门控/逐仓提交 → 落库。
 
     任何异常都不向上抛（Worker 线程必须存活）：run 记 failed，error
-    与日志一律脱敏后落库。GITCODE_TOKEN 为空时直接 failed，不克隆。
+    与日志一律脱敏后落库。ATOMGIT_TOKEN 为空时直接 failed，不克隆。
     """
-    default_token = secrets.get("GITCODE_TOKEN", "").strip()
+    default_token = secrets.get("ATOMGIT_TOKEN", "").strip()
     shadow = is_shadow(db)
     # 全量扫或手动触发时没有可信增量区间（Trigger 合并语义已保证手动
     # 触发 sha 为空，这里再兜一层）；单 commit 触发 after 即该 commit，
@@ -142,9 +142,9 @@ def execute_run(trigger, settings, db):
     workdir = os.path.join(settings.work_dir, f"run-{run_id}")
     try:
         if not default_token:
-            log("GITCODE_TOKEN 未配置，无法执行扫描")
+            log("ATOMGIT_TOKEN 未配置，无法执行扫描")
             db.mark_run(run_id, status="failed",
-                        error="GITCODE_TOKEN 未配置，请检查服务环境变量")
+                        error="ATOMGIT_TOKEN 未配置，请检查服务环境变量")
             return
 
         # ── 克隆来源仓（本地化模式，零 API） ──
@@ -216,7 +216,7 @@ def execute_run(trigger, settings, db):
         db.mark_run(run_id, status=status)
         log(f"run 结束，状态: {status}")
     except Exception as e:
-        # clone 失败会把含 token 的 URL 包进 GitCodeError，必须脱敏
+        # clone 失败会把含 token 的 URL 包进 AtomGitError，必须脱敏
         log(f"run 异常终止: {masker.mask(str(e))}")
         db.mark_run(run_id, status="failed", error=masker.mask(str(e)))
     finally:

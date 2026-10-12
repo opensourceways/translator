@@ -60,7 +60,7 @@ def _wait_fork_ready(owner, repo_name, token, log, attempts=10, interval=3):
         try:
             client.get_repo(owner, repo_name, token)
             return True
-        except client.GitCodeError as e:
+        except client.AtomGitError as e:
             if e.status_code != 404 and "not found" not in str(e).lower():
                 raise
             log(f"Fork 仓库初始化中，等待就绪 ({i + 1}/{attempts})...")
@@ -85,7 +85,7 @@ def _sync_fork_branch(owner, repo_name, branch, token, log,
     log(f"正在同步 Fork 仓库分支: {branch}")
     try:
         client.sync_repo(owner, repo_name, token, branch=branch)
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         if e.status_code != 400:
             log(f"Fork 分支同步未完成（{e}），继续尝试建分支")
             return
@@ -93,7 +93,7 @@ def _sync_fork_branch(owner, repo_name, branch, token, log,
         log("按分支同步失败（Fork 缺少该分支），尝试全量同步...")
         try:
             client.sync_repo(owner, repo_name, token)
-        except client.GitCodeError as e2:
+        except client.AtomGitError as e2:
             log(f"Fork 分支同步未完成（{e2}），继续尝试建分支")
             return
         # 全量同步是异步的，且 get_sync_status 对 Fork 上尚不存在的分支
@@ -102,7 +102,7 @@ def _sync_fork_branch(owner, repo_name, branch, token, log,
             try:
                 names = {b.get("name")
                          for b in client.list_branches(owner, repo_name, token)}
-            except client.GitCodeError:
+            except client.AtomGitError:
                 names = set()
             if branch in names:
                 log(f"全量同步完成，Fork 已出现分支: {branch}")
@@ -122,7 +122,7 @@ def _sync_fork_branch(owner, repo_name, branch, token, log,
                 return
             log(f"等待 Fork 分支同步 ({i + 1}/{attempts})...")
             time.sleep(interval)
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         log(f"Fork 分支同步未完成（{e}），继续尝试建分支")
 
 
@@ -199,7 +199,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
             return {"ok": False, "stage": "get_user", "error": "无法从 token 获取用户名"}
         # 账号绑定邮箱：commit 作者邮箱需与 CLA 签署邮箱一致
         author_email = user_info.get("email") or None
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         return {"ok": False, "stage": "get_user", "error": str(e)}
 
     log(f"当前用户: {fork_owner}")
@@ -207,7 +207,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
     # Fork 后的仓库路径可能与原仓库名不同，先按 Fork 列表查找已有 Fork
     try:
         fork_full = _find_existing_fork(org, repo, fork_owner, token)
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         return {"ok": False, "stage": "fork_repo", "error": str(e)}
 
     fork_ready = fork_full is not None
@@ -217,7 +217,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
         try:
             fork = client.fork_repo(org, repo, token)
             fork_full = fork.get("full_name") or ""
-        except client.GitCodeError as e:
+        except client.AtomGitError as e:
             msg = str(e)
             if "already exists" not in msg and "已存在" not in msg and "已经" not in msg:
                 return {"ok": False, "stage": "fork_repo", "error": msg}
@@ -228,7 +228,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
             for attempt in range(5):
                 try:
                     fork_full = _find_existing_fork(org, repo, fork_owner, token)
-                except client.GitCodeError as e:
+                except client.AtomGitError as e:
                     return {"ok": False, "stage": "fork_repo", "error": str(e)}
                 if fork_full:
                     break
@@ -248,7 +248,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
     if not fork_ready:
         try:
             ready = _wait_fork_ready(fork_owner, fork_repo_name, token, log)
-        except client.GitCodeError as e:
+        except client.AtomGitError as e:
             return {"ok": False, "stage": "fork_repo", "error": str(e)}
         if not ready:
             return {
@@ -263,14 +263,14 @@ def submit_repo(org, repo, branch, files, token, log=print):
         try:
             target_info = client.get_repo(org, repo, token)
             branch = target_info.get("default_branch") or "master"
-        except client.GitCodeError as e:
+        except client.AtomGitError as e:
             return {"ok": False, "stage": "check_branch", "error": str(e)}
         log(f"未指定目标分支，使用目标仓库默认分支: {branch}")
 
     log(f"正在校验目标分支: {branch}")
     try:
         branches = client.list_branches(org, repo, token)
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         return {"ok": False, "stage": "check_branch", "error": str(e)}
     sha_by_name = {b.get("name"): (b.get("commit") or {}).get("sha")
                    for b in branches}
@@ -296,7 +296,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
         result = localgit.rebuild_branch(
             fork_owner, fork_repo_name, token, branch, head_branch,
             files, dest_dir, log, author_email=author_email)
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         return {"ok": False, "stage": "write", "error": str(e),
                 "head_branch": head_branch}
     except Exception as e:
@@ -314,14 +314,14 @@ def submit_repo(org, repo, branch, files, token, log=print):
     log("正在检查是否已有未合并的 PR...")
     try:
         open_prs = client.list_pull_requests(org, repo, token, state="open")
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         return {"ok": False, "stage": "list_pr", "error": str(e)}
     existing_pr = next(
         (p for p in open_prs if _pr_matches(p, head, branch)), None)
     if existing_pr:
         number = existing_pr.get("number")
         pr_url = (existing_pr.get("html_url")
-                  or f"https://gitcode.com/{org}/{repo}/merge_requests/{number}")
+                  or f"https://atomgit.com/{org}/{repo}/merge_requests/{number}")
         log(f"已存在未合并的 PR，本次变更已并入: {pr_url}")
         return {
             "ok": True,
@@ -348,13 +348,13 @@ def submit_repo(org, repo, branch, files, token, log=print):
             org, repo, pr_title, head, branch, pr_body,
             token, fork_path=fork_full,
         )
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         # 兜底：去重查询漏判（或并发）时服务端返回 409 并带出已有 PR 号，
         # 按「已存在未合并 PR」处理而非失败
         if e.status_code == 409:
             m = re.search(r"!(\d+)", e.message or "")
             number = int(m.group(1)) if m else None
-            pr_url = (f"https://gitcode.com/{org}/{repo}/merge_requests/{number}"
+            pr_url = (f"https://atomgit.com/{org}/{repo}/merge_requests/{number}"
                       if number else None)
             log(f"服务端提示已存在未合并的 PR，本次变更已并入: {pr_url or e.message}")
             return {
@@ -375,7 +375,7 @@ def submit_repo(org, repo, branch, files, token, log=print):
 
     pr_number = pr.get("number")
     pr_url = (pr.get("html_url")
-              or f"https://gitcode.com/{org}/{repo}/merge_requests/{pr_number}")
+              or f"https://atomgit.com/{org}/{repo}/merge_requests/{pr_number}")
     return {
         "ok": True,
         "pr_existed": False,
@@ -396,7 +396,7 @@ def submit_all(changed, token, log=print):
     Args:
         changed: scan_changed 返回的 changed 清单，
                  每项含 org/repo/branch/files/project
-        token: 提交使用的 GitCode Token
+        token: 提交使用的 AtomGit Token
         log: 日志函数
 
     Returns:

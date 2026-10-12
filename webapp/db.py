@@ -125,7 +125,7 @@ _PRS_EXTRA_COLUMNS = {
     "draft": "INTEGER",
     "review_total": "INTEGER",
     "review_accepted": "INTEGER",
-    "created_at": "TEXT",  # PR 在 GitCode 上的真实创建时间
+    "created_at": "TEXT",  # PR 在 AtomGit 上的真实创建时间
 }
 
 
@@ -406,14 +406,14 @@ class Database:
                   created_at=None):
         """按 (org, repo, number) 复合唯一约束插入或更新 PR 记录。
 
-        GitCode 的 PR 编号按仓库计数，不同仓库可以有相同 number，
+        AtomGit 的 PR 编号按仓库计数，不同仓库可以有相同 number，
         因此唯一键必须是三元组而非 number 单列。
 
         首次插入记 first_seen；每次调用刷新 last_polled。mergeable 三态：
         None 存 NULL。labels 为 [{"name", "color"}] 列表（序列化为
         labels_json），与 draft 同为展示层派生状态的原始信号；冲突更新时
         两者取 COALESCE（新值缺省为 None 时不覆盖已有信号）。
-        created_at 为 PR 在 GitCode 上的真实创建时间，冲突更新时不覆盖
+        created_at 为 PR 在 AtomGit 上的真实创建时间，冲突更新时不覆盖
         已有值（创建时间不会变）。
         解析后的 token 值一律不经由此处落库。
         """
@@ -615,7 +615,7 @@ class Database:
 
         enabled / token_name 传 None 表示该字段保持不变（新条目分别
         默认 True 与空串）；token_name 传空串表示清除命名 token 引用
-        （回退默认 GITCODE_TOKEN）。
+        （回退默认 ATOMGIT_TOKEN）。
         """
         org, repo = org.strip().lower(), repo.strip().lower()
         enabled_val = None if enabled is None else (1 if enabled else 0)

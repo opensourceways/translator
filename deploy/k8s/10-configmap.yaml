@@ -11,4 +11,4 @@ data:
   # 影子模式初始值种子（之后以库中值为准，运行时页面/接口切换）
   TR_SHADOW: "1"
   # 来源仓覆盖：留空即权威仓 Computing_Ecosystem_Docs/Computing_Ecosystem_Docs-EN
-  GITCODE_SOURCE_REPO: ""
+  ATOMGIT_SOURCE_REPO: ""

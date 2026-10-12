@@ -29,7 +29,7 @@ def db(tmp_path):
 @pytest.fixture(autouse=True)
 def _stubs(monkeypatch):
     """默认打桩：默认 token 固定、API 不触网。"""
-    monkeypatch.setenv("GITCODE_TOKEN", "default-token")
+    monkeypatch.setenv("ATOMGIT_TOKEN", "default-token")
     monkeypatch.setattr(prsync.client, "get_pull_request",
                         MagicMock(return_value={"state": "open"}))
     monkeypatch.setattr(prsync.client, "list_pull_requests",
@@ -56,7 +56,7 @@ def _mock_get(monkeypatch, payload=None, side_effect=None):
 
 
 class TestStateMapping:
-    """GitCode PR 响应 → 落库状态映射（merged/closed/open）。"""
+    """AtomGit PR 响应 → 落库状态映射（merged/closed/open）。"""
 
     @pytest.mark.parametrize("payload,expected", [
         ({"state": "closed", "merged": True}, "merged"),
@@ -210,7 +210,7 @@ class TestShadowDiscovery:
                  branch="master", state="closed")
         lst = MagicMock(return_value=[
             {"number": 5, "title": "msprof 英文版文档",
-             "html_url": "http://gitcode/o1/r1/pulls/5",
+             "html_url": "http://atomgit/o1/r1/pulls/5",
              "head": {"ref": "translator/auto-master",
                       "label": "bot:translator/auto-master"},
              "base": {"ref": "master"}},
@@ -227,7 +227,7 @@ class TestShadowDiscovery:
         assert prs[5]["source"] == "jenkins"
         assert prs[5]["state"] == "open"
         assert prs[5]["branch"] == "master"
-        assert prs[5]["url"] == "http://gitcode/o1/r1/pulls/5"
+        assert prs[5]["url"] == "http://atomgit/o1/r1/pulls/5"
         assert prs[8]["source"] == "jenkins"  # ref 缺失时回退 label 冒号后段
         assert 6 not in prs  # 非 auto 前缀
         assert 7 not in prs  # base 与该仓 branch 不匹配
@@ -273,14 +273,14 @@ class TestShadowDiscovery:
 
 class TestErrorIsolation:
     def test_repo_error_does_not_break_others(self, db, monkeypatch):
-        """单仓 GitCodeError 只告警，不影响其他仓与整轮收尾。"""
+        """单仓 AtomGitError 只告警，不影响其他仓与整轮收尾。"""
         db_mod.set_shadow(db, False)
         _seed_pr(db, org="o1", repo="bad", number=1)
         _seed_pr(db, org="o2", repo="good", number=2)
 
         def fake_get(org, repo, number, token):
             if repo == "bad":
-                raise client.GitCodeError(500, "boom")
+                raise client.AtomGitError(500, "boom")
             return {"state": "open", "mergeable": True}
 
         get = _mock_get(monkeypatch, side_effect=fake_get)

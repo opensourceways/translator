@@ -2,7 +2,7 @@
 
 凭据项（TR_WEBHOOK_TOKEN / TR_ADMIN_TOKEN / TR_DASH_TOKEN）优先读 secrets
 文件（/vault/secrets/.env，见 translator.secrets），文件中无该键时回退环境
-变量——生产环境凭据不进进程环境。GITCODE_TOKEN / GITCODE_SOURCE_REPO 由引擎
+变量——生产环境凭据不进进程环境。ATOMGIT_TOKEN / ATOMGIT_SOURCE_REPO 由引擎
 （translator）自行读取，本模块不接管。TR_SHADOW 仅作影子开关的初始值种子
 ——运行时真值存 SQLite config 表（见 db.is_shadow/set_shadow），支持 POST
 /api/config/shadow 运行时切换并持久化，env 只在库中无记录时生效。

@@ -1,8 +1,8 @@
 # translator：译稿自动提 PR 服务
 
-译稿权威仓库（GitCode 私有仓库
+译稿权威仓库（AtomGit 私有仓库
 `Computing_Ecosystem_Docs/Computing_Ecosystem_Docs-EN`）有 Push 时，
-GitCode Webhook 直接打到本服务，无人值守地扫描译稿变更并向对应的目标
+AtomGit Webhook 直接打到本服务，无人值守地扫描译稿变更并向对应的目标
 社区仓库批量提交 Pull Request；自带 Dashboard 监控每次运行与 PR 状态。
 
 ```mermaid
@@ -31,7 +31,7 @@ flowchart LR
   文件夹，拍平 `en/` 语言目录并在扩展名前补 `_en` 与中文并存）；
   未登记的仓库源路径原样透传。对比与写入均用改写后的路径
 - **Token 管控**：引擎本身不读任何规则文件；CLI 模式统一使用默认
-  `GITCODE_TOKEN`，服务模式由设置页的「仓库配置」按仓库引用命名 Token
+  `ATOMGIT_TOKEN`，服务模式由设置页的「仓库配置」按仓库引用命名 Token
   （名称 → Vault 的 `TR_TOKEN_<名称>`），精确到仓库且即时生效
 - **增量加速**：push 触发携带 before/after sha 时走增量 diff 缩小
   扫描范围；sha 缺失或 diff 失败自动回退全量，宁多勿漏
@@ -46,16 +46,16 @@ flowchart LR
 
 ```bash
 cp .env.example .env
-# 编辑 .env：至少填 GITCODE_TOKEN、TR_WEBHOOK_TOKEN（TR_ADMIN_TOKEN 可选）
+# 编辑 .env：至少填 ATOMGIT_TOKEN、TR_WEBHOOK_TOKEN（TR_ADMIN_TOKEN 可选）
 docker compose up -d --build
 curl http://localhost:8000/healthz   # {"status":"ok","shadow":true,...}
 ```
 
-GitCode Webhook 配置：译稿权威仓库 → 设置 → WebHooks → 添加
+AtomGit Webhook 配置：译稿权威仓库 → 设置 → WebHooks → 添加
 （勾选 Push 事件）：
 
 ```
-http://<服务地址>:8000/webhook/gitcode?token=<TR_WEBHOOK_TOKEN 的值>
+http://<服务地址>:8000/webhook/atomgit?token=<TR_WEBHOOK_TOKEN 的值>
 ```
 
 ### K8s 部署
@@ -119,7 +119,7 @@ curl -X POST http://localhost:8000/api/config/shadow \
 ```
 
 从 Jenkins 切换时**同时禁用 Jenkins job**（引擎幂等，短暂双跑会收敛），
-确认稳定后再删除 GitCode 上的 Jenkins webhook 并归档 Jenkins job。
+确认稳定后再删除 AtomGit 上的 Jenkins webhook 并归档 Jenkins job。
 
 ## Dashboard 与 API
 
@@ -134,7 +134,7 @@ curl -X POST http://localhost:8000/api/config/shadow \
     Token 池下拉选择）。只有**添加并启用**的仓库才会在 active 模式下
     真正创建 PR，未列出的一律跳过（默认拒绝）；粒度到仓库（该仓所有
     分支统一受控）；社区/仓库名大小写不敏感（统一按小写存储）。
-    指定 token 后优先于默认 GITCODE_TOKEN；引用的名称在 Vault 缺失时
+    指定 token 后优先于默认 ATOMGIT_TOKEN；引用的名称在 Vault 缺失时
     该仓判失败（不回退默认 token）
 
   `TR_ADMIN_TOKEN` 未配置时修改操作无需鉴权（内部工具，默认内网部署），
@@ -190,17 +190,17 @@ failed（致命）/ interrupted（重启僵尸恢复）。排查 partial：run �
 
 ```bash
 pip install -r requirements.txt
-export GITCODE_TOKEN=<默认 Token>
+export ATOMGIT_TOKEN=<默认 Token>
 python -m translator                   # 全量扫描并提交
 python -m translator --keyword msprof  # 按关键字缩小范围（调试）
 ```
 
-CLI 模式不读任何规则/名单文件，扫描与提交统一使用默认 `GITCODE_TOKEN`；
+CLI 模式不读任何规则/名单文件，扫描与提交统一使用默认 `ATOMGIT_TOKEN`；
 服务模式的开放范围统一由设置页仓库配置开关控制（默认拒绝）、按仓库细分的
 Token 由命名 Token 机制提供。
 
 没有权威仓库的 Webhook 权限时，可用自己的 Fork 做来源：
-`GITCODE_SOURCE_REPO` 指向 Fork 完整路径，CLI 加 `--sync-source`
+`ATOMGIT_SOURCE_REPO` 指向 Fork 完整路径，CLI 加 `--sync-source`
 （Fork 不会自动跟进上游，扫描前先同步）。
 
 退出码：0 成功（含「没有变更」）；1 运行失败；2 部分仓库提交失败。
@@ -228,7 +228,7 @@ translator/
 │   ├── submit.py          # 幂等提交：Fork → 固定分支 → 单 commit → PR
 │   ├── localgit.py        # 目标仓本地浅克隆索引（git 协议，不受 API 限流）
 │   ├── index.py           # 目标路径改写规则 TARGET_PATH_RULES
-│   ├── client.py          # GitCode REST API v5 客户端
+│   ├── client.py          # AtomGit REST API v5 客户端
 │   └── common.py          # 公共常量（AUTO_BRANCH_PREFIX 等）
 ├── webapp/                # 常驻服务（FastAPI，前后端一体化）
 │   ├── api.py             # create_app(settings)：webhook/Dashboard/API/启动恢复

@@ -10,13 +10,13 @@ from unittest.mock import patch
 import pytest
 
 from translator import localgit
-from translator.client import GitCodeError
+from translator.client import AtomGitError
 
 
 class TestAuthUrl:
     def test_embeds_oauth2_token(self):
         url = localgit._auth_url("Ascend", "msprof", "tok")
-        assert url == "https://oauth2:tok@gitcode.com/Ascend/msprof.git"
+        assert url == "https://oauth2:tok@atomgit.com/Ascend/msprof.git"
 
 
 class TestClone:
@@ -57,12 +57,12 @@ class TestClone:
             self._clone("Ascend", "msprof", "26.1.0", "tok", "/tmp/d")
             rm_mock.assert_called_once_with("/tmp/d")
 
-    def test_failure_raises_gitcode_error(self):
+    def test_failure_raises_atomgit_error(self):
         err = subprocess.CalledProcessError(
             128, "git clone", stderr="fatal: Repository not found")
         with patch("translator.localgit.subprocess.run",
                    side_effect=err):
-            with pytest.raises(GitCodeError) as exc_info:
+            with pytest.raises(AtomGitError) as exc_info:
                 self._clone("Ascend", "msprof", "26.1.0", "tok", "/tmp/d")
             assert "Repository not found" in str(exc_info.value)
 
@@ -104,8 +104,8 @@ class TestCommitParents:
 class TestReadFile:
     def test_missing_file_maps_to_404(self):
         with patch("translator.localgit._run_git_bytes",
-                   side_effect=GitCodeError(200, "git show 失败")):
-            with pytest.raises(GitCodeError) as exc_info:
+                   side_effect=AtomGitError(200, "git show 失败")):
+            with pytest.raises(AtomGitError) as exc_info:
                 localgit.read_file("/repo", "nope")
             assert exc_info.value.status_code == 404
 

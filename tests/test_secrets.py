@@ -31,13 +31,13 @@ def test_load_env_parses_comments_quotes_and_export(tmp_path):
     text = (
         "# 注释\n"
         "\n"
-        "GITCODE_TOKEN=abc123\n"
+        "ATOMGIT_TOKEN=abc123\n"
         'export TR_ADMIN_TOKEN="quoted"\n'
         "TR_DASH_TOKEN='single'\n"
         "NO_EQUALS_LINE\n"
     )
     assert secrets.load_env(_write(tmp_path / ".env", text)) == {
-        "GITCODE_TOKEN": "abc123",
+        "ATOMGIT_TOKEN": "abc123",
         "TR_ADMIN_TOKEN": "quoted",
         "TR_DASH_TOKEN": "single",
     }
@@ -53,32 +53,32 @@ def test_load_env_unreadable_path_raises(tmp_path):
 
 def test_get_prefers_file_over_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TR_SECRETS_FILE", _write(
-        tmp_path / ".env", "GITCODE_TOKEN=from-file\n"))
-    monkeypatch.setenv("GITCODE_TOKEN", "from-env")
-    assert secrets.get("GITCODE_TOKEN") == "from-file"
+        tmp_path / ".env", "ATOMGIT_TOKEN=from-file\n"))
+    monkeypatch.setenv("ATOMGIT_TOKEN", "from-env")
+    assert secrets.get("ATOMGIT_TOKEN") == "from-file"
 
 
 def test_get_falls_back_to_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TR_SECRETS_FILE", str(tmp_path / "absent.env"))
-    monkeypatch.setenv("GITCODE_TOKEN", "from-env")
-    assert secrets.get("GITCODE_TOKEN") == "from-env"
+    monkeypatch.setenv("ATOMGIT_TOKEN", "from-env")
+    assert secrets.get("ATOMGIT_TOKEN") == "from-env"
 
 
 def test_get_default_when_unset(tmp_path, monkeypatch):
     monkeypatch.setenv("TR_SECRETS_FILE", str(tmp_path / "absent.env"))
-    monkeypatch.delenv("GITCODE_TOKEN", raising=False)
-    assert secrets.get("GITCODE_TOKEN", "fallback") == "fallback"
+    monkeypatch.delenv("ATOMGIT_TOKEN", raising=False)
+    assert secrets.get("ATOMGIT_TOKEN", "fallback") == "fallback"
 
 
 def test_get_reloads_on_file_change(tmp_path, monkeypatch):
     """文件变更（mtime 变化）后取到新值，缓存不会滞留旧值。"""
     path = tmp_path / ".env"
     monkeypatch.setenv("TR_SECRETS_FILE", str(path))
-    _write(path, "GITCODE_TOKEN=v1\n")
-    assert secrets.get("GITCODE_TOKEN") == "v1"
-    _write(path, "GITCODE_TOKEN=v2\n")
+    _write(path, "ATOMGIT_TOKEN=v1\n")
+    assert secrets.get("ATOMGIT_TOKEN") == "v1"
+    _write(path, "ATOMGIT_TOKEN=v2\n")
     os.utime(path, (1, 1))
-    assert secrets.get("GITCODE_TOKEN") == "v2"
+    assert secrets.get("ATOMGIT_TOKEN") == "v2"
 
 
 def test_settings_prefers_secrets_over_env(tmp_path):
@@ -140,7 +140,7 @@ class TestNamedTokens:
             "TR_TOKEN_BOT=b\n"
             "TR_TOKEN_EMPTY=\n"          # 空值 → 不列出
             "TR_TOKEN_BAD-NAME=x\n"      # 名称非法 → 不列出
-            "GITCODE_TOKEN=default\n"))  # 无前缀 → 不列出
+            "ATOMGIT_TOKEN=default\n"))  # 无前缀 → 不列出
         monkeypatch.setenv("TR_TOKEN_ENVONLY", "e")  # 环境变量来源
         # 清掉可能残留的其它 TR_TOKEN_*
         for key in list(os.environ):

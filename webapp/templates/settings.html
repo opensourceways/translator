@@ -39,7 +39,7 @@ form.add-entry button:hover { background: #1d4ed8; }
     <td class="mono">TR_TOKEN_{{ name | upper }}</td>
   </tr>
   {% else %}
-  <tr class="empty-row"><td colspan="2" class="muted">暂无命名 Token：未配置时，仓库统一使用默认 GITCODE_TOKEN。</td></tr>
+  <tr class="empty-row"><td colspan="2" class="muted">暂无命名 Token：未配置时，仓库统一使用默认 ATOMGIT_TOKEN。</td></tr>
   {% endfor %}
   </tbody>
 </table>
@@ -48,7 +48,7 @@ form.add-entry button:hover { background: #1d4ed8; }
 <p class="muted" style="font-size:13px">
   一个条目配齐一个仓库：<strong>启用</strong>后该仓在 active（非影子）模式下才会自动创建 PR，
   未列出的仓库一律跳过（默认拒绝）；<strong>Token</strong> 从上方 Token 池下拉选择（可选），
-  选择后提交 PR 与轮询状态优先使用该 token，默认走 GITCODE_TOKEN。
+  选择后提交 PR 与轮询状态优先使用该 token，默认走 ATOMGIT_TOKEN。
   粒度到仓库：该仓所有分支统一受控；社区/仓库名大小写不敏感（统一按小写存储）。
 </p>
 

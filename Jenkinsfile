@@ -1,4 +1,4 @@
-// 译稿自动提 PR 流水线：GitCode Webhook（Push 事件）触发，
+// 译稿自动提 PR 流水线：AtomGit Webhook（Push 事件）触发，
 // 扫描译稿权威仓库变更并向目标社区仓库批量提交 PR。
 // 要求：Jenkins 安装 Generic Webhook Trigger 插件；agent 有 Python 3.10+。
 pipeline {
@@ -11,12 +11,12 @@ pipeline {
 
     environment {
         // 本地化模式：权威仓库克隆到 agent 后，索引/列文件/对比走本地 git，
-        // 彻底绕开 GitCode API 单账号 50 次/分钟限流（旧的逐目录 API 索引
+        // 彻底绕开 AtomGit API 单账号 50 次/分钟限流（旧的逐目录 API 索引
         // 会发起上百次请求必然触发 429）。不设置则退回 API 模式（进程级限流兜底）。
         AUTHORITATIVE_DIR = "${WORKSPACE}/authoritative"
         CLONE_DIR = "${WORKSPACE}/clones"
-        GITCODE_LOCAL_SOURCE_DIR = "${WORKSPACE}/authoritative"
-        GITCODE_CLONE_DIR = "${WORKSPACE}/clones"
+        ATOMGIT_LOCAL_SOURCE_DIR = "${WORKSPACE}/authoritative"
+        ATOMGIT_CLONE_DIR = "${WORKSPACE}/clones"
     }
 
     triggers {
@@ -36,7 +36,7 @@ pipeline {
             // 不支持 branchFilter（较新版本才引入），旧版用这两个参数通用生效。
             regexpFilterText: '$ref',
             regexpFilterExpression: '^(refs/heads/main|main|)$',
-            causeString: 'GitCode Push: $ref',
+            causeString: 'AtomGit Push: $ref',
             token: 'translator-auto-pr'
         )
     }
@@ -57,7 +57,7 @@ pipeline {
                     rm -rf "$AUTHORITATIVE_DIR" "$CLONE_DIR"
                     mkdir -p "$CLONE_DIR"
                     git clone --depth=1 --no-checkout \
-                        "https://oauth2:${GITCODE_TOKEN}@gitcode.com/Computing_Ecosystem_Docs/Computing_Ecosystem_Docs-EN.git" \
+                        "https://oauth2:${ATOMGIT_TOKEN}@atomgit.com/Computing_Ecosystem_Docs/Computing_Ecosystem_Docs-EN.git" \
                         "$AUTHORITATIVE_DIR"
                 '''
             }
@@ -66,7 +66,7 @@ pipeline {
             steps {
                 // Token 由任务的 Password Parameter 注入为环境变量；
                 // 引擎不再读取权威仓的 token_rules.json，扫描与提交统一
-                // 使用默认 GITCODE_TOKEN（按仓库细分的命名 token 仅由
+                // 使用默认 ATOMGIT_TOKEN（按仓库细分的命名 token 仅由
                 // 服务侧 webapp.token_router 从 Vault 解析）
                 sh '.venv/bin/python -m translator_ci'
             }

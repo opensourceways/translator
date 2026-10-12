@@ -1,6 +1,6 @@
 """client 模块的单元测试。
 
-覆盖 GitCode API 客户端的请求方法、路径、参数位置和错误处理。
+覆盖 AtomGit API 客户端的请求方法、路径、参数位置和错误处理。
 所有测试通过 mock requests.request 拦截，不发起真实网络请求。
 """
 
@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from translator import client
-from translator.client import GitCodeError
+from translator.client import AtomGitError
 from tests.conftest import make_error_response, make_ok_response
 
 
@@ -23,10 +23,10 @@ class TestRequestBasics:
             headers = m.call_args.kwargs["headers"]
             assert headers["Authorization"] == "Bearer tok"
 
-    def test_error_raises_gitcode_error(self):
+    def test_error_raises_atomgit_error(self):
         resp = make_error_response(403, {"message": "Forbidden"})
         with patch("translator.client.requests.request", return_value=resp):
-            with pytest.raises(GitCodeError) as exc_info:
+            with pytest.raises(AtomGitError) as exc_info:
                 client.get_repo("Ascend", "msprof", "tok")
             assert exc_info.value.status_code == 403
             assert "Forbidden" in str(exc_info.value)
@@ -44,7 +44,7 @@ class TestRequestBasics:
         with patch("translator.client.requests.request",
                    return_value=make_error_response(429)), \
                 patch("translator.client.time.sleep"):
-            with pytest.raises(GitCodeError) as exc_info:
+            with pytest.raises(AtomGitError) as exc_info:
                 client.get_repo("Ascend", "msprof", "tok")
             assert exc_info.value.status_code == 429
 
@@ -85,7 +85,7 @@ class TestEndpoints:
         assert payload["base"] == "26.1.0"
 
     def test_list_pull_requests_no_server_filters(self):
-        """GitCode 服务端不支持 head/base 过滤（带参返回空），不得传参。"""
+        """AtomGit 服务端不支持 head/base 过滤（带参返回空），不得传参。"""
         with patch("translator.client.requests.request",
                    return_value=make_ok_response([])) as m:
             client.list_pull_requests("Ascend", "msprof", "tok", state="open")
@@ -128,11 +128,11 @@ class TestGetContents:
             assert client.get_contents("o", "r", "a.md", "master", "tok") is None
 
     def test_500_raises(self):
-        """持续 500 时重试耗尽后抛出 GitCodeError。"""
+        """持续 500 时重试耗尽后抛出 AtomGitError。"""
         with patch("translator.client.requests.request",
                    return_value=make_error_response(500)), \
                 patch("translator.client.time.sleep"):
-            with pytest.raises(GitCodeError):
+            with pytest.raises(AtomGitError):
                 client.get_contents("o", "r", "a.md", "master", "tok")
 
     def test_500_retries_then_succeeds(self):
@@ -150,7 +150,7 @@ class TestGetContents:
         with patch("translator.client.requests.request",
                    return_value=make_error_response(503)), \
                 patch("translator.client.time.sleep") as sleep_mock:
-            with pytest.raises(GitCodeError):
+            with pytest.raises(AtomGitError):
                 client.sync_repo("o", "r", "tok")
             sleep_mock.assert_not_called()
 
@@ -161,7 +161,7 @@ class TestListDir:
     def test_file_path_raises(self):
         with patch("translator.client.requests.request",
                    return_value=make_ok_response({"type": "file"})):
-            with pytest.raises(GitCodeError) as exc_info:
+            with pytest.raises(AtomGitError) as exc_info:
                 client.list_dir("o", "r", "a.md", "master", "tok")
             assert "不是目录" in str(exc_info.value)
 
@@ -226,6 +226,6 @@ class TestPagination:
     def test_non_array_page_raises(self):
         with patch("translator.client.requests.request",
                    return_value=make_ok_response({"error": "boom"})):
-            with pytest.raises(GitCodeError):
+            with pytest.raises(AtomGitError):
                 client.list_branches("o", "r", "tok")
 

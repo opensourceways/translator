@@ -1,7 +1,7 @@
 """service 模块的单元测试。
 
 覆盖扫描对比（scan_changed）和幂等提交（submit_repo / submit_all）。
-测试通过 mock 各子模块的 client 完全控制下游 GitCode API 依赖，
+测试通过 mock 各子模块的 client 完全控制下游 AtomGit API 依赖，
 不发起真实网络请求。
 """
 
@@ -17,7 +17,7 @@ import pytest
 import requests
 
 from translator import client, common, index, localgit, scan, submit
-from translator.client import GitCodeError
+from translator.client import AtomGitError
 
 SILENT = lambda msg: None  # 测试中静默日志
 
@@ -103,7 +103,7 @@ REPO_PATHS = [
 def _make_client_mock():
     """构造 mock 的 client：get_repo 返回默认分支，list_dir 按模拟树返回。"""
     client_mock = MagicMock()
-    client_mock.GitCodeError = GitCodeError
+    client_mock.AtomGitError = AtomGitError
     client_mock.get_repo.return_value = {"default_branch": "master"}
     client_mock.list_dir.side_effect = (
         lambda owner, repo, path, ref, token: FAKE_TREE[path]
@@ -148,26 +148,26 @@ def _make_sha_scan_client_mock(entry_sha, target_sha):
 
 
 class TestSourceRepoOverride:
-    """来源仓库可用 GITCODE_SOURCE_REPO 覆盖为自己的 Fork。"""
+    """来源仓库可用 ATOMGIT_SOURCE_REPO 覆盖为自己的 Fork。"""
 
     def test_default_is_authoritative(self, monkeypatch):
-        monkeypatch.delenv("GITCODE_SOURCE_REPO", raising=False)
+        monkeypatch.delenv("ATOMGIT_SOURCE_REPO", raising=False)
         assert common._source_repo() == (
             common.SOURCE_ORG, common.SOURCE_REPO)
 
     def test_env_override(self, monkeypatch):
-        monkeypatch.setenv("GITCODE_SOURCE_REPO", "user/Fork-Repo")
+        monkeypatch.setenv("ATOMGIT_SOURCE_REPO", "user/Fork-Repo")
         assert common._source_repo() == ("user", "Fork-Repo")
 
     def test_env_full_url_tolerated(self, monkeypatch):
         """粘贴完整 URL 或带 .git 后缀时也能正确解析。"""
         for value in (
-            "https://gitcode.com/user/Fork-Repo",
-            "https://gitcode.com/user/Fork-Repo.git",
+            "https://atomgit.com/user/Fork-Repo",
+            "https://atomgit.com/user/Fork-Repo.git",
             "user/Fork-Repo.git",
             "user/Fork-Repo/",
         ):
-            monkeypatch.setenv("GITCODE_SOURCE_REPO", value)
+            monkeypatch.setenv("ATOMGIT_SOURCE_REPO", value)
             assert common._source_repo() == ("user", "Fork-Repo")
 
 
@@ -176,18 +176,18 @@ class TestSyncSource:
 
     def _client_mock(self):
         client_mock = MagicMock()
-        client_mock.GitCodeError = GitCodeError
+        client_mock.AtomGitError = AtomGitError
         return client_mock
 
     def test_authoritative_source_skips(self, monkeypatch):
-        monkeypatch.delenv("GITCODE_SOURCE_REPO", raising=False)
+        monkeypatch.delenv("ATOMGIT_SOURCE_REPO", raising=False)
         client_mock = self._client_mock()
         with patch("translator.index.client", client_mock):
             index.sync_source("tok", log=SILENT)
             client_mock.sync_repo.assert_not_called()
 
     def test_fork_synced_and_polled(self, monkeypatch):
-        monkeypatch.setenv("GITCODE_SOURCE_REPO", "user/fork")
+        monkeypatch.setenv("ATOMGIT_SOURCE_REPO", "user/fork")
         client_mock = self._client_mock()
         client_mock.get_sync_status.return_value = {"repo_sync_result": True}
         with patch("translator.index.client", client_mock):
@@ -196,9 +196,9 @@ class TestSyncSource:
             client_mock.get_sync_status.assert_called_once()
 
     def test_sync_failure_non_fatal(self, monkeypatch):
-        monkeypatch.setenv("GITCODE_SOURCE_REPO", "user/fork")
+        monkeypatch.setenv("ATOMGIT_SOURCE_REPO", "user/fork")
         client_mock = self._client_mock()
-        client_mock.sync_repo.side_effect = GitCodeError(400, "not a fork")
+        client_mock.sync_repo.side_effect = AtomGitError(400, "not a fork")
         with patch("translator.index.client", client_mock):
             index.sync_source("tok", log=SILENT)  # 不应抛异常
 
@@ -213,7 +213,7 @@ class TestScanChanged:
 
     def test_load_index_failure(self):
         client_mock = _make_client_mock()
-        client_mock.get_repo.side_effect = GitCodeError(403, "Forbidden")
+        client_mock.get_repo.side_effect = AtomGitError(403, "Forbidden")
         with _patch_scan_client(client_mock):
             result = scan.scan_changed("", "tok", log=SILENT)
             assert result["ok"] is False
@@ -308,7 +308,7 @@ class TestScanChanged:
     def test_skipped_when_repo_missing(self):
         """目标仓库 404（不存在或无权限）时记入 skipped。"""
         client_mock = _make_scan_client_mock()
-        client_mock.list_branches.side_effect = GitCodeError(404, "Not Found")
+        client_mock.list_branches.side_effect = AtomGitError(404, "Not Found")
         with _patch_scan_client(client_mock):
             result = scan.scan_changed("", "tok", log=SILENT)
             assert result["changed"] == []
@@ -320,7 +320,7 @@ class TestScanChanged:
 
         def get_contents(owner, repo, path, ref, token):
             if repo == "mspti":
-                raise GitCodeError(500, "server error")
+                raise AtomGitError(500, "server error")
             return None
 
         client_mock.get_contents.side_effect = get_contents
@@ -463,7 +463,7 @@ def _make_submit_client_mock():
     已有 Fork；目标分支 26.1.0 存在（sha abc123）；无已开 PR。
     """
     client_mock = MagicMock()
-    client_mock.GitCodeError = GitCodeError
+    client_mock.AtomGitError = AtomGitError
     client_mock.get_user.return_value = {"login": "bot",
                                          "email": "bot@huawei.com"}
     client_mock.list_repo_forks.return_value = [
@@ -668,7 +668,7 @@ class TestSubmitRepo:
     def test_create_pr_409_treated_as_existing(self):
         """去重漏判时服务端返回 409：从错误消息提取 PR 号按已存在处理。"""
         client_mock = _make_submit_client_mock()
-        client_mock.create_pr.side_effect = GitCodeError(
+        client_mock.create_pr.side_effect = AtomGitError(
             409, '{"error_code":409,"error_message":"Another open merge '
                  'request already exists for this source branch: !443"}')
         with patch("translator.submit.client", client_mock), \
@@ -697,7 +697,7 @@ class TestSubmitRepo:
         """分支重建失败（如 Fork 缺目标分支/推送失败）时不创建 PR。"""
         client_mock = _make_submit_client_mock()
         localgit_mock = _make_localgit_mock()
-        localgit_mock.rebuild_branch.side_effect = GitCodeError(
+        localgit_mock.rebuild_branch.side_effect = AtomGitError(
             200, "git checkout -B 失败: 分支不存在")
         with patch("translator.submit.client", client_mock), \
                 patch("translator.submit.localgit", localgit_mock):
@@ -709,7 +709,7 @@ class TestSubmitRepo:
 
     def test_get_user_failure(self):
         client_mock = _make_submit_client_mock()
-        client_mock.get_user.side_effect = GitCodeError(401, "Unauthorized")
+        client_mock.get_user.side_effect = AtomGitError(401, "Unauthorized")
         with patch("translator.submit.client", client_mock), \
                 patch("translator.submit.localgit", _make_localgit_mock()):
             result = submit.submit_repo(
@@ -721,7 +721,7 @@ class TestSubmitRepo:
         """按分支同步 400（Fork 缺少该分支）时退化为全量同步。"""
         client_mock = _make_submit_client_mock()
         client_mock.sync_repo.side_effect = [
-            GitCodeError(400, "26.1.0 branch or tag not found"),
+            AtomGitError(400, "26.1.0 branch or tag not found"),
             {"repo_sync_result": False},
         ]
         # 全量同步后目标分支立即出现在 Fork 上（免于轮询等待）
@@ -740,7 +740,7 @@ class TestSubmitRepo:
         """全量同步是异步的：轮询 Fork 分支列表，等目标分支出现再重建。"""
         client_mock = _make_submit_client_mock()
         client_mock.sync_repo.side_effect = [
-            GitCodeError(400, "26.1.0 branch or tag not found"),
+            AtomGitError(400, "26.1.0 branch or tag not found"),
             {},
         ]
         calls = {"n": 0}
@@ -955,7 +955,7 @@ class TestRebuildBranch:
                 ["git", "-C", str(fork_bare), "log", "-1",
                  "--format=%ae", self.HEAD],
                 capture_output=True, text=True)
-            assert out.stdout.strip() == "u@noreply.gitcode.com"
+            assert out.stdout.strip() == "u@noreply.atomgit.com"
         finally:
             shutil.rmtree(fake_home, ignore_errors=True)
 
@@ -969,7 +969,7 @@ class TestRebuildBranch:
         out = subprocess.run(
             ["git", "-C", str(fork_bare), "log", "-1", "--format=%ae",
              self.HEAD], capture_output=True, text=True)
-        assert out.stdout.strip() == "u@noreply.gitcode.com"
+        assert out.stdout.strip() == "u@noreply.atomgit.com"
         # 同内容、传正确邮箱：树相同但作者不对 → 强推重写
         result, dest = self._rebuild(fork_bare, spec,
                                      author_email="u@huawei.com")
@@ -1038,11 +1038,11 @@ class TestListTree:
 
         def list_dir(owner, repo, path, ref, token):
             if path == "en":
-                raise GitCodeError(500, "boom")
+                raise AtomGitError(500, "boom")
             return [{"type": "dir", "path": "en"}]
 
         with patch.object(client_mod, "list_dir", side_effect=list_dir):
-            with pytest.raises(GitCodeError):
+            with pytest.raises(AtomGitError):
                 client_mod.list_tree("cann", "release-management", "master", "t")
 
 
@@ -1137,7 +1137,7 @@ def _incremental_mocks(changed_paths, error=None):
     """构造增量模式的 localgit 依赖 mock（fetch_commit + diff_paths）。
 
     changed_paths: diff_paths 返回的变更路径集合
-    error: 非 None 时 diff_paths 抛 GitCodeError（模拟 sha 不可达）
+    error: 非 None 时 diff_paths 抛 AtomGitError（模拟 sha 不可达）
     返回 (patches 列表, fetch_mock, diff_mock)。
     """
     fetch_mock = MagicMock(return_value="before-sha")
@@ -1229,7 +1229,7 @@ class TestIndexLocalTree:
         tree = {
             "Ascend/26.1.0/MindStudio/msprof/../../evil": "s",
         }
-        with pytest.raises(GitCodeError) as exc_info:
+        with pytest.raises(AtomGitError) as exc_info:
             index._repo_files_from_tree(
                 tree, "Ascend/26.1.0/MindStudio/msprof")
         assert "非法的文件路径" in str(exc_info.value)
@@ -1383,7 +1383,7 @@ class TestScanChangedLocalMode:
         client_mock = _make_scan_client_mock()
         patches, clone_mock, cat_blob_mock = _local_mode_mocks(
             self.LOCAL_SOURCE, {})
-        clone_mock.side_effect = GitCodeError(404, "Repository not found")
+        clone_mock.side_effect = AtomGitError(404, "Repository not found")
         with _patch_scan_client(client_mock), ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
@@ -1510,7 +1510,7 @@ class TestScanChangedIncremental:
         result, clone_mock, *_ = self._run(
             client_mock, {},
             changed_paths=None,
-            diff_error=GitCodeError(200, "bad object b-sha"),
+            diff_error=AtomGitError(200, "bad object b-sha"),
             diff_before="b-sha", diff_after="a-sha")
         assert result["ok"] is True
         assert result["incremental"] is False
@@ -1572,7 +1572,7 @@ def _ok_response(payload=None):
 
 class TestNetworkErrorRetry:
     """网络层异常（读超时/断连）在 _do_request 内重试，耗尽后包装为
-    GitCodeError（status_code=0），让单仓失败不中断整个批次。"""
+    AtomGitError（status_code=0），让单仓失败不中断整个批次。"""
 
     def test_retry_then_success(self):
         ok = _ok_response({"id": 1})
@@ -1586,12 +1586,12 @@ class TestNetworkErrorRetry:
         assert req_mock.call_count == 2
         sleep_mock.assert_called_once()
 
-    def test_retry_exhausted_raises_gitcode_error(self):
+    def test_retry_exhausted_raises_atomgit_error(self):
         with patch("translator.client._throttle"), \
                 patch("translator.client.time.sleep"), \
                 patch("translator.client.requests.request",
                       side_effect=requests.exceptions.ConnectionError("down")):
-            with pytest.raises(GitCodeError) as ei:
+            with pytest.raises(AtomGitError) as ei:
                 client._do_request("POST", "http://api/pulls", "tok")
         assert "网络错误" in str(ei.value)
 
@@ -1607,7 +1607,7 @@ class TestNetworkErrorRetry:
 
 
 class TestPaginateBrokenPaging:
-    """GitCode 部分接口（PR files）忽略分页参数，每页都返回同一份全量，
+    """AtomGit 部分接口（PR files）忽略分页参数，每页都返回同一份全量，
     _paginate 必须终止，否则以限流速率无限打请求（#80 卡死一小时）。"""
 
     @staticmethod

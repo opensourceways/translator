@@ -362,7 +362,7 @@ class TestRecordSubmitResults:
         db.record_submit_results(run_id, [{
             "path": "Ascend/26.1.0/MindStudio/msprof",
             "ok": True, "pr_existed": False, "pr_number": 12,
-            "pr_url": "https://gitcode.com/Ascend/msprof/merge_requests/12",
+            "pr_url": "https://atomgit.com/Ascend/msprof/merge_requests/12",
             "head_branch": "translator/auto-26.1.0",
         }])
         row = db.get_run_repos(run_id)[0]
@@ -440,7 +440,7 @@ class TestLatestRepoStatuses:
             r2, _changed_scan("Ascend", "msprof", "26.1.0", new=2, upd=3))
         db.record_submit_results(r2, [{
             "path": "Ascend/26.1.0/msprof", "ok": True, "pr_existed": False,
-            "pr_number": 12, "pr_url": "https://gitcode.com/x/12"}])
+            "pr_number": 12, "pr_url": "https://atomgit.com/x/12"}])
         db.mark_run(r2, "success")
 
         rows = {(row["repo"]): row for row in db.latest_repo_statuses()}
@@ -450,7 +450,7 @@ class TestLatestRepoStatuses:
         assert latest["status"] == "submit_ok"
         assert latest["new_count"] == 2 and latest["update_count"] == 3
         assert latest["pr_number"] == 12
-        assert latest["pr_url"] == "https://gitcode.com/x/12"
+        assert latest["pr_url"] == "https://atomgit.com/x/12"
         assert latest["finished_at"] == db.get_run(r2)["finished_at"]
         # toolkit 未参与 r2，保留 r1 的影子状态
         assert rows["toolkit"]["run_id"] == r1
@@ -475,7 +475,7 @@ class TestPrs:
     def test_upsert_insert(self, db):
         db.upsert_pr("Ascend", "msprof", 12, branch="26.1.0",
                      path="Ascend/26.1.0/MindStudio/msprof",
-                     url="https://gitcode.com/x/12", title="译稿更新",
+                     url="https://atomgit.com/x/12", title="译稿更新",
                      source="service", run_id=1)
         prs = db.open_prs()
         assert len(prs) == 1

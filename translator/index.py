@@ -68,7 +68,7 @@ def sync_source(token, log=print, attempts=10, interval=2):
     """扫描前同步来源仓库与其上游（来源为 Fork 时使用）。
 
     没有权威仓库管理权限时，来源可指向自己的 Fork
-    （GITCODE_SOURCE_REPO 环境变量），但 Fork 不会自动跟进上游更新，
+    （ATOMGIT_SOURCE_REPO 环境变量），但 Fork 不会自动跟进上游更新，
     扫描前需先同步，否则对比的是旧内容。同步为异步操作，触发后
     轮询等待完成；失败或超时不阻断——扫描仍按 Fork 当前内容继续。
     """
@@ -79,7 +79,7 @@ def sync_source(token, log=print, attempts=10, interval=2):
     log(f"正在同步来源 Fork: {owner}/{repo}")
     try:
         client.sync_repo(owner, repo, token)
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         log(f"来源 Fork 同步触发失败（{e}），按当前内容继续扫描")
         return
     try:
@@ -91,7 +91,7 @@ def sync_source(token, log=print, attempts=10, interval=2):
                 return
             log(f"等待来源 Fork 同步 ({i + 1}/{attempts})...")
             time.sleep(interval)
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         log(f"来源 Fork 同步未完成（{e}），按当前内容继续扫描")
 
 
@@ -120,7 +120,7 @@ def _walk_files(path, ref, token, prefix=""):
         else:
             normalized = os.path.normpath(rel).replace("\\", "/")
             if normalized.startswith("..") or os.path.isabs(rel):
-                raise client.GitCodeError(400, f"非法的文件路径: {rel}")
+                raise client.AtomGitError(400, f"非法的文件路径: {rel}")
             files.append({"path": rel, "sha": e.get("sha")})
     return files
 
@@ -199,6 +199,6 @@ def _repo_files_from_tree(tree, repo_path):
         rel = p[len(prefix):]
         normalized = os.path.normpath(rel).replace("\\", "/")
         if normalized.startswith("..") or os.path.isabs(rel):
-            raise client.GitCodeError(400, f"非法的文件路径: {rel}")
+            raise client.AtomGitError(400, f"非法的文件路径: {rel}")
         files.append({"path": rel, "sha": sha})
     return files

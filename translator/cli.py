@@ -5,12 +5,12 @@
 
 凭据优先读 secrets 文件（/vault/secrets/.env，见 translator.secrets），文件
 不存在时回退环境变量（Jenkins 凭据注入），不读任何本地配置文件：
-    GITCODE_TOKEN            默认 Token（必需；读译稿权威仓库与提交均用它）
+    ATOMGIT_TOKEN            默认 Token（必需；读译稿权威仓库与提交均用它）
 
 本地化模式（绕开 API 限流，由 Jenkinsfile 克隆权威仓库后注入）：
-    GITCODE_LOCAL_SOURCE_DIR 权威仓库的本地克隆目录（设置后索引/列文件
+    ATOMGIT_LOCAL_SOURCE_DIR 权威仓库的本地克隆目录（设置后索引/列文件
                              走本地 git，不再调用 API）
-    GITCODE_CLONE_DIR        目标仓库本地克隆目录（设置后目标对比也本地
+    ATOMGIT_CLONE_DIR        目标仓库本地克隆目录（设置后目标对比也本地
                              化；未设置则目标对比回退 API）
 
 退出码：
@@ -49,14 +49,14 @@ def main(argv=None):
                         help="强制全量扫描（忽略增量参数，手动构建重试用）")
     args = parser.parse_args(argv)
 
-    token = secrets.get("GITCODE_TOKEN", "").strip()
+    token = secrets.get("ATOMGIT_TOKEN", "").strip()
     if not token:
-        _log("错误：未配置 GITCODE_TOKEN（secrets 文件或环境变量，默认 Token）")
+        _log("错误：未配置 ATOMGIT_TOKEN（secrets 文件或环境变量，默认 Token）")
         return 1
 
     # 本地化模式：权威仓库已在 agent 上克隆（Jenkinsfile 注入）
-    local_source_dir = os.environ.get("GITCODE_LOCAL_SOURCE_DIR", "").strip() or None
-    clone_root = os.environ.get("GITCODE_CLONE_DIR", "").strip() or None
+    local_source_dir = os.environ.get("ATOMGIT_LOCAL_SOURCE_DIR", "").strip() or None
+    clone_root = os.environ.get("ATOMGIT_CLONE_DIR", "").strip() or None
     if local_source_dir:
         _log(f"本地化模式：索引来源 {local_source_dir}，目标克隆目录 "
              f"{clone_root or '未设置（目标对比回退 API）'}")

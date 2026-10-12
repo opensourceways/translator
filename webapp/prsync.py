@@ -10,7 +10,7 @@
   按 head.ref 前缀 translator/auto- + base 过滤（口径同引擎
   submit._pr_matches）发现 Jenkins 建的 PR，落库 source='jenkins'；
   发现与轮询共享单轮仓库预算
-- 单 PR/单仓失败（GitCodeError）只告警不中断本轮其余处理；整轮异常由
+- 单 PR/单仓失败（AtomGitError）只告警不中断本轮其余处理；整轮异常由
   Poller.run 兜底，告警后下轮继续
 """
 
@@ -26,7 +26,7 @@ from webapp.db import is_shadow
 
 log = logging.getLogger("webapp.prsync")
 
-# 单轮处理仓库数上限（轮询与发现共享），避免打满 GitCode 账号限流
+# 单轮处理仓库数上限（轮询与发现共享），避免打满 AtomGit 账号限流
 MAX_REPOS_PER_POLL = 20
 
 # 每轮顺带清理多少天前的 run（级联删 run_repos）
@@ -66,7 +66,7 @@ class Poller(threading.Thread):
 
 def _poll_once(db, settings):
     """执行一轮轮询：已知 open PR 状态 → 影子模式 PR 发现 → 收尾。"""
-    default_token = secrets.get("GITCODE_TOKEN", "")
+    default_token = secrets.get("ATOMGIT_TOKEN", "")
     used, polled = _poll_open_prs(db, default_token, MAX_REPOS_PER_POLL)
     if is_shadow(db) and used < MAX_REPOS_PER_POLL:
         _discover_jenkins_prs(db, default_token,
@@ -123,7 +123,7 @@ def _poll_one_pr(db, row, default_token):
         return
     try:
         pr = client.get_pull_request(org, repo, number, token)
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         log.warning("查询 PR 状态失败 %s/%s#%s: %s", org, repo, number, e)
         return
     assignees = None
@@ -146,9 +146,9 @@ def _poll_one_pr(db, row, default_token):
 
 
 def _map_state(pr):
-    """把 GitCode PR 响应映射为落库状态（merged/closed/open）。
+    """把 AtomGit PR 响应映射为落库状态（merged/closed/open）。
 
-    GitCode（Gitee 系）PR 的 state 通常只有 open/closed，"已合并"看
+    AtomGit（Gitee 系）PR 的 state 通常只有 open/closed，"已合并"看
     merged 字段为真或 merged_at 非空，两者任一成立即 merged。
     """
     if pr.get("merged") or pr.get("merged_at"):
@@ -193,7 +193,7 @@ def _discover_repo(db, info, default_token):
         return
     try:
         prs = client.list_pull_requests(org, repo, token, state="open")
-    except client.GitCodeError as e:
+    except client.AtomGitError as e:
         log.warning("列出 PR 失败 %s/%s: %s", org, repo, e)
         return
     for pr in prs:
