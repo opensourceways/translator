@@ -60,9 +60,12 @@ http://<服务地址>:8000/webhook/atomgit?token=<TR_WEBHOOK_TOKEN 的值>
 
 ### K8s 部署
 
-清单在 `deploy/k8s/`（Namespace/ConfigMap/PVC/Deployment/Service，
-Secret 仅模板需自行生成）。要点：单副本 + `Recreate` 策略 + RWO PVC
-挂 `/data`。数据迁移用 SQLite `.backup` 导出后 kubectl cp 进 PVC。
+清单在 `deploy/k8s/`（Namespace/ConfigMap/PVC/Deployment/Service/Ingress）。
+要点：单副本 + `Recreate` 策略 + RWO PVC 挂 `/data`；凭据经 Vault Agent
+Injector 挂载为 `/vault/secrets/.env`（注解见 Deployment），不进进程环境；
+对外 HTTPS 由 Ingress（nginx）终结，证书 Secret `tls-secrets` 由运维经
+Vault `domain-tls` 维护（hotopic 同款），本仓不持有证书材料，域名上线前
+需运维确认。数据迁移用 SQLite `.backup` 导出后 kubectl cp 进 PVC。
 
 ### 运行用户与权限（非 root）
 

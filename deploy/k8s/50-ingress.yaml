@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: translator-ingress
+  namespace: translator
+spec:
+  # TLS 在入口层终结，应用自身保持纯 HTTP（对齐 hotopic 模式）：
+  # 服务无证书逻辑，加密/证书由 Ingress + 运维维护的证书 Secret 解决
+  ingressClassName: nginx
+  rules:
+    - # 对外域名：按组织测试环境命名规律推定，上线前需运维确认并替换
+      # （确认后同步修改下方 tls.hosts）
+      host: translator.test.osinfra.cn
+      http:
+        paths:
+          - backend:
+              service:
+                name: translator
+                port:
+                  number: 8000
+            path: /
+            pathType: Prefix
+  tls:
+    - hosts:
+        - translator.test.osinfra.cn
+      # 证书 Secret 由运维维护：Vault domain-tls 路径经 SecretDefinition
+      # 渲染（hotopic 同款），或运维直接创建；本清单不持有任何证书材料。
+      # 域名证书就绪前 Ingress 不会生效，属预期的上线前置依赖
+      secretName: tls-secrets
