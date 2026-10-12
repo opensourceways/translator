@@ -18,10 +18,10 @@ import logging
 import threading
 from datetime import datetime, timezone
 
-from translator import client, secrets, service
+from translator import client, secrets
 from translator.common import AUTO_BRANCH_PREFIX
 
-from webapp import rules_cache
+from webapp import token_router
 from webapp.db import is_shadow
 
 log = logging.getLogger("webapp.prsync")
@@ -65,38 +65,17 @@ class Poller(threading.Thread):
 
 
 def _poll_once(db, settings):
-    """执行一轮轮询：规则 → 已知 open PR 状态 → 影子模式 PR 发现 → 收尾。"""
+    """执行一轮轮询：已知 open PR 状态 → 影子模式 PR 发现 → 收尾。"""
     default_token = secrets.get("GITCODE_TOKEN", "")
-    rules = _ensure_rules(db, default_token)
-    used, polled = _poll_open_prs(db, rules, default_token,
-                                  MAX_REPOS_PER_POLL)
+    used, polled = _poll_open_prs(db, default_token, MAX_REPOS_PER_POLL)
     if is_shadow(db) and used < MAX_REPOS_PER_POLL:
-        _discover_jenkins_prs(db, rules, default_token,
+        _discover_jenkins_prs(db, default_token,
                               MAX_REPOS_PER_POLL - used, polled)
     db.kv_set("last_poll_at", _utcnow())
     db.cleanup_old_runs(CLEANUP_DAYS)
 
 
-def _ensure_rules(db, default_token):
-    """取 Token 规则：优先进程内缓存（runner 每次 run 后写入）。
-
-    缓存为空（如服务重启后尚无 run）时回退 API 模式加载一次并回填缓存；
-    加载失败只告警，本轮全部使用默认 Token 继续。db 参数保留仅为
-    调用方兼容（命名 token 的解析在 resolve_repo_token 内按仓查询）。
-    """
-    rules = rules_cache.get_rules()
-    if rules:
-        return rules
-    try:
-        rules = service.load_token_rules(default_token, log=log.info)
-    except Exception as e:
-        log.warning("加载 Token 规则失败，本轮全部使用默认 Token: %s", e)
-        return []
-    rules_cache.set_rules(rules)
-    return rules
-
-
-def _poll_open_prs(db, rules, default_token, budget):
+def _poll_open_prs(db, default_token, budget):
     """轮询已知 open PR 状态，单轮最多 budget 个仓（按 last_polled 最旧优先）。
 
     Returns:
@@ -116,7 +95,7 @@ def _poll_open_prs(db, rules, default_token, budget):
         used += 1
         polled.add((org, repo))
         for row in rows:
-            _poll_one_pr(db, row, rules, default_token)
+            _poll_one_pr(db, row, default_token)
     return used, polled
 
 
@@ -128,15 +107,20 @@ def _extract_labels(pr):
             for l in pr.get("labels") or [] if isinstance(l, dict)]
 
 
-def _poll_one_pr(db, row, rules, default_token):
+def _poll_one_pr(db, row, default_token):
     """查询单个 PR 最新状态并落库；失败只告警不中断。
 
     除 state/mergeable 外，顺带落派生状态原始信号：labels（名字+颜色）、
-    draft、评审人计数（assignees 中 accept 为真记为已通过）。
+    draft、评审人计数（assignees 中 accept 为真记为已通过）。Token 按
+    仓库配置解析（命名 Token 名称 → Vault 值）；名称在 Vault 缺失时
+    跳过该 PR（下轮重试）。
     """
     org, repo, number = row["org"], row["repo"], row["number"]
-    token, _ = rules_cache.resolve_repo_token(
-        db, org, repo, row.get("path") or "", rules, default_token)
+    token, _name, token_error = token_router.resolve_repo_token(
+        db, org, repo, default_token)
+    if token_error:
+        log.warning("跳过 PR %s/%s#%s：%s", org, repo, number, token_error)
+        return
     try:
         pr = client.get_pull_request(org, repo, number, token)
     except client.GitCodeError as e:
@@ -174,7 +158,7 @@ def _map_state(pr):
     return "open"
 
 
-def _discover_jenkins_prs(db, rules, default_token, budget, polled):
+def _discover_jenkins_prs(db, default_token, budget, polled):
     """影子模式：对已知仓库拉全量 open PR，发现 Jenkins 建的自动翻译 PR。
 
     候选仓库为 db.distinct_repos()（prs 表 + 近期 run_repos 去重），跳过
@@ -192,14 +176,21 @@ def _discover_jenkins_prs(db, rules, default_token, budget, polled):
     candidates.sort(key=lambda i: (last_polled.get((i["org"], i["repo"]), ""),
                                    i["org"], i["repo"], i["branch"] or ""))
     for info in candidates[:budget]:
-        _discover_repo(db, info, rules, default_token)
+        _discover_repo(db, info, default_token)
 
 
-def _discover_repo(db, info, rules, default_token):
-    """单仓发现：list_pull_requests 拉全量 open PR 后客户端过滤落库。"""
+def _discover_repo(db, info, default_token):
+    """单仓发现：list_pull_requests 拉全量 open PR 后客户端过滤落库。
+
+    Token 按仓库配置解析（命名 Token 名称 → Vault 值）；名称在 Vault
+    缺失时跳过该仓。
+    """
     org, repo, branch = info["org"], info["repo"], info["branch"]
-    token, _ = rules_cache.resolve_repo_token(
-        db, org, repo, info.get("path") or "", rules, default_token)
+    token, _name, token_error = token_router.resolve_repo_token(
+        db, org, repo, default_token)
+    if token_error:
+        log.warning("跳过仓库发现 %s/%s：%s", org, repo, token_error)
+        return
     try:
         prs = client.list_pull_requests(org, repo, token, state="open")
     except client.GitCodeError as e:

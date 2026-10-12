@@ -1,7 +1,7 @@
 """runner（execute_run / Worker / 日志脱敏）的单元测试。
 
 全部 mock 不触网：patch 到 runner 模块引用点的
-localgit.clone 与 service.load_*/scan_changed/submit_repo；
+localgit.clone 与 service.scan_changed/submit_repo；
 db 用 tmp_path 真库。
 """
 
@@ -21,7 +21,7 @@ from webapp.queueing import CoalescingQueue, Trigger
 from webapp.runner import LogBuffer, SecretMasker, Worker, execute_run
 
 DEFAULT_TOKEN = "default-secret-token"
-RULE_TOKEN = "rule-secret-token"
+VAULT_TOKEN = "vault-secret-token"
 
 
 @pytest.fixture
@@ -67,16 +67,14 @@ def _scan(changed=None, errors=None, incremental=False, ok=True,
 def engine():
     """把引擎入口全部 mock 到 runner 模块引用点，返回各 mock 句柄。"""
     with patch.object(runner.localgit, "clone") as clone, \
-            patch.object(runner.service, "load_token_rules") as load_rules, \
             patch.object(runner.service, "scan_changed") as scan, \
             patch.object(runner.service, "submit_repo") as submit:
         clone.side_effect = lambda *a, **kw: os.makedirs(a[4], exist_ok=True)
-        load_rules.return_value = []
         scan.return_value = _scan()
         submit.return_value = {"ok": True, "noop": True,
                                "head_branch": "translator/auto-26.1.0"}
-        yield SimpleNamespace(clone=clone, load_rules=load_rules,
-                              scan_changed=scan, submit_repo=submit)
+        yield SimpleNamespace(clone=clone, scan_changed=scan,
+                              submit_repo=submit)
 
 
 @pytest.fixture
@@ -178,26 +176,6 @@ class TestActiveMode:
         assert repo["pr_existed"] == 1
         assert db.list_prs()[0]["number"] == 7
 
-    def test_token_rule_routing(self, settings, db, token_env, engine, auto_pr_on):
-        """命中规则的仓库用规则 token 提交；配置了有效规则时未命中的
-        仓库按权限管控不提交（记 token_rule 失败，与 submit_all 一致）。"""
-        set_shadow(db, False)
-        engine.load_rules.return_value = [
-            {"keyword": "msprof", "token": RULE_TOKEN}]
-        engine.scan_changed.return_value = _scan(changed=[
-            _changed_item(),
-            _changed_item(path="CANN/9.1.0/sip/cann", org="CANN",
-                          repo="cann", branch="9.1.0"),
-        ])
-        execute_run(_push_trigger(), settings, db)
-        tokens = [c.args[4] for c in engine.submit_repo.call_args_list]
-        assert tokens == [RULE_TOKEN]
-        run = db.list_runs()[0]
-        repos = {r["path"]: r for r in db.get_run_repos(run["id"])}
-        skipped = repos["CANN/9.1.0/sip/cann"]
-        assert skipped["status"] == "submit_failed"
-        assert skipped["stage"] == "token_rule"
-
     def test_submit_failure_marks_partial(
             self, settings, db, token_env, engine, auto_pr_on):
         set_shadow(db, False)
@@ -238,18 +216,14 @@ class TestActiveMode:
         assert repos["Ascend/26.1.0/MindStudio/msprof"]["stage"] == "exception"
 
 
-class TestDbTokenRouting:
-    """仓库配置里的专属 token：优先级高于关键字规则与默认 token，且入脱敏集合。"""
+class TestNamedTokenRouting:
+    """仓库配置引用的命名 token（名称 → Vault）：覆盖默认 token，且入脱敏集合。"""
 
-    DB_TOKEN = "db-secret-token"
-
-    def test_db_token_takes_precedence(
-            self, settings, db, token_env, engine, auto_pr_on):
+    def test_named_token_from_vault_used(
+            self, settings, db, token_env, engine, auto_pr_on, monkeypatch):
+        monkeypatch.setenv("TR_TOKEN_MSPROF_BOT", VAULT_TOKEN)
         set_shadow(db, False)
-        db.upsert_named_token("msprof-bot", self.DB_TOKEN)
-        db.upsert_repo_config("Ascend", "msprof", token_name="msprof-bot")
-        engine.load_rules.return_value = [
-            {"keyword": "msprof", "token": RULE_TOKEN}]
+        db.upsert_repo_config("Ascend", "msprof", token_name="msprof_bot")
         engine.scan_changed.return_value = _scan(changed=[
             _changed_item(),
             _changed_item(path="CANN/9.1.0/sip/cann", org="CANN",
@@ -257,27 +231,25 @@ class TestDbTokenRouting:
         ])
         execute_run(_push_trigger(), settings, db)
         tokens = [c.args[4] for c in engine.submit_repo.call_args_list]
-        assert tokens == [self.DB_TOKEN]  # msprof 用 DB token
-        # cann 未命中 msprof 关键字规则，按权限管控不提交（与既有语义一致）
-        repos = {r["path"]: r for r in db.get_run_repos(db.list_runs()[0]["id"])}
-        assert repos["CANN/9.1.0/sip/cann"]["stage"] == "token_rule"
+        # msprof 用命名 token，cann 未配置名称用默认 token
+        assert tokens == [VAULT_TOKEN, DEFAULT_TOKEN]
 
-    def test_db_token_masked_in_submit_error(
-            self, settings, db, token_env, engine, auto_pr_on):
-        """submit 错误文本带仓库专属 token：run_repos.error 与日志脱敏。"""
+    def test_named_token_masked_in_submit_error(
+            self, settings, db, token_env, engine, auto_pr_on, monkeypatch):
+        """submit 错误文本带命名 token：run_repos.error 与日志脱敏。"""
+        monkeypatch.setenv("TR_TOKEN_MSPROF_BOT", VAULT_TOKEN)
         set_shadow(db, False)
-        db.upsert_named_token("msprof-bot", self.DB_TOKEN)
-        db.upsert_repo_config("Ascend", "msprof", token_name="msprof-bot")
+        db.upsert_repo_config("Ascend", "msprof", token_name="msprof_bot")
         engine.scan_changed.return_value = _scan(changed=[_changed_item()])
         engine.submit_repo.return_value = {
             "ok": False, "stage": "create_pr",
-            "error": f"推送失败: https://oauth2:{self.DB_TOKEN}@gitcode.com/x"}
+            "error": f"推送失败: https://oauth2:{VAULT_TOKEN}@gitcode.com/x"}
         execute_run(_push_trigger(), settings, db)
         run = db.list_runs()[0]
         repo = db.get_run_repos(run["id"])[0]
         assert repo["status"] == "submit_failed"
-        assert self.DB_TOKEN not in repo["error"]
-        assert self.DB_TOKEN not in db.get_run(run["id"])["log"]
+        assert VAULT_TOKEN not in repo["error"]
+        assert VAULT_TOKEN not in db.get_run(run["id"])["log"]
 
 
 class TestAutoPrGate:
@@ -389,17 +361,17 @@ class TestIncrementalArgs:
 
 
 class TestMasking:
-    """脱敏：默认/规则/TR_* token 一律替换为 ***，落库文本无明文。"""
+    """脱敏：默认/命名/TR_* token 一律替换为 ***，落库文本无明文。"""
 
     def test_masker_replaces_all_kinds(self, settings):
         masker = SecretMasker([DEFAULT_TOKEN, settings.admin_token,
                                settings.webhook_token, settings.dash_token])
-        masker.add_secrets([RULE_TOKEN, ""])
-        text = (f"{DEFAULT_TOKEN} {RULE_TOKEN} admin-secret "
+        masker.add_secrets([VAULT_TOKEN, ""])
+        text = (f"{DEFAULT_TOKEN} {VAULT_TOKEN} admin-secret "
                 "webhook-secret dash-secret")
         masked = masker.mask(text)
         assert "***" in masked
-        for secret in (DEFAULT_TOKEN, RULE_TOKEN, "admin-secret",
+        for secret in (DEFAULT_TOKEN, VAULT_TOKEN, "admin-secret",
                        "webhook-secret", "dash-secret"):
             assert secret not in masked
 
@@ -415,23 +387,6 @@ class TestMasking:
         assert DEFAULT_TOKEN not in run["error"]
         assert "oauth2:***@gitcode.com" in run["error"]
         assert DEFAULT_TOKEN not in db.get_run(run["id"])["log"]
-
-    def test_rule_token_masked_in_submit_error(
-            self, settings, db, token_env, engine, auto_pr_on):
-        """submit_repo 错误文本带规则 token：run_repos.error 脱敏。"""
-        set_shadow(db, False)
-        engine.load_rules.return_value = [
-            {"keyword": "msprof", "token": RULE_TOKEN}]
-        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
-        engine.submit_repo.return_value = {
-            "ok": False, "stage": "create_pr",
-            "error": f"推送失败: https://oauth2:{RULE_TOKEN}@gitcode.com/x"}
-        execute_run(_push_trigger(), settings, db)
-        run = db.list_runs()[0]
-        repo = db.get_run_repos(run["id"])[0]
-        assert repo["status"] == "submit_failed"
-        assert RULE_TOKEN not in repo["error"]
-        assert RULE_TOKEN not in db.get_run(run["id"])["log"]
 
     def test_scan_errors_masked(self, settings, db, token_env, engine):
         engine.scan_changed.return_value = _scan(
@@ -549,43 +504,47 @@ class TestWorker:
         assert not worker.alive
 
 
-class TestNamedTokenRouting:
-    """仓库配置引用命名 token：优先级高于关键字规则与默认 token，且入脱敏集合。"""
+class TestNamedTokenFailClosed:
+    """命名 token 缺失/非法时该仓直接失败（fail-closed），不回退默认 token。"""
 
-    def test_named_token_takes_precedence(
+    def test_missing_named_token_fails_closed(
             self, settings, db, token_env, engine, auto_pr_on):
+        """配置引用的名称在 Vault 无对应键：不提交，记 token_missing。"""
         set_shadow(db, False)
-        db.upsert_named_token("msprof-bot", RULE_TOKEN)
-        db.upsert_repo_config("Ascend", "msprof", token_name="msprof-bot")
+        db.upsert_repo_config("Ascend", "msprof", token_name="gone")
         engine.scan_changed.return_value = _scan(changed=[_changed_item()])
         execute_run(_push_trigger(), settings, db)
-        assert engine.submit_repo.call_args.args[4] == RULE_TOKEN
+        engine.submit_repo.assert_not_called()
+        run = db.list_runs()[0]
+        repo = db.get_run_repos(run["id"])[0]
+        assert repo["status"] == "submit_failed"
+        assert repo["stage"] == "token_missing"
+
+    def test_invalid_named_token_name_fails_closed(
+            self, settings, db, token_env, engine, auto_pr_on):
+        """配置里存了非法名称（如带连字符）：同样判失败，不提交。"""
+        set_shadow(db, False)
+        db.upsert_repo_config("Ascend", "msprof", token_name="bot-a")
+        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
+        execute_run(_push_trigger(), settings, db)
+        engine.submit_repo.assert_not_called()
+        repo = db.get_run_repos(db.list_runs()[0]["id"])[0]
+        assert repo["stage"] == "token_missing"
 
     def test_named_token_masked_in_log(
-            self, settings, db, token_env, engine, auto_pr_on):
+            self, settings, db, token_env, engine, auto_pr_on, monkeypatch):
         """命名 token 与其他秘密一样全链路脱敏。"""
+        monkeypatch.setenv("TR_TOKEN_MSPROF_BOT", VAULT_TOKEN)
         set_shadow(db, False)
-        db.upsert_named_token("msprof-bot", RULE_TOKEN)
-        db.upsert_repo_config("Ascend", "msprof", token_name="msprof-bot")
+        db.upsert_repo_config("Ascend", "msprof", token_name="msprof_bot")
         engine.scan_changed.return_value = _scan(changed=[_changed_item()])
         engine.submit_repo.side_effect = Exception(
-            f"push 失败 https://{RULE_TOKEN}@gitcode.com/x/y")
+            f"push 失败 https://{VAULT_TOKEN}@gitcode.com/x/y")
         execute_run(_push_trigger(), settings, db)
         run = db.list_runs()[0]
         assert run["status"] == "partial"
         repo = db.get_run_repos(run["id"])[0]
-        assert RULE_TOKEN not in (db.get_run(run["id"])["log"] or "")
-        assert RULE_TOKEN not in (repo["error"] or "")
-
-    def test_dangling_token_name_falls_back(
-            self, settings, db, token_env, engine, auto_pr_on):
-        """引用的命名 token 已删除：回退默认 token，不报错。"""
-        set_shadow(db, False)
-        tid = db.upsert_named_token("gone", RULE_TOKEN)
-        db.upsert_repo_config("Ascend", "msprof", token_name="gone")
-        db.delete_named_token(tid)
-        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
-        execute_run(_push_trigger(), settings, db)
-        assert engine.submit_repo.call_args.args[4] == DEFAULT_TOKEN
+        assert VAULT_TOKEN not in (db.get_run(run["id"])["log"] or "")
+        assert VAULT_TOKEN not in (repo["error"] or "")
 
 

@@ -64,9 +64,10 @@ pipeline {
         }
         stage('AutoPR') {
             steps {
-                // Token 由任务的 Password Parameter 注入为环境变量
-                // （参数名须与权威仓库 token_rules.json 中的 token_env 一致；
-                // 新增一套规则 Token = 规则文件加一行 + 任务加一个密码参数）
+                // Token 由任务的 Password Parameter 注入为环境变量；
+                // 引擎不再读取权威仓的 token_rules.json，扫描与提交统一
+                // 使用默认 GITCODE_TOKEN（按仓库细分的命名 token 仅由
+                // 服务侧 webapp.token_router 从 Vault 解析）
                 sh '.venv/bin/python -m translator_ci'
             }
         }

@@ -1,13 +1,11 @@
 """命令行入口：扫描译稿变更并批量提交 PR（Jenkins 无人值守）。
 
 用法：
-    translator [--keyword 关键字] [--rules-path token_rules.json]
+    translator [--keyword 关键字] [--full-scan]
 
 凭据优先读 secrets 文件（/vault/secrets/.env，见 translator.secrets），文件
 不存在时回退环境变量（Jenkins 凭据注入），不读任何本地配置文件：
-    GITCODE_TOKEN            默认 Token（必需；读译稿权威仓库、未命中
-                             规则的仓库也用它）
-    规则文件中的 token_env   各规则 Token 对应的环境变量名
+    GITCODE_TOKEN            默认 Token（必需；读译稿权威仓库与提交均用它）
 
 本地化模式（绕开 API 限流，由 Jenkinsfile 克隆权威仓库后注入）：
     GITCODE_LOCAL_SOURCE_DIR 权威仓库的本地克隆目录（设置后索引/列文件
@@ -17,7 +15,7 @@
 
 退出码：
     0  成功（含「没有变更」）
-    1  运行失败（Token 缺失、规则文件损坏、扫描失败等）
+    1  运行失败（Token 缺失、扫描失败等）
     2  扫描成功但部分仓库提交失败
 """
 
@@ -39,17 +37,6 @@ def main(argv=None):
         description="扫描译稿权威仓库的变更，向目标社区仓库批量提交 PR")
     parser.add_argument("--keyword", default="",
                         help="按译稿路径关键字过滤扫描范围（调试用，默认全部）")
-    parser.add_argument("--rules-path", default=service.DEFAULT_RULES_PATH,
-                        help="权威仓库中 Token 规则文件的路径"
-                             "（默认 %(default)s）")
-    parser.add_argument("--blacklist-path",
-                        default=service.DEFAULT_BLACKLIST_PATH,
-                        help="权威仓库中拉黑名单文件的路径"
-                             "（默认 %(default)s）")
-    parser.add_argument("--whitelist-path",
-                        default=service.DEFAULT_WHITELIST_PATH,
-                        help="权威仓库中开放白名单文件的路径"
-                             "（默认 %(default)s）")
     parser.add_argument("--sync-source", action="store_true",
                         help="来源为 Fork 时，扫描前先同步其与上游")
     parser.add_argument("--diff-before", default=os.environ.get("GIT_PUSH_BEFORE", ""),
@@ -77,50 +64,13 @@ def main(argv=None):
     if args.sync_source:
         service.sync_source(token, log=_log)
 
-    # ── 加载 Token 规则（权威仓库内的规则文件）──
-    try:
-        token_rules = service.load_token_rules(
-            token, rules_path=args.rules_path, log=_log,
-            source_repo_dir=local_source_dir)
-    except service.ConfigError as e:
-        _log(f"错误：{e}")
-        return 1
-    except service.client.GitCodeError as e:
-        _log(f"错误：读取规则文件失败: {e}")
-        return 1
-
-    # ── 加载拉黑名单（权威仓库内的名单文件，命中则跳过不处理）──
-    try:
-        blacklist = service.load_blacklist(
-            token, blacklist_path=args.blacklist_path, log=_log,
-            source_repo_dir=local_source_dir)
-    except service.ConfigError as e:
-        _log(f"错误：{e}")
-        return 1
-    except service.client.GitCodeError as e:
-        _log(f"错误：读取拉黑名单失败: {e}")
-        return 1
-
-    # ── 加载开放白名单（权威仓库内的名单文件，非空时只处理命中的仓库）──
-    try:
-        whitelist = service.load_whitelist(
-            token, whitelist_path=args.whitelist_path, log=_log,
-            source_repo_dir=local_source_dir)
-    except service.ConfigError as e:
-        _log(f"错误：{e}")
-        return 1
-    except service.client.GitCodeError as e:
-        _log(f"错误：读取开放白名单失败: {e}")
-        return 1
-
     # ── 扫描变更 ──
     _log("开始扫描全部译稿仓库..."
          if not args.keyword else f"开始扫描（关键字: {args.keyword}）...")
     diff_before = None if args.full_scan else (args.diff_before or "").strip() or None
     diff_after = None if args.full_scan else (args.diff_after or "").strip() or None
     result = service.scan_changed(
-        args.keyword, token, token_rules=token_rules, blacklist=blacklist,
-        whitelist=whitelist, log=_log, source_repo_dir=local_source_dir,
+        args.keyword, token, log=_log, source_repo_dir=local_source_dir,
         clone_root=clone_root, diff_before=diff_before, diff_after=diff_after)
     if not result["ok"]:
         _log(f"扫描失败（阶段: {result.get('stage', 'unknown')}）"
@@ -141,7 +91,7 @@ def main(argv=None):
 
     # ── 批量提交 ──
     _log(f"开始批量提交 {len(changed)} 个仓库的 PR...")
-    batch = service.submit_all(changed, token, token_rules=token_rules, log=_log)
+    batch = service.submit_all(changed, token, log=_log)
     if not batch["ok"]:
         _log(f"批量提交失败（阶段: {batch.get('stage', 'unknown')}）"
              f": {batch.get('error', '未知错误')}")

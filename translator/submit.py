@@ -4,7 +4,7 @@ submit_repo: 单仓库幂等提交（识别用户/Fork → 校验目标分支 �
              Fork 分支 → 以目标分支为基点重建固定分支
              translator/auto-<目标分支>（全部变更合并为单个 commit，
              由 localgit.rebuild_branch 完成）→ 去重后创建 PR）
-submit_all:  批量提交（Token 路由 + 单仓失败不中断）
+submit_all:  批量提交（单仓失败不中断）
 
 幂等语义：同一仓库重复运行时，已开 PR 不重复创建，新变更以重建的
 单 commit 覆盖固定分支；内容无变化时不强推（避免 PR 噪音）。历史
@@ -20,7 +20,6 @@ import time
 
 from translator import client, localgit
 from translator.common import AUTO_BRANCH_PREFIX
-from translator.rules import resolve_token, _effective_rules
 
 
 def _find_existing_fork(org, repo, username, token):
@@ -388,18 +387,16 @@ def submit_repo(org, repo, branch, files, token, log=print):
     }
 
 
-def submit_all(changed, token, token_rules=None, log=print):
+def submit_all(changed, token, log=print):
     """对有变更的仓库逐个幂等提交 PR，单仓失败不中断。
 
-    每个仓库使用的 Token 由 resolve_token 按 token_rules 路由
-    （权限管控）：配置了有效规则时，未命中规则的仓库记为失败
-    不予提交；未配置规则时全部使用默认 token。
+    每个仓库统一使用传入的 token 提交（服务侧已按仓库配置解析出命名
+    Token 或默认 token，见 webapp.token_router）。
 
     Args:
         changed: scan_changed 返回的 changed 清单，
                  每项含 org/repo/branch/files/project
-        token: 默认 GitCode Token（未命中规则时使用）
-        token_rules: Token 规则 [{keyword, token}]，按路径关键字匹配
+        token: 提交使用的 GitCode Token
         log: 日志函数
 
     Returns:
@@ -412,30 +409,18 @@ def submit_all(changed, token, token_rules=None, log=print):
     """
     token = (token or "").strip()
     if not token:
-        return {"ok": False, "stage": "validate", "error": "默认 Token 不能为空"}
+        return {"ok": False, "stage": "validate", "error": "Token 不能为空"}
 
     changed = changed or []
     results = []
     submitted = 0
     failed_count = 0
-    # 配置了有效规则时只提交命中规则的仓库（权限管控，与扫描一致）
-    restrict = bool(_effective_rules(token_rules))
     for i, item in enumerate(changed, 1):
         path = item["project"]["path"]
         log(f"正在提交 ({i}/{len(changed)}): {item['org']}/{item['repo']}")
-        item_token, rule_keyword = resolve_token(path, token_rules, token)
-        if restrict and not rule_keyword:
-            failed_count += 1
-            results.append({
-                "path": path, "ok": False, "stage": "token_rule",
-                "error": "未命中 Token 规则，按权限管控不处理",
-            })
-            continue
-        if rule_keyword:
-            log(f"  命中 Token 规则「{rule_keyword}」，使用规则 Token 提交")
         result = submit_repo(
             item["org"], item["repo"], item["branch"], item["files"],
-            item_token, log)
+            token, log)
         entry = {"path": path, "ok": result["ok"]}
         if result["ok"]:
             submitted += 1

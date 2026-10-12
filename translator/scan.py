@@ -11,16 +11,9 @@ scan_changed:      扫描全部（或按关键字过滤的）仓库级目录 →
   列文件与来源内容读取全走本地 git；目标仓库按需浅克隆后本地对比，
   彻底绕开 API 限流，API 只保留建 PR 等少量写操作。
 
-读取译稿权威仓库始终使用默认 token；访问目标仓库做对比的 Token
-由 resolve_token 按 token_rules 逐仓路由（权限管控）：配置了有效
-规则时，未命中规则的仓库记入 skipped 不予处理。
-
-拉黑名单（权威仓库 blacklist.json）：目录路径命中名单的仓库直接记入
-skipped，不做任何对比请求（业务侧临时不想处理的仓库用，无需改代码）。
-
-开放白名单（权威仓库 whitelist.json）：名单非空时只处理命中的仓库，
-名单外的一律记入 skipped，不做任何对比请求（范围管控，如「功能先只对
-某仓库开放」）；名单为空时不限制开放范围。
+读取译稿权威仓库始终使用默认 token；访问目标仓库做对比的 Token 由
+可选的 token_resolver 回调逐仓解析（服务侧据此套用仓库配置的命名
+Token），未提供回调时全部使用默认 token。
 """
 
 import base64
@@ -33,7 +26,6 @@ from translator.index import (
     _list_subdirs, _collect_dirs, _to_project, _walk_files,
     _repo_dirs_from_tree, _repo_files_from_tree, _target_rel_path,
 )
-from translator.rules import resolve_token, _effective_rules
 
 
 def _fetch_repo_files(project, branch, token, log, tree=None):
@@ -259,35 +251,19 @@ def _local_target_tree(project, cmp_token, clone_root, log):
         return None
 
 
-def _path_matched(path, entries):
-    """判断仓库目录路径是否命中名单（等于条目或以条目为前缀）。
-
-    黑/白名单共用同一套目录树匹配：条目为仓库级目录（如
-    CANN/9.1.0/sip）时精确命中，条目为高层目录（如 CANN/9.1.0）时
-    其下所有仓库级目录都命中。
-    """
-    for entry in entries or []:
-        if path == entry or path.startswith(entry + "/"):
-            return True
-    return False
-
-
-def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
-                 whitelist=None, log=print, source_repo_dir=None,
-                 clone_root=None, diff_before=None, diff_after=None):
+def scan_changed(keyword="", token="", token_resolver=None, log=print,
+                 source_repo_dir=None, clone_root=None, diff_before=None,
+                 diff_after=None):
     """扫描全部（或按关键字过滤的）仓库级目录，找出有变更的译稿仓库。
 
     逐仓下载译稿并与目标仓库同路径文件做内容对比（blob sha 比对），
     仅「有新增或有差异」的仓库进入 changed 清单。单仓失败不中断：
     目标仓库/分支不存在记入 skipped，其余错误记入 errors，扫描继续。
 
-    blacklist 为拉黑名单（权威仓库 blacklist.json 的目录路径列表）：
-    命中名单的仓库直接记入 skipped，不做对比也不建 PR。
-
-    whitelist 为开放白名单（权威仓库 whitelist.json 的目录路径列表）：
-    非空时只处理命中名单的仓库，名单外的直接记入 skipped（范围管控，
-    如「功能先只对某仓库开放」）；为空时不限制开放范围。拉黑优先——
-    名单外跳过，名单内但被拉黑的仍跳过。
+    token_resolver 为可选回调，签名 ``(org, repo, path) -> (token, error)``，
+    用于逐仓解析访问目标仓库的 Token（服务侧据此套用仓库配置的命名
+    Token）：error 非空时该仓记入 errors 并跳过；未提供回调时全部使用
+    默认 token。
 
     本地化模式（source_repo_dir 非空，通常由 Jenkinsfile 克隆权威仓库
     后通过 GITCODE_LOCAL_SOURCE_DIR 注入）：索引与列文件走本地 git，
@@ -300,8 +276,7 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
     （根目录 README 等）的变更不触发任何仓库处理；翻译团队未提交
     新译稿的仓库（上游单方面维护导致内容差异）也不会被无关推送
     再次触发。回退全量的场景：diff 失败（sha 不可达等）、变更路径
-    命中根目录配置文件（blacklist.json / token_rules.json /
-    whitelist.json，配置变更影响全局，需全量补扫）。
+    命中根目录 README.md（影响面说明变更时全量补扫）。
 
     Returns:
         dict with:
@@ -319,9 +294,8 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
         return {"ok": False, "stage": "validate", "error": "默认 Token 不能为空"}
 
     local_mode = bool(source_repo_dir)
-    # 根目录配置文件：变更影响全局，命中即回退全量扫描
-    CONFIG_FILES = ("blacklist.json", "token_rules.json", "whitelist.json",
-                    "README.md")
+    # 根目录说明文件：变更影响全局，命中即回退全量扫描
+    CONFIG_FILES = ("README.md",)
 
     incremental = False
     changed_paths = set()
@@ -383,26 +357,17 @@ def scan_changed(keyword="", token="", token_rules=None, blacklist=None,
     unchanged = []
     skipped = []
     errors = []
-    # 配置了有效规则时只处理命中规则的仓库，规则外的一律跳过（权限管控）
-    restrict = bool(_effective_rules(token_rules))
     for i, project in enumerate(repos, 1):
         log(f"正在扫描 ({i}/{len(repos)}): {project['path']}")
-        if whitelist and not _path_matched(project["path"], whitelist):
-            skipped.append({"path": project["path"],
-                            "reason": "不在开放白名单中，暂不处理"})
+        # 逐仓解析访问目标仓库的 Token（服务侧套用仓库配置的命名 Token）
+        if token_resolver is not None:
+            cmp_token, token_error = token_resolver(
+                project["org"], project["project"], project["path"])
+        else:
+            cmp_token, token_error = token, None
+        if token_error:
+            errors.append({"path": project["path"], "error": token_error})
             continue
-        if _path_matched(project["path"], blacklist):
-            skipped.append({"path": project["path"],
-                            "reason": "在拉黑名单中，业务侧暂不处理"})
-            continue
-        cmp_token, rule_keyword = resolve_token(
-            project["path"], token_rules, token)
-        if restrict and not rule_keyword:
-            skipped.append({"path": project["path"],
-                            "reason": "未命中 Token 规则，按权限管控不处理"})
-            continue
-        if rule_keyword:
-            log(f"  命中 Token 规则「{rule_keyword}」，使用规则 Token 对比")
         try:
             fetched = _fetch_repo_files(
                 project, branch, token, log, tree=tree if local_mode else None)

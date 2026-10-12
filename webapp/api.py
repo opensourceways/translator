@@ -8,10 +8,10 @@
   （重启后也准确），不依赖 Worker 内存状态
 - Dashboard 页面与 /api/* 只读 JSON：TR_DASH_TOKEN 未配置时放开，配置后
   要求 X-Dash-Token 头或 ?token= query
-- POST /api/runs、/api/config/shadow、/api/settings/*（仓库配置、
-  命名 token 池）：
+- POST /api/runs、/api/config/shadow、/api/settings/repos：
   X-Admin-Token 管理端点；admin_token 未配置时放开（内部工具，默认
-  内网部署），配置后校验
+  内网部署），配置后校验。命名 token 名称清单来自 Vault（只读，运维
+  经 Vault 手动注入），服务不保存也不写入任何 token 值
 
 lifespan：init_db → init_shadow（env 仅作种子，之后以库为准）→ 僵尸
 running run 恢复为 interrupted → 停机补偿（最后一次成功 run 的
@@ -116,13 +116,6 @@ def _localtime(value):
     except ValueError:
         return value
     return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _mask_token(value):
-    """token 展示掩码：空串原样返回（未配置），其余回 前 4 位 + ***。"""
-    if not value:
-        return ""
-    return (value[:4] + "***") if len(value) > 4 else "***"
 
 
 def _recover_missed_pushes(settings, db, queue):
@@ -402,14 +395,12 @@ def create_app(settings=None):
             if key not in known and key not in seen:
                 seen.add(key)
                 suggestions.append(r)
-        named_tokens = db.list_named_tokens()
-        for t in named_tokens:
-            t["token_masked"] = _mask_token(t.pop("token"))
+        token_names = secrets.list_token_names()
         return templates.TemplateResponse(
             request, "settings.html",
             _ctx(request, entries=entries,
                  suggestions=suggestions,
-                 named_tokens=named_tokens,
+                 token_names=token_names,
                  admin_auth=bool(settings.admin_token)))
 
     @app.get("/api/settings/repos", dependencies=dash)
@@ -423,8 +414,9 @@ def create_app(settings=None):
         """新增/更新仓库配置：{org, repo, enabled?, token_name?}。
 
         enabled/token_name 缺省表示保持不变（新条目默认 enabled=True、
-        不引用命名 token）；token_name 传空串表示清除引用（回退
-        token_rules.json / 默认 token）。
+        不引用命名 token）；token_name 传空串表示清除引用（回退默认
+        GITCODE_TOKEN）；非空的 token_name 必须是 Vault 中已配置的命名
+        token 名称（TR_TOKEN_<名称>）。
         """
         try:
             body = await request.json()
@@ -441,11 +433,13 @@ def create_app(settings=None):
             raise HTTPException(422, "enabled 必须是布尔值")
         token_name = body.get("token_name")
         if token_name is not None:
-            token_name = str(token_name).strip()
+            token_name = str(token_name).strip().lower()
         db = request.app.state.db
-        if token_name and not db.token_name_exists(token_name):
+        if token_name and token_name not in secrets.list_token_names():
             raise HTTPException(
-                422, f"命名 Token「{token_name}」不存在，请先在 Token 池添加")
+                422, f"命名 Token「{token_name}」未在 Vault 配置，"
+                     f"请联系运维注入 {secrets.TOKEN_PREFIX}"
+                     f"{token_name.upper()}")
         entry_id = db.upsert_repo_config(org, repo, enabled=enabled,
                                          token_name=token_name)
         log.info("仓库配置 upsert：%s/%s enabled=%s token_name=%s",
@@ -481,44 +475,12 @@ def create_app(settings=None):
         log.info("仓库配置条目 #%d 已删除", entry_id)
         return {"id": entry_id, "deleted": True}
 
-    # ── 命名 Token 池（设置页自助配置） ─────────────────────
-    # token 起名字保存，仓库配置通过 token_name 下拉引用
+    # ── 命名 Token（只读：清单来自 Vault，新增/删除由运维手动操作） ──
 
     @app.get("/api/settings/tokens", dependencies=dash)
-    async def api_list_named_tokens(request: Request):
-        """命名 token 列表；token 值只回掩码（前 4 位 + ***），不出库。"""
-        entries = request.app.state.db.list_named_tokens()
-        for e in entries:
-            e["token_masked"] = _mask_token(e.pop("token"))
-        return {"entries": entries}
-
-    @app.post("/api/settings/tokens",
-              dependencies=[Depends(require_admin)])
-    async def api_upsert_named_token(request: Request):
-        """新增/更新命名 token：{name, token}，两者必填。"""
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        if not isinstance(body, dict):
-            body = {}
-        name = str(body.get("name") or "").strip()
-        token = str(body.get("token") or "").strip()
-        if not name or not token:
-            raise HTTPException(422, "body 需要非空字段 name 与 token")
-        db = request.app.state.db
-        entry_id = db.upsert_named_token(name, token)
-        log.info("命名 Token upsert：%s（值不落日志）", name.lower())
-        return {"id": entry_id, "name": name.lower()}
-
-    @app.delete("/api/settings/tokens/{entry_id}",
-                dependencies=[Depends(require_admin)])
-    async def api_delete_named_token(request: Request, entry_id: int):
-        db = request.app.state.db
-        if not db.delete_named_token(entry_id):
-            raise HTTPException(404, "条目不存在")
-        log.info("命名 Token 条目 #%d 已删除", entry_id)
-        return {"id": entry_id, "deleted": True}
+    async def api_list_named_tokens():
+        """命名 token 名称清单（来自 Vault，仅名称，无任何 token 值）。"""
+        return {"names": secrets.list_token_names()}
 
     # ── 管理端点 ─────────────────────────────────────────────
 

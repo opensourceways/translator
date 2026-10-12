@@ -30,12 +30,9 @@ flowchart LR
   `docs/` 前缀；`CANN/release-management` 只有 master 分支、版本号是
   文件夹，拍平 `en/` 语言目录并在扩展名前补 `_en` 与中文并存）；
   未登记的仓库源路径原样透传。对比与写入均用改写后的路径
-- **Token 规则（权限管控）**：规则文件放在**译稿权威仓库**根目录
-  `token_rules.json`，每次运行时读取；配置规则后只处理命中的仓库，
-  未配置时全部使用默认 Token。服务模式下推荐改用设置页的
-  Token 池 + 仓库配置（见下文），精确到仓库且即时生效。
-  两种方式并存，Token 路由优先级：仓库配置引用的命名 Token >
-  来源仓 `token_rules.json` 关键字 > 默认 `GITCODE_TOKEN`
+- **Token 管控**：引擎本身不读任何规则文件；CLI 模式统一使用默认
+  `GITCODE_TOKEN`，服务模式由设置页的「仓库配置」按仓库引用命名 Token
+  （名称 → Vault 的 `TR_TOKEN_<名称>`），精确到仓库且即时生效
 - **增量加速**：push 触发携带 before/after sha 时走增量 diff 缩小
   扫描范围；sha 缺失或 diff 失败自动回退全量，宁多勿漏
 
@@ -130,13 +127,15 @@ curl -X POST http://localhost:8000/api/config/shadow \
   `/prs` 为运行记录与 PR 状态页（`/prs` 按 社区 → 仓库 两级 tab 浏览，
   PR 状态含 CI 标签派生与下一步指引）
 - `/settings`：设置页，全部运行期配置都可在此自助修改：
-  - **Token 池**：给 GitCode Token 起名保存，一个 token 可复用于多个
-    仓库，轮换只改一处；保存在 SQLite，只显示掩码不回显明文
+  - **Token 池**：只读展示 Vault 注入的命名 Token 名称清单（键
+    `TR_TOKEN_<名称>`）；token 明文只存 Vault，服务不保存也不回显，
+    新增/轮换请联系运维手动操作
   - **仓库配置**：一个条目配齐一个仓库的启用开关与可选 Token（从
     Token 池下拉选择）。只有**添加并启用**的仓库才会在 active 模式下
     真正创建 PR，未列出的一律跳过（默认拒绝）；粒度到仓库（该仓所有
     分支统一受控）；社区/仓库名大小写不敏感（统一按小写存储）。
-    指定 token 后优先于来源仓 token_rules.json 规则和默认 GITCODE_TOKEN
+    指定 token 后优先于默认 GITCODE_TOKEN；引用的名称在 Vault 缺失时
+    该仓判失败（不回退默认 token）
 
   `TR_ADMIN_TOKEN` 未配置时修改操作无需鉴权（内部工具，默认内网部署），
   配置后需在页面顶部输入 token（仅存浏览器 localStorage）
@@ -167,13 +166,11 @@ failed（致命）/ interrupted（重启僵尸恢复）。排查 partial：run �
 
 ### Token 运维
 
-推荐在 `/settings` 页操作：Token 池保存命名 Token，仓库配置下拉
-引用——立即生效、无需重建容器，控制精确到仓库。
-
-文件方式仍保留（批量/兜底）：`token_rules.json` 加一行规则后，`.env`
-加同名变量（变量名必须与规则的 `token_env` 一致），然后
-`docker compose up -d --build` 重建容器——env 进程级固定，不热加载。
-缺失的规则 token 只会告警跳过该规则，不会放大权限。
+命名 Token 由运维统一管理（用户新增/轮换联系运维手动操作）：在 Vault 中
+以 `TR_TOKEN_<名称大写>` 注入（名称=小写字母/数字/下划线，如
+`TR_TOKEN_CANN_ROBOT`），服务侧只在仓库配置保存名称引用、不保存明文。
+配置变更后**重启 Pod** 让 Vault Agent 重新注入（或等待 Vault 轮换），
+前端「Token 池」下拉框会自动列出已配置的名称。
 
 ## CLI / Jenkins 模式（历史）
 
@@ -186,10 +183,9 @@ python -m translator                   # 全量扫描并提交
 python -m translator --keyword msprof  # 按关键字缩小范围（调试）
 ```
 
-CLI 模式额外支持权威仓根目录的 `whitelist.json`（开放白名单，相等或前缀
-匹配）与 `blacklist.json`（拉黑名单，两者同时命中时拉黑优先）——
-**均只在 CLI 模式生效**；服务模式的开放范围统一由设置页仓库配置开关
-控制（默认拒绝），等价且粒度更细。
+CLI 模式不读任何规则/名单文件，扫描与提交统一使用默认 `GITCODE_TOKEN`；
+服务模式的开放范围统一由设置页仓库配置开关控制（默认拒绝）、按仓库细分的
+Token 由命名 Token 机制提供。
 
 没有权威仓库的 Webhook 权限时，可用自己的 Fork 做来源：
 `GITCODE_SOURCE_REPO` 指向 Fork 完整路径，CLI 加 `--sync-source`
@@ -215,10 +211,9 @@ translator/
 ├── CLAUDE.md              # AI 助手上手文档（硬性约束、配置约定）
 ├── translator/            # 引擎包
 │   ├── cli.py             # 命令行入口（参数、退出码、stdout 日志）
-│   ├── service.py         # 门面导出：规则加载/扫描对比/幂等提交/Token 路由
+│   ├── service.py         # 门面导出：同步来源/扫描对比/幂等提交
 │   ├── scan.py            # 变更扫描（全量 blob 对比 / 增量 diff）
 │   ├── submit.py          # 幂等提交：Fork → 固定分支 → 单 commit → PR
-│   ├── rules.py           # token_rules.json / whitelist / blacklist
 │   ├── localgit.py        # 目标仓本地浅克隆索引（git 协议，不受 API 限流）
 │   ├── index.py           # 目标路径改写规则 TARGET_PATH_RULES
 │   ├── client.py          # GitCode REST API v5 客户端
@@ -231,7 +226,7 @@ translator/
 │   ├── queueing.py        # push 合并队列（容量 1，latest-wins）
 │   ├── db.py              # SQLite 状态层（WAL + 单连接）
 │   ├── config.py          # Settings.from_env()
-│   ├── rules_cache.py     # 命名 token 路由缓存
+│   ├── token_router.py    # 仓库命名 token 路由（名称 → Vault 值）
 │   └── templates/         # Dashboard 页面（Jinja2 服务端渲染）
 ├── deploy/k8s/            # K8s 清单（单副本 Recreate + RWO PVC）
 ├── tests/                 # pytest 单元测试（全部 mock，不发起真实请求）

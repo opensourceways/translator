@@ -1,21 +1,20 @@
-"""Worker 线程与 run 执行编排：克隆 → 加载规则 → 扫描 → 提交 → 落库。
+"""Worker 线程与 run 执行编排：克隆 → 扫描 → 提交 → 落库。
 
 对应服务化改造计划「runner 行」的展开：
 
 - 全局唯一 Worker 线程消费 CoalescingQueue，逐 Trigger 执行 execute_run
 - execute_run 复刻 Jenkinsfile 的本地化流程：克隆来源仓到
   work_dir/run-<id>/（blobs=True 全量浅克隆，等价
-  ``git clone --depth=1 --no-checkout``），从本地克隆加载 Token 规则
-  （token_rules.json，关键字→token_env 环境变量），scan_changed
-  走本地化模式（支持增量 diff），影子模式只落
-  would_submit 不提交，active 模式先过仓库配置门控（设置页维护，按
-  仓库粒度，默认拒绝），再逐仓 resolve_token + submit_repo
-  （复制 submit_all 的路由逻辑，换取 head_branch/noop/pr_existed 粒度）
+  ``git clone --depth=1 --no-checkout``），scan_changed 走本地化模式
+  （支持增量 diff），影子模式只落 would_submit 不提交，active 模式先过
+  仓库配置门控（设置页维护，按仓库粒度，默认拒绝），再逐仓解析 Token
+  （webapp.token_router：命名 Token 名称 → Vault 注入的值）+ submit_repo
+- 命名 Token 明文只存 Vault（TR_TOKEN_<名称>），服务侧 DB 只存名称引用；
+  引用的名称在 Vault 缺失时该仓判失败（fail-closed，不回退默认 Token）
 - 日志缓冲落库（50 行/2 秒批量 append_log）+ 全链路 token 脱敏：
   localgit.clone 失败会把含 token 的 URL 包进 GitCodeError（Jenkins
   曾有 token 明文落构建日志的事故），所有落库文本必须先过 SecretMasker
-- run 结束把解析好的 token_rules 存入 rules_cache 供 prsync 用；
-  finally 阶段回写 last_run_at、回填 push 事件、清理 workdir
+- finally 阶段回写 last_run_at、回填 push 事件、清理 workdir
 """
 
 import os
@@ -25,9 +24,9 @@ import time
 import traceback
 from datetime import datetime, timezone
 
-from translator import common, localgit, rules, secrets, service
+from translator import common, localgit, secrets, service
 
-from webapp import rules_cache
+from webapp import token_router
 from webapp.db import is_shadow
 
 # 日志缓冲刷写阈值：满 50 行或距上次落库超过 2 秒
@@ -43,10 +42,11 @@ def _utcnow():
 class SecretMasker:
     """token 脱敏器：把集合中每个非空秘密值替换为 ``***``。
 
-    脱敏集合动态包含：默认 token（GITCODE_TOKEN）+ 每条已加载规则的
-    解析后 token + TR_ADMIN_TOKEN / TR_WEBHOOK_TOKEN / TR_DASH_TOKEN。
-    规则 token 在每次 run 加载规则后才能确定，故支持 add_secrets 运行
-    时追加。线程安全（Worker 写、log 回调读）。
+    脱敏集合动态包含：默认 token（GITCODE_TOKEN）+ 全部命名 token
+    （Vault 中 TR_TOKEN_<名称> 的值）+ TR_ADMIN_TOKEN /
+    TR_WEBHOOK_TOKEN / TR_DASH_TOKEN。命名 token 在每次 run 通过
+    secrets.list_token_values() 枚举后追加。线程安全（Worker 写、log
+    回调读）。
     """
 
     def __init__(self, secrets=()):
@@ -113,7 +113,7 @@ class LogBuffer:
 
 
 def execute_run(trigger, settings, db):
-    """执行一次 run：克隆 → 加载规则 → 扫描 → 影子门控/逐仓提交 → 落库。
+    """执行一次 run：克隆 → 扫描 → 影子门控/逐仓提交 → 落库。
 
     任何异常都不向上抛（Worker 线程必须存活）：run 记 failed，error
     与日志一律脱敏后落库。GITCODE_TOKEN 为空时直接 failed，不克隆。
@@ -140,25 +140,25 @@ def execute_run(trigger, settings, db):
                         error="GITCODE_TOKEN 未配置，请检查服务环境变量")
             return
 
-        # ── 克隆来源仓 + 加载规则/名单（本地化模式，零 API） ──
+        # ── 克隆来源仓（本地化模式，零 API） ──
         owner, repo = common._source_repo()
         src_dir = os.path.join(workdir, "src")
         log(f"正在克隆来源仓库 {owner}/{repo} ...")
         localgit.clone(owner, repo, None, default_token, src_dir,
                        log=log, blobs=True)
-        # Token 规则仍从来源仓 token_rules.json 加载（DB 不再有关键字
-        # 规则：仓库配置通过命名 token 下拉引用，控制精确到仓库）
-        token_rules = service.load_token_rules(
-            default_token, log=log, source_repo_dir=src_dir)
-        rules_cache.set_rules(token_rules)
-        masker.add_secrets(r.get("token") for r in token_rules)
-        # 设置页命名 token 池中的 token 也纳入脱敏集合
-        masker.add_secrets(t.get("token") for t in db.list_named_tokens())
+        # 命名 token 明文只存 Vault：枚举其值纳入脱敏集合（服务 DB 只存名称）
+        masker.add_secrets(secrets.list_token_values())
 
         # ── 扫描（本地化 + 可选增量 diff） ──
+        # 逐仓解析访问目标仓库的 Token（仓库配置的命名 Token，缺失即失败）
+        def _token_resolver(org, repo_name, _path):
+            tok, _name, err = token_router.resolve_repo_token(
+                db, org, repo_name, default_token)
+            return tok or default_token, err
+
         scan = service.scan_changed(
             trigger.keyword, default_token,
-            token_rules=token_rules, log=log,
+            token_resolver=_token_resolver, log=log,
             source_repo_dir=src_dir,
             clone_root=os.path.join(workdir, "clones"),
             diff_before=push_before, diff_after=push_after)
@@ -181,7 +181,7 @@ def execute_run(trigger, settings, db):
         else:
             db.record_scan_results(run_id, scan, shadow=False)
             counts = _submit_all(run_id, scan.get("changed") or [],
-                                 token_rules, default_token, log, masker, db)
+                                 default_token, log, masker, db)
         status = "partial" if scan["errors"] or (
             not shadow and counts["failed"]) else "success"
         db.mark_run(run_id, status=status)
@@ -198,20 +198,20 @@ def execute_run(trigger, settings, db):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _submit_all(run_id, changed, token_rules, default_token, log, masker,
-                db):
-    """active 模式逐仓提交：仓库配置门控 + resolve_token 路由 + submit_repo，结果落库。
+def _submit_all(run_id, changed, default_token, log, masker, db):
+    """active 模式逐仓提交：仓库配置门控 + Token 路由 + submit_repo，结果落库。
 
     未在设置页启用（无条目或已禁用）的仓库直接记 noop
-    （stage='auto_pr_off'）跳过，默认拒绝。复制引擎 submit_all 的路由逻辑（配置了有效规则时只提交命中规则的
-    仓库），但保留 submit_repo 返回的完整粒度（head_branch / noop /
+    （stage='auto_pr_off'）跳过，默认拒绝。已启用的仓库按仓库配置解析
+    Token（命名 Token 名称 → Vault 值；未配置名称则用默认 default_token），
+    名称在 Vault 缺失时该仓判失败（stage='token_missing'，fail-closed
+    不回退）。保留 submit_repo 返回的完整粒度（head_branch / noop /
     pr_existed）供落库。单仓失败不中断；有 pr_number 的结果同步
     upsert 到 prs 表（source='service'，供 prsync 轮询）。
 
     Returns:
         dict: record_submit_results 的计数汇总。
     """
-    restrict = bool(rules._effective_rules(token_rules))
     results = []
     for i, item in enumerate(changed, 1):
         path = item["project"]["path"]
@@ -222,15 +222,16 @@ def _submit_all(run_id, changed, token_rules, default_token, log, masker,
             log("  仓库配置未启用（设置页无此条目或已禁用），跳过")
             result = {"ok": True, "noop": True, "stage": "auto_pr_off"}
         else:
-            item_token, rule_keyword = rules_cache.resolve_repo_token(
-                db, item["org"], item["repo"], path, token_rules,
-                default_token)
-            if restrict and not rule_keyword:
-                result = {"ok": False, "stage": "token_rule",
-                          "error": "未命中 Token 规则，按权限管控不处理"}
+            item_token, token_name, token_error = (
+                token_router.resolve_repo_token(
+                    db, item["org"], item["repo"], default_token))
+            if token_error:
+                log(f"  {token_error}，跳过提交")
+                result = {"ok": False, "stage": "token_missing",
+                          "error": token_error}
             else:
-                if rule_keyword:
-                    log(f"  使用「{rule_keyword}」的 Token 提交")
+                if token_name:
+                    log(f"  使用命名 Token「{token_name}」提交")
                 try:
                     result = dict(service.submit_repo(
                         item["org"], item["repo"], item["branch"],

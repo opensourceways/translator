@@ -494,9 +494,7 @@ class TestPages:
 
 
 class TestRepoSettings:
-    """仓库配置端点：一个条目配齐开关与专属 Token；token 明文永不出库。"""
-
-    SECRET = "tok-plaintext-secret"
+    """仓库配置端点：一个条目配齐开关与命名 Token 名称引用；明文永不入库。"""
 
     def test_settings_page_lists_entries(self, tmp_path, monkeypatch):
         settings = _make_settings(tmp_path)
@@ -550,33 +548,32 @@ class TestRepoSettings:
             assert client.delete("/api/settings/repos/1").status_code == 403
 
     def test_add_toggle_delete_flow(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TR_TOKEN_HCCL_BOT", "vault-secret")
         settings = _make_settings(tmp_path, admin_token="adm")
         headers = {"X-Admin-Token": "adm"}
         with _client(settings, monkeypatch) as (client, app, _, _):
-            client.post("/api/settings/tokens",
-                        json={"name": "hccl-bot", "token": self.SECRET},
-                        headers=headers)
             r = client.post("/api/settings/repos",
                             json={"org": "CANN", "repo": "HCCL",
-                                  "token_name": "hccl-bot"},
+                                  "token_name": "hccl_bot"},
                             headers=headers)
             assert r.status_code == 200
             entry = r.json()
             assert entry["org"] == "cann" and entry["repo"] == "hccl"
             db = app.state.db
             assert db.is_auto_pr_enabled("cann", "hccl") is True
-            assert db.get_repo_token("cann", "hccl") == self.SECRET
+            # SQLite 只存名称引用，不存 token 明文
+            assert db.get_repo_token_name("cann", "hccl") == "hccl_bot"
             # 列表回 token_name 引用，无 token 字段
             entries = client.get("/api/settings/repos").json()["entries"]
-            assert entries[0]["token_name"] == "hccl-bot"
+            assert entries[0]["token_name"] == "hccl_bot"
             assert "token" not in entries[0]
             # 不带 token_name 的 upsert 保留已有引用
             r = client.post("/api/settings/repos",
                             json={"org": "cann", "repo": "hccl"},
                             headers=headers)
             assert r.json()["id"] == entry["id"]
-            assert db.get_repo_token("cann", "hccl") == self.SECRET
-            # 引用不存在的命名 token：422
+            assert db.get_repo_token_name("cann", "hccl") == "hccl_bot"
+            # 引用未在 Vault 配置的名称：422
             assert client.post("/api/settings/repos",
                                json={"org": "cann", "repo": "hccl",
                                      "token_name": "nope"},
@@ -673,55 +670,44 @@ class TestStartupRecovery:
 
 
 class TestNamedTokenSettings:
-    """命名 Token 池端点：明文永不出库（列表与页面均为掩码）。"""
+    """命名 Token 只读展示：端点与页面仅暴露名称，服务不保存/不显示明文。"""
 
     SECRET = "named-plaintext-secret"
 
-    def test_add_list_masked_delete_flow(self, tmp_path, monkeypatch):
+    def test_list_and_page_show_names_only(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TR_TOKEN_CANN_BOT", self.SECRET)
         settings = _make_settings(tmp_path)
-        with _client(settings, monkeypatch) as (client, app, _, _):
-            r = client.post("/api/settings/tokens",
-                            json={"name": "Cann-Bot", "token": self.SECRET})
-            assert r.status_code == 200
-            assert r.json()["name"] == "cann-bot"  # 小写规范化
-            entry_id = r.json()["id"]
-            tokens = app.state.db.list_named_tokens()
-            assert tokens[0]["token"] == self.SECRET
-            # 列表只回掩码，明文不出现在响应里
+        with _client(settings, monkeypatch) as (client, _, _, _):
+            # 列表端点只回名称
             body = client.get("/api/settings/tokens")
+            assert body.status_code == 200
+            assert body.json() == {"names": ["cann_bot"]}
             assert self.SECRET not in body.text
-            entries = body.json()["entries"]
-            assert entries[0]["token_masked"] == "name***"
-            assert "token" not in entries[0]
-            # 设置页同样只渲染掩码；仓库表单下拉包含该名称
+            # 设置页只渲染名称与 Vault 键；下拉包含该名称
             page = client.get("/settings")
             assert "Token 池" in page.text
             assert self.SECRET not in page.text
-            assert "name***" in page.text
-            assert 'value="cann-bot"' in page.text
-            # 删除
-            r = client.delete(f"/api/settings/tokens/{entry_id}")
-            assert r.json()["deleted"] is True
-            assert app.state.db.list_named_tokens() == []
+            assert "cann_bot" in page.text
+            assert "TR_TOKEN_CANN_BOT" in page.text
+            assert 'value="cann_bot"' in page.text
 
-    def test_add_validation_422_and_404(self, tmp_path, monkeypatch):
+    def test_no_names_when_vault_empty(self, tmp_path, monkeypatch):
         settings = _make_settings(tmp_path)
-        with _client(settings, monkeypatch) as (client, app, _, _):
-            assert client.post("/api/settings/tokens",
-                               json={"name": "n"}).status_code == 422
-            assert client.post("/api/settings/tokens",
-                               json={"token": "t"}).status_code == 422
-            assert client.delete("/api/settings/tokens/999"
-                                 ).status_code == 404
+        with _client(settings, monkeypatch) as (client, _, _, _):
+            assert client.get("/api/settings/tokens").json() == {"names": []}
+            assert "暂无命名 Token" in client.get("/settings").text
 
-    def test_403_with_wrong_admin_token(self, tmp_path, monkeypatch):
+    def test_tokens_endpoint_read_only(self, tmp_path, monkeypatch):
+        """只读端点：写入方法不再提供（POST 405，DELETE 404）。"""
         settings = _make_settings(tmp_path, admin_token="adm")
-        with _client(settings, monkeypatch) as (client, app, _, _):
+        with _client(settings, monkeypatch) as (client, _, _, _):
             assert client.post("/api/settings/tokens",
-                               json={"name": "n", "token": "t"}
-                               ).status_code == 403
-            assert client.delete("/api/settings/tokens/1").status_code == 403
-            assert client.get("/api/settings/tokens").status_code == 200
+                               json={"name": "n", "token": "t"},
+                               headers={"X-Admin-Token": "adm"}
+                               ).status_code == 405
+            assert client.delete("/api/settings/tokens/1",
+                                 headers={"X-Admin-Token": "adm"}
+                                 ).status_code == 404
 
 
 

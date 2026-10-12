@@ -17,8 +17,8 @@ translator：GitCode 译稿自动提 PR 服务。监听译稿权威仓
 
 | 目录/文件 | 说明 |
 | --- | --- |
-| `translator/` | 引擎包：client.py（GitCode API）、scan.py（变更扫描）、submit.py（提 PR）、rules.py（token 规则）、localgit.py（本地克隆索引）、service.py（门面导出）、cli.py |
-| `webapp/` | 服务层（FastAPI）：api.py（webhook/Dashboard/管理端点）、runner.py（Worker 执行编排）、queueing.py（push 合并队列）、prsync.py（PR 状态轮询）、prstatus.py（PR 派生状态）、db.py（SQLite）、rules_cache.py、templates/（Jinja2 页面） |
+| `translator/` | 引擎包：client.py（GitCode API）、scan.py（变更扫描）、submit.py（提 PR）、localgit.py（本地克隆索引）、service.py（门面导出）、secrets.py（凭据读取/命名 token 枚举）、cli.py |
+| `webapp/` | 服务层（FastAPI）：api.py（webhook/Dashboard/管理端点）、runner.py（Worker 执行编排）、queueing.py（push 合并队列）、prsync.py（PR 状态轮询）、prstatus.py（PR 派生状态）、db.py（SQLite）、token_router.py（命名 token 路由）、templates/（Jinja2 页面） |
 | `tests/` | pytest，全部 mock 不触网 |
 | `deploy/k8s/` | K8s 清单（Namespace/ConfigMap/PVC/Deployment/Service；Secret 仅模板） |
 | `Dockerfile` `docker-compose.yml` | 一体化容器（前后端同进程，无独立前端） |
@@ -60,8 +60,9 @@ curl localhost:8000/healthz        # 探活 + 影子状态 + 队列深度
   覆盖）> 环境变量；生产由 Vault 注入文件，凭据不落 env
 - 影子模式：`TR_SHADOW` 仅作首启种子，运行时真值在库中
   （`POST /api/config/shadow` 或页面切换）；影子=全流程照跑但不建 PR
-- Token 路由优先级：仓库配置引用的命名 token（设置页维护）>
-  来源仓 token_rules.json > 默认 GITCODE_TOKEN
+- Token 路由：仓库配置引用命名 token 名称（设置页维护）→ Vault 的
+  `TR_TOKEN_<名称大写>`；名称缺失/非法时该仓直接失败（stage=token_missing），
+  不回退默认 GITCODE_TOKEN；CLI 模式统一用默认 GITCODE_TOKEN
 - 仓库自动提 PR 门控：设置页 repo_configs，无条目/已禁用默认拒绝
   （noop，stage=auto_pr_off）
 - 管理端点：`TR_ADMIN_TOKEN` 空则放开（内网默认）；前端 localStorage

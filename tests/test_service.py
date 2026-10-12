@@ -1,13 +1,11 @@
 """service 模块的单元测试。
 
-覆盖 Token 规则（resolve_token / load_token_rules）、扫描对比
-（scan_changed）和幂等提交（submit_repo / submit_all）。
+覆盖扫描对比（scan_changed）和幂等提交（submit_repo / submit_all）。
 测试通过 mock 各子模块的 client 完全控制下游 GitCode API 依赖，
 不发起真实网络请求。
 """
 
 import base64
-import json
 import os
 import shutil
 import subprocess
@@ -18,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from translator import client, common, index, localgit, rules, scan, submit
+from translator import client, common, index, localgit, scan, submit
 from translator.client import GitCodeError
 
 SILENT = lambda msg: None  # 测试中静默日志
@@ -147,194 +145,6 @@ def _make_sha_scan_client_mock(entry_sha, target_sha):
     )
     client_mock.get_contents.return_value = {"sha": target_sha}
     return client_mock
-
-
-class TestResolveToken:
-    """Token 规则路由：关键字命中第一条规则，未命中回退默认 Token。"""
-
-    def test_match_by_keyword(self):
-        token, keyword = rules.resolve_token(
-            "Ascend/26.1.0/MindStudio/msprof",
-            [{"keyword": "MindStudio", "token": "tokA"}], "tok")
-        assert (token, keyword) == ("tokA", "MindStudio")
-
-    def test_match_case_insensitive(self):
-        token, _ = rules.resolve_token(
-            "Ascend/26.1.0/MindStudio/msprof",
-            [{"keyword": "mindstudio", "token": "tokA"}], "tok")
-        assert token == "tokA"
-
-    def test_first_match_wins(self):
-        rule_list = [
-            {"keyword": "MindStudio", "token": "tokA"},
-            {"keyword": "msprof", "token": "tokB"},
-        ]
-        token, keyword = rules.resolve_token(
-            "Ascend/26.1.0/MindStudio/msprof", rule_list, "tok")
-        assert (token, keyword) == ("tokA", "MindStudio")
-
-    def test_no_match_uses_default(self):
-        token, keyword = rules.resolve_token(
-            "Ascend/26.1.0/CANN/cann",
-            [{"keyword": "MindStudio", "token": "tokA"}], "tok")
-        assert (token, keyword) == ("tok", None)
-
-    def test_invalid_rules_skipped(self):
-        rule_list = [
-            {"keyword": "", "token": "tokA"},
-            {"keyword": "MindStudio", "token": ""},
-            "not-a-dict",
-        ]
-        token, keyword = rules.resolve_token(
-            "Ascend/26.1.0/MindStudio/msprof", rule_list, "tok")
-        assert (token, keyword) == ("tok", None)
-
-
-class TestLoadTokenRules:
-    """从权威仓库读取规则文件：404 → 空规则；JSON 非法 → ConfigError。"""
-
-    def _mock_with_rules(self, rules_text):
-        client_mock = _make_client_mock()
-        client_mock.get_file_text.return_value = rules_text
-        return client_mock
-
-    def test_file_missing_returns_empty(self):
-        client_mock = _make_client_mock()
-        client_mock.get_file_text.side_effect = GitCodeError(404, "Not Found")
-        with patch("translator.rules.client", client_mock):
-            loaded = rules.load_token_rules("tok", log=SILENT)
-            assert loaded == []
-
-    def test_valid_rules_resolved_from_env(self, monkeypatch):
-        monkeypatch.setenv("GITCODE_TOKEN_MINDSTUDIO", "tokA")
-        text = json.dumps({"rules": [
-            {"keyword": "MindStudio", "token_env": "GITCODE_TOKEN_MINDSTUDIO"},
-        ]})
-        with patch("translator.rules.client",
-                   self._mock_with_rules(text)):
-            loaded = rules.load_token_rules("tok", log=SILENT)
-            assert loaded == [{"keyword": "MindStudio", "token": "tokA"}]
-
-    def test_missing_env_rule_skipped(self, monkeypatch):
-        monkeypatch.delenv("GITCODE_TOKEN_MINDSTUDIO", raising=False)
-        text = json.dumps({"rules": [
-            {"keyword": "MindStudio", "token_env": "GITCODE_TOKEN_MINDSTUDIO"},
-        ]})
-        with patch("translator.rules.client",
-                   self._mock_with_rules(text)):
-            loaded = rules.load_token_rules("tok", log=SILENT)
-            assert loaded == []
-
-    def test_incomplete_rule_skipped(self):
-        text = json.dumps({"rules": [
-            {"keyword": "MindStudio"},
-            "not-a-dict",
-        ]})
-        with patch("translator.rules.client",
-                   self._mock_with_rules(text)):
-            loaded = rules.load_token_rules("tok", log=SILENT)
-            assert loaded == []
-
-    def test_invalid_json_raises_config_error(self):
-        with patch("translator.rules.client",
-                   self._mock_with_rules("{not json")):
-            with pytest.raises(common.ConfigError):
-                rules.load_token_rules("tok", log=SILENT)
-
-    def test_missing_rules_key_raises_config_error(self):
-        with patch("translator.rules.client",
-                   self._mock_with_rules(json.dumps({"foo": []}))):
-            with pytest.raises(common.ConfigError):
-                rules.load_token_rules("tok", log=SILENT)
-
-
-class TestBlacklist:
-    """拉黑名单：从权威仓库读取目录路径列表，损坏配置抛 ConfigError。"""
-
-    def _mock_with_blacklist(self, text):
-        client_mock = _make_client_mock()
-        client_mock.get_file_text.return_value = text
-        return client_mock
-
-    def test_file_missing_returns_empty(self):
-        client_mock = _make_client_mock()
-        client_mock.get_file_text.side_effect = GitCodeError(404, "Not Found")
-        with patch("translator.rules.client", client_mock):
-            loaded = rules.load_blacklist("tok", log=SILENT)
-            assert loaded == []
-
-    def test_valid_blacklist_loaded(self):
-        text = json.dumps({"repos": [
-            "Ascend/docs",
-            "Ascend/release-management",
-        ]})
-        with patch("translator.rules.client",
-                   self._mock_with_blacklist(text)):
-            loaded = rules.load_blacklist("tok", log=SILENT)
-            assert loaded == ["Ascend/docs", "Ascend/release-management"]
-
-    def test_empty_or_blank_entries_skipped(self):
-        text = json.dumps({"repos": ["Ascend/docs", "", "  "]})
-        with patch("translator.rules.client",
-                   self._mock_with_blacklist(text)):
-            loaded = rules.load_blacklist("tok", log=SILENT)
-            assert loaded == ["Ascend/docs"]
-
-    def test_invalid_json_raises_config_error(self):
-        with patch("translator.rules.client",
-                   self._mock_with_blacklist("{not json")):
-            with pytest.raises(common.ConfigError):
-                rules.load_blacklist("tok", log=SILENT)
-
-    def test_missing_repos_key_raises_config_error(self):
-        with patch("translator.rules.client",
-                   self._mock_with_blacklist(json.dumps({"foo": []}))):
-            with pytest.raises(common.ConfigError):
-                rules.load_blacklist("tok", log=SILENT)
-
-
-class TestWhitelist:
-    """开放白名单：从权威仓库读取目录路径列表，损坏配置抛 ConfigError。"""
-
-    def _mock_with_whitelist(self, text):
-        client_mock = _make_client_mock()
-        client_mock.get_file_text.return_value = text
-        return client_mock
-
-    def test_file_missing_returns_empty(self):
-        """白名单缺失视为不限制开放范围（与黑名单缺失一致，不报错）。"""
-        client_mock = _make_client_mock()
-        client_mock.get_file_text.side_effect = GitCodeError(404, "Not Found")
-        with patch("translator.rules.client", client_mock):
-            loaded = rules.load_whitelist("tok", log=SILENT)
-            assert loaded == []
-
-    def test_valid_whitelist_loaded(self):
-        text = json.dumps({"repos": ["CANN/9.1.0/sip"]})
-        with patch("translator.rules.client",
-                   self._mock_with_whitelist(text)):
-            loaded = rules.load_whitelist("tok", log=SILENT)
-            assert loaded == ["CANN/9.1.0/sip"]
-
-    def test_empty_or_blank_entries_skipped(self):
-        text = json.dumps({"repos": ["CANN/9.1.0/sip", "", "  "]})
-        with patch("translator.rules.client",
-                   self._mock_with_whitelist(text)):
-            loaded = rules.load_whitelist("tok", log=SILENT)
-            assert loaded == ["CANN/9.1.0/sip"]
-
-    def test_invalid_json_raises_config_error(self):
-        """配置损坏不能静默放行（否则可能意外放开全部仓库）。"""
-        with patch("translator.rules.client",
-                   self._mock_with_whitelist("{not json")):
-            with pytest.raises(common.ConfigError):
-                rules.load_whitelist("tok", log=SILENT)
-
-    def test_missing_repos_key_raises_config_error(self):
-        with patch("translator.rules.client",
-                   self._mock_with_whitelist(json.dumps({"foo": []}))):
-            with pytest.raises(common.ConfigError):
-                rules.load_whitelist("tok", log=SILENT)
 
 
 class TestSourceRepoOverride:
@@ -530,123 +340,51 @@ class TestScanChanged:
                 "Ascend/26.1.0/MindStudio/mspti",
             ]
 
-    def test_token_rules_whitelist(self):
-        """配置规则后仅处理命中的仓库：规则外跳过且不做任何对比请求。"""
+    def test_token_resolver_used_for_target(self):
+        """token_resolver 逐仓解析目标仓库 Token：对比用解析值，来源下载用默认。"""
         client_mock = _make_scan_client_mock()
-        rules = [{"keyword": "mspti", "token": "tokA"}]
-        with _patch_scan_client(client_mock):
-            result = scan.scan_changed("", "tok", token_rules=rules,
-                                          log=SILENT)
-            assert [c["repo"] for c in result["changed"]] == ["mspti"]
-            assert len(result["skipped"]) == 4
-            assert "未命中 Token 规则" in result["skipped"][0]["reason"]
-            # 仅 mspti 与目标仓库做过对比，且使用规则 Token
-            compare_calls = client_mock.get_contents.call_args_list
-            assert {c.args[1] for c in compare_calls} == {"mspti"}
-            assert all(c.args[4] == "tokA" for c in compare_calls)
-            # 权威仓库下载始终用默认 Token
-            source_calls = [
-                c for c in client_mock.get_file_bytes.call_args_list
-                if c.args[0] == common.SOURCE_ORG
-            ]
-            assert source_calls
-            assert all(c.args[4] == "tok" for c in source_calls)
+        calls = []
 
-    def test_invalid_rules_treated_as_no_rules(self):
-        """规则全部无效（关键字/Token 留空）时等同于未配置，全部照常扫描。"""
+        def resolver(org, repo, path):
+            calls.append((org, repo, path))
+            return (f"tok-{repo}", None)
+
+        with _patch_scan_client(client_mock):
+            result = scan.scan_changed("", "tok", token_resolver=resolver,
+                                       log=SILENT)
+        assert len(result["changed"]) == 5
+        assert {c[1] for c in calls} == {
+            "msprof", "mspti", "cann", "release-management"}
+        # 目标仓库对比使用逐仓解析出的 Token
+        compare_calls = client_mock.get_contents.call_args_list
+        assert all(c.args[4].startswith("tok-") for c in compare_calls)
+        # 权威仓库下载始终用默认 Token
+        source_calls = [
+            c for c in client_mock.get_file_bytes.call_args_list
+            if c.args[0] == common.SOURCE_ORG
+        ]
+        assert source_calls
+        assert all(c.args[4] == "tok" for c in source_calls)
+
+    def test_token_resolver_error_records_repo_error(self):
+        """resolver 返回错误的仓库记入 errors 并跳过，其余仓库继续扫描。"""
         client_mock = _make_scan_client_mock()
-        rules = [{"keyword": "", "token": "tokA"},
-                 {"keyword": "mspti", "token": ""}]
-        with _patch_scan_client(client_mock):
-            result = scan.scan_changed("", "tok", token_rules=rules,
-                                          log=SILENT)
-            assert len(result["changed"]) == 5
-            assert result["skipped"] == []
 
-    def test_blacklist_skips_repo(self):
-        """拉黑名单命中（相等或前缀）的仓库直接跳过，不做任何对比请求。"""
-        client_mock = _make_scan_client_mock()
-        with _patch_scan_client(client_mock):
-            result = scan.scan_changed(
-                "", "tok", blacklist=["Ascend/26.1.0/MindStudio/mspti"],
-                log=SILENT)
-            assert [c["project"]["path"] for c in result["changed"]] == [
-                p for p in REPO_PATHS
-                if p != "Ascend/26.1.0/MindStudio/mspti"
-            ]
-            assert result["skipped"] == [{
-                "path": "Ascend/26.1.0/MindStudio/mspti",
-                "reason": "在拉黑名单中，业务侧暂不处理",
-            }]
-            assert "mspti" not in {
-                c.args[1] for c in client_mock.get_contents.call_args_list
-            }
+        def resolver(org, repo, path):
+            if repo == "mspti":
+                return ("", "命名 Token「x」未在 Vault 配置")
+            return ("tokA", None)
 
-    def test_blacklist_prefix_matches(self):
-        """黑名单按前缀命中：拉黑高层目录则其下所有仓库级目录都跳过。"""
-        client_mock = _make_scan_client_mock()
         with _patch_scan_client(client_mock):
-            result = scan.scan_changed(
-                "", "tok", blacklist=["Ascend/26.1.0"], log=SILENT)
-            assert [c["project"]["path"] for c in result["changed"]] == [
-                "Ascend/master/MindStudio/msprof",
-                "CANN/9.1.0/cann",
-                "CANN/master/release-management",
-            ]
-            assert len(result["skipped"]) == 2
-            assert all("拉黑名单" in s["reason"] for s in result["skipped"])
-
-    def test_whitelist_restricts_open_scope(self):
-        """白名单非空时只处理命中的仓库，名单外直接跳过且无任何对比请求。
-
-        对应「整个功能先只对 sip 仓库开放」：配置白名单后其余仓库即使
-        内容有差异也不会被提交。
-        """
-        client_mock = _make_scan_client_mock()
-        with _patch_scan_client(client_mock):
-            result = scan.scan_changed(
-                "", "tok", whitelist=["CANN/9.1.0/cann"], log=SILENT)
-            assert [c["project"]["path"] for c in result["changed"]] == [
-                "CANN/9.1.0/cann"]
-            assert len(result["skipped"]) == len(REPO_PATHS) - 1
-            assert all("不在开放白名单中" in s["reason"]
-                       for s in result["skipped"])
-            # 名单外的仓库未发起任何目标仓库对比请求
-            assert {c.args[1] for c in client_mock.get_contents.call_args_list} \
-                == {"cann"}
-
-    def test_empty_whitelist_means_no_restriction(self):
-        """白名单为空（未配置）时不限制开放范围，全部仓库照常处理。"""
-        client_mock = _make_scan_client_mock()
-        with _patch_scan_client(client_mock):
-            result = scan.scan_changed("", "tok", whitelist=[], log=SILENT)
-            assert len(result["changed"]) == 5
-            assert result["skipped"] == []
-
-    def test_whitelist_prefix_matches(self):
-        """白名单按前缀命中：开放高层目录则其下所有仓库级目录都放行。"""
-        client_mock = _make_scan_client_mock()
-        with _patch_scan_client(client_mock):
-            result = scan.scan_changed(
-                "", "tok",
-                whitelist=["Ascend/26.1.0", "CANN/9.1.0/cann"], log=SILENT)
-            assert sorted(c["project"]["path"] for c in result["changed"]) == [
-                "Ascend/26.1.0/MindStudio/msprof",
-                "Ascend/26.1.0/MindStudio/mspti",
-                "CANN/9.1.0/cann",
-            ]
-            assert len(result["skipped"]) == 2
-
-    def test_whitelist_and_blacklist_combined(self):
-        """同时配置时：名单外跳过，名单内被拉黑的仍跳过（拉黑优先）。"""
-        client_mock = _make_scan_client_mock()
-        with _patch_scan_client(client_mock):
-            result = scan.scan_changed(
-                "", "tok", whitelist=["CANN/9.1.0/cann"],
-                blacklist=["CANN/9.1.0/cann"], log=SILENT)
-            assert result["changed"] == []
-            assert len(result["skipped"]) == len(REPO_PATHS)
-            assert any("拉黑名单" in s["reason"] for s in result["skipped"])
+            result = scan.scan_changed("", "tok", token_resolver=resolver,
+                                       log=SILENT)
+        assert len(result["changed"]) == 4
+        assert result["errors"] == [{
+            "path": "Ascend/26.1.0/MindStudio/mspti",
+            "error": "命名 Token「x」未在 Vault 配置"}]
+        # 报错的仓库未发起任何目标仓库对比请求
+        assert "mspti" not in {
+            c.args[1] for c in client_mock.get_contents.call_args_list}
 
     def test_unchanged_with_source_sha_skips_download(self):
         """来源目录条目 sha 与目标 sha 一致时，不做任何内容下载即判未变更。"""
@@ -1309,7 +1047,7 @@ class TestListTree:
 
 
 class TestSubmitAll:
-    """批量提交：Token 路由 + 白名单 + 单仓失败不中断。"""
+    """批量提交：默认 Token 透传 + 单仓失败不中断。"""
 
     def _item(self, path="Ascend/26.1.0/MindStudio/msprof"):
         return {
@@ -1348,22 +1086,15 @@ class TestSubmitAll:
             assert second["ok"] is True
             assert second["pr_number"] == 2
 
-    def test_token_rules_route_submit_token(self):
-        """配置规则后仅提交命中的仓库：规则外记为失败且不调用 submit_repo。"""
+    def test_default_token_used_for_all_repos(self):
+        """无逐仓 Token 路由：全部仓库都使用传入的默认 Token。"""
         items = [self._item(), self._item("Ascend/26.1.0/CANN/cann")]
-        rules = [{"keyword": "MindStudio", "token": "tokA"}]
         ok_result = {"ok": True, "pr_url": "http://x/1", "pr_number": 1}
         with patch.object(submit, "submit_repo", return_value=ok_result) as m:
-            result = submit.submit_all(items, "tok", token_rules=rules,
-                                        log=SILENT)
-            assert result["submitted"] == 1
-            assert result["failed"] == 1
-            # 只有命中规则的仓库真正提交，且使用规则 Token
-            assert m.call_count == 1
-            assert m.call_args_list[0].args[4] == "tokA"
-            skipped = result["results"][1]
-            assert skipped["ok"] is False
-            assert skipped["stage"] == "token_rule"
+            result = submit.submit_all(items, "tok", log=SILENT)
+            assert result["submitted"] == 2
+            assert m.call_count == 2
+            assert all(c.args[4] == "tok" for c in m.call_args_list)
 
     def test_pr_existed_flag_propagated(self):
         """已有 PR 的幂等命中标记透传到批量结果。"""
@@ -1744,28 +1475,17 @@ class TestScanChangedIncremental:
         assert clone_mock.call_count == 0
 
     def test_incremental_config_change_falls_back_to_full(self):
-        """变更命中根目录配置文件（blacklist.json 等）回退全量扫描。"""
+        """变更命中根目录配置（README.md）回退全量扫描。"""
         client_mock = _make_scan_client_mock()
         result, clone_mock, *_ = self._run(
             client_mock, {},
-            changed_paths={"blacklist.json", "CANN/9.1.0/cann/README.md"},
+            changed_paths={"README.md", "CANN/9.1.0/cann/README.md"},
             diff_before="b-sha", diff_after="a-sha")
         assert result["ok"] is True
         assert result["incremental"] is False
         # 全量：5 个仓库全部处理
         assert len(result["changed"]) == 5
         assert clone_mock.call_count == 5
-
-    def test_incremental_whitelist_change_falls_back_to_full(self):
-        """变更命中 whitelist.json（范围配置）同样回退全量扫描。"""
-        client_mock = _make_scan_client_mock()
-        result, clone_mock, *_ = self._run(
-            client_mock, {},
-            changed_paths={"whitelist.json"},
-            diff_before="b-sha", diff_after="a-sha")
-        assert result["ok"] is True
-        assert result["incremental"] is False
-        assert len(result["changed"]) == 5
 
     def test_incremental_diff_failure_falls_back_to_full(self):
         """diff 失败（before sha 不可达等）回退全量，宁多勿漏。"""
@@ -1822,95 +1542,6 @@ class TestScanChangedIncremental:
         assert result["ok"] is True
         assert result["incremental"] is False
         assert result["unchanged"] == REPO_PATHS
-
-
-class TestLoadTokenRulesLocal:
-    """本地化模式：规则文件从本地克隆读取（git show），失败路径同 API。"""
-
-    def test_reads_from_local_clone(self):
-        with patch("translator.localgit.read_file",
-                   return_value=b'{"rules": []}') as read_mock:
-            loaded = rules.load_token_rules("tok", log=SILENT,
-                                            source_repo_dir="/src")
-            assert loaded == []
-            read_mock.assert_called_once_with("/src", "token_rules.json")
-
-    def test_missing_file_returns_empty(self):
-        with patch("translator.localgit.read_file",
-                   side_effect=GitCodeError(404, "missing")):
-            loaded = rules.load_token_rules("tok", log=SILENT,
-                                            source_repo_dir="/src")
-            assert loaded == []
-
-    def test_valid_rules_resolved_from_env(self, monkeypatch):
-        monkeypatch.setenv("GITCODE_TOKEN_MINDSTUDIO", "tokA")
-        text = json.dumps({"rules": [
-            {"keyword": "MindStudio", "token_env": "GITCODE_TOKEN_MINDSTUDIO"},
-        ]})
-        with patch("translator.localgit.read_file",
-                   return_value=text.encode("utf-8")):
-            loaded = rules.load_token_rules("tok", log=SILENT,
-                                            source_repo_dir="/src")
-            assert loaded == [{"keyword": "MindStudio", "token": "tokA"}]
-
-    def test_invalid_json_raises_config_error(self):
-        with patch("translator.localgit.read_file",
-                   return_value=b"{not json"):
-            with pytest.raises(common.ConfigError):
-                rules.load_token_rules("tok", log=SILENT,
-                                       source_repo_dir="/src")
-
-
-class TestLoadBlacklistLocal:
-    """本地化模式：拉黑名单从本地克隆读取（git show），失败路径同 API。"""
-
-    def test_reads_from_local_clone(self):
-        with patch("translator.localgit.read_file",
-                   return_value=b'{"repos": ["Ascend/docs"]}') as read_mock:
-            loaded = rules.load_blacklist("tok", log=SILENT,
-                                          source_repo_dir="/src")
-            assert loaded == ["Ascend/docs"]
-            read_mock.assert_called_once_with("/src", "blacklist.json")
-
-    def test_missing_file_returns_empty(self):
-        with patch("translator.localgit.read_file",
-                   side_effect=GitCodeError(404, "missing")):
-            loaded = rules.load_blacklist("tok", log=SILENT,
-                                          source_repo_dir="/src")
-            assert loaded == []
-
-    def test_invalid_json_raises_config_error(self):
-        with patch("translator.localgit.read_file",
-                   return_value=b"{not json"):
-            with pytest.raises(common.ConfigError):
-                rules.load_blacklist("tok", log=SILENT,
-                                     source_repo_dir="/src")
-
-
-class TestLoadWhitelistLocal:
-    """本地化模式：开放白名单从本地克隆读取（git show），失败路径同 API。"""
-
-    def test_reads_from_local_clone(self):
-        with patch("translator.localgit.read_file",
-                   return_value=b'{"repos": ["CANN/9.1.0/sip"]}') as read_mock:
-            loaded = rules.load_whitelist("tok", log=SILENT,
-                                          source_repo_dir="/src")
-            assert loaded == ["CANN/9.1.0/sip"]
-            read_mock.assert_called_once_with("/src", "whitelist.json")
-
-    def test_missing_file_returns_empty(self):
-        with patch("translator.localgit.read_file",
-                   side_effect=GitCodeError(404, "missing")):
-            loaded = rules.load_whitelist("tok", log=SILENT,
-                                          source_repo_dir="/src")
-            assert loaded == []
-
-    def test_invalid_json_raises_config_error(self):
-        with patch("translator.localgit.read_file",
-                   return_value=b"{not json"):
-            with pytest.raises(common.ConfigError):
-                rules.load_whitelist("tok", log=SILENT,
-                                     source_repo_dir="/src")
 
 
 def _ok_response(payload=None):

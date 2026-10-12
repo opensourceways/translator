@@ -9,10 +9,9 @@
 - prs.mergeable 三态：None 存 NULL（服务端尚未计算）
 - prs.labels_json/draft/review_total/review_accepted 为原始信号，
   派生状态（CI 未通过/待评审等）由 webapp.prstatus 在展示层计算
-- 任何 token 值不进日志/其他表：唯一的例外是 named_tokens 表
-  （设置页自助配置的命名 token 池，按用户明确要求落库，见
-  list/upsert_named_token）；repo_configs 只存 token_name 引用，
-  本模块其他接口不接收 token 参数
+- 任何 token 值不进日志/其他表：repo_configs 只存命名 token 的
+  名称引用（token_name），token 明文由 Vault 注入、经 translator.secrets
+  按需读取，本模块不接收也不保存任何 token 值
 """
 
 import json
@@ -107,14 +106,6 @@ CREATE TABLE IF NOT EXISTS prs (
     review_accepted INTEGER,
     created_at  TEXT,
     UNIQUE(org, repo, number)
-);
-CREATE TABLE IF NOT EXISTS named_tokens (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT NOT NULL,
-    token      TEXT NOT NULL,
-    created_at TEXT,
-    updated_at TEXT,
-    UNIQUE(name)
 );
 CREATE TABLE IF NOT EXISTS repo_configs (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -602,8 +593,8 @@ class Database:
 
     # ── 仓库配置（repo_configs 表，设置页维护） ──────────────
     # 一个条目配齐一个仓库：启用开关（active 模式是否自动提 PR）+
-    # 可选命名 token 引用（token_name → named_tokens）。粒度到仓库：
-    # 该仓所有分支统一受控。
+    # 可选命名 token 名称引用（token_name → Vault 的 TR_TOKEN_<名称>）。
+    # 粒度到仓库：该仓所有分支统一受控。
 
     def list_repo_configs(self):
         """全部仓库配置条目，按 (org, repo) 排序。"""
@@ -616,7 +607,7 @@ class Database:
 
         enabled / token_name 传 None 表示该字段保持不变（新条目分别
         默认 True 与空串）；token_name 传空串表示清除命名 token 引用
-        （回退 token_rules.json / 默认 token）。
+        （回退默认 GITCODE_TOKEN）。
         """
         org, repo = org.strip().lower(), repo.strip().lower()
         enabled_val = None if enabled is None else (1 if enabled else 0)
@@ -676,62 +667,22 @@ class Database:
                 ((org or "").lower(), (repo or "").lower()))
         return bool(row and row["enabled"])
 
-    def get_repo_token(self, org, repo):
-        """仓库配置引用的命名 token 实际值；无条目/未配置/引用的 token
-        已删除时返回 None（调用方回退 token_rules.json / 默认 token）。"""
-        with self._lock:
-            row = self._one(
-                "SELECT t.token FROM repo_configs c"
-                " JOIN named_tokens t ON t.name = c.token_name"
-                " WHERE c.org = ? AND c.repo = ?",
-                ((org or "").lower(), (repo or "").lower()))
-        return row["token"] if row else None
+    def get_repo_token_name(self, org, repo):
+        """仓库配置引用的命名 token 名称；无条目/未配置时返回空串。
 
-    def token_name_exists(self, name):
-        """命名 token 是否存在（API 校验 token_name 引用用）。"""
-        with self._lock:
-            return self._one(
-                "SELECT 1 AS x FROM named_tokens WHERE name = ?",
-                ((name or "").strip().lower(),)) is not None
-
-    # ── 命名 Token 池（named_tokens，设置页维护） ─────────────
-    # token 起名字保存，仓库配置通过 token_name 下拉引用；替代原先的
-    # 关键字匹配规则，控制精确到仓库。
-
-    def list_named_tokens(self):
-        """全部命名 token 条目，按名称排序（含明文 token，展示层负责
-        脱敏）。"""
-        with self._lock:
-            return self._all("SELECT * FROM named_tokens ORDER BY name")
-
-    def upsert_named_token(self, name, token):
-        """新增或更新命名 token（name 小写规范化、唯一）；返回条目 id。"""
-        name, token = (name or "").strip().lower(), (token or "").strip()
-        now = _utcnow()
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO named_tokens (name, token, created_at,"
-                " updated_at) VALUES (?, ?, ?, ?)"
-                " ON CONFLICT(name) DO UPDATE SET"
-                " token = excluded.token, updated_at = excluded.updated_at",
-                (name, token, now, now))
-            self._conn.commit()
-            # 不依赖 cur.lastrowid：ON CONFLICT 走 UPDATE 分支时它是陈旧值
-            row = self._one(
-                "SELECT id FROM named_tokens WHERE name = ?", (name,))
-            return row["id"]
-
-    def delete_named_token(self, entry_id):
-        """按 id 删除命名 token；不存在返回 False。
-
-        引用它的仓库配置不清空（get_repo_token 查不到即回退默认路由，
-        设置页显示引用失效）。
+        返回的是名称（如 ``cann_robot``），实际值由 Vault 注入、经
+        translator.secrets.get_named_token 解析。
         """
         with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM named_tokens WHERE id = ?", (entry_id,))
-            self._conn.commit()
-            return cur.rowcount > 0
+            row = self._one(
+                "SELECT token_name FROM repo_configs"
+                " WHERE org = ? AND repo = ?",
+                ((org or "").lower(), (repo or "").lower()))
+        return row["token_name"] if row else ""
+
+    # ── 命名 Token（名称仅存于 repo_configs.token_name） ───────
+    # token 明文由 Vault 注入（TR_TOKEN_<名称>），服务不保存任何 token
+    # 值；名称清单由 translator.secrets.list_token_names() 枚举。
 
     # ── kv 配置（shadow 开关等） ─────────────────────────────
 
@@ -798,9 +749,9 @@ def init_db(path):
 
 def _migrate(db):
     """轻量迁移：旧库 prs 表缺的新列用 ALTER TABLE 补齐（已有数据不丢）；
-    repo_configs 旧版内联 token 列重建为 token_name 引用（非空 token 迁入
-    named_tokens，命名 migrated-<org>-<repo>）；auto_pr/repo_tokens/
-    path_lists/path_token_rules 等废弃表折叠或删除（幂等）。
+    repo_configs 旧版内联 token 列重建为 token_name 结构（旧 token 值不再
+    保留——命名 token 改由 Vault 注入）；named_tokens/auto_pr/repo_tokens/
+    path_lists/path_token_rules 等废弃表删除（幂等）。
 
     新库的建表语句已含全部列，此处对每列做存在性检查，幂等。
     """
@@ -810,18 +761,10 @@ def _migrate(db):
             db._conn.execute(f"ALTER TABLE prs ADD COLUMN {name} {ddl}")
     tables = {r["name"] for r in db._all(
         "SELECT name FROM sqlite_master WHERE type = 'table'")}
-    # repo_configs 旧版（含内联 token 列）重建为 token_name 引用；
-    # 须在 auto_pr/repo_tokens 折叠之前执行（折叠写入的是新结构）
+    # repo_configs 旧版（含内联 token 列）重建为 token_name 结构；旧 token
+    # 明文一并丢弃（改由 Vault 注入），须在 auto_pr/repo_tokens 折叠之前执行
     rc_cols = {r["name"] for r in db._all("PRAGMA table_info(repo_configs)")}
     if "token" in rc_cols and "token_name" not in rc_cols:
-        now = _utcnow()
-        for r in db._all(
-                "SELECT org, repo, token FROM repo_configs WHERE token != ''"):
-            db._conn.execute(
-                "INSERT INTO named_tokens (name, token, created_at,"
-                " updated_at) VALUES (?, ?, ?, ?)"
-                " ON CONFLICT(name) DO UPDATE SET token = excluded.token",
-                (f"migrated-{r['org']}-{r['repo']}", r["token"], now, now))
         db._conn.execute("ALTER TABLE repo_configs RENAME TO repo_configs_old")
         db._conn.execute(
             "CREATE TABLE repo_configs ("
@@ -833,9 +776,8 @@ def _migrate(db):
         db._conn.execute(
             "INSERT INTO repo_configs (id, org, repo, enabled, token_name,"
             " created_at, updated_at)"
-            " SELECT id, org, repo, enabled,"
-            " CASE WHEN token != '' THEN 'migrated-' || org || '-' || repo"
-            " ELSE '' END, created_at, updated_at FROM repo_configs_old")
+            " SELECT id, org, repo, enabled, '', created_at, updated_at"
+            " FROM repo_configs_old")
         db._conn.execute("DROP TABLE repo_configs_old")
     if "auto_pr" in tables:
         # auto_pr（org,repo,branch 粒度）折叠为仓库粒度：同仓任一分支
@@ -852,24 +794,23 @@ def _migrate(db):
                  now, now))
         db._conn.execute("DROP TABLE auto_pr")
     if "repo_tokens" in tables:
-        # repo_tokens 的内联 token 迁入 named_tokens 并让 repo_configs 引用
+        # repo_tokens 为旧版仓库内联 token：token 明文不再保留，仅保留
+        # 「该仓已配置」这一事实（enabled=1、token_name 空串）
         now = _utcnow()
-        for r in db._all("SELECT org, repo, token FROM repo_tokens"):
-            org, repo = r["org"].lower(), r["repo"].lower()
-            name = f"migrated-{org}-{repo}"
-            db._conn.execute(
-                "INSERT INTO named_tokens (name, token, created_at,"
-                " updated_at) VALUES (?, ?, ?, ?)"
-                " ON CONFLICT(name) DO UPDATE SET token = excluded.token",
-                (name, r["token"], now, now))
+        for r in db._all("SELECT org, repo FROM repo_tokens"):
             db._conn.execute(
                 "INSERT INTO repo_configs (org, repo, enabled, token_name,"
-                " created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?)"
+                " created_at, updated_at) VALUES (?, ?, 1, '', ?, ?)"
                 " ON CONFLICT(org, repo) DO UPDATE SET"
-                " token_name = CASE WHEN repo_configs.token_name = ''"
-                " THEN excluded.token_name ELSE repo_configs.token_name END",
-                (org, repo, name, now, now))
+                " enabled = MAX(repo_configs.enabled, 1)",
+                (r["org"].lower(), r["repo"].lower(), now, now))
         db._conn.execute("DROP TABLE repo_tokens")
+    if "named_tokens" in tables:
+        # 命名 token 改由 Vault 注入，服务不再保存 token 明文：删旧表并
+        # 清空仓库配置里的旧名称引用（按新机制重配）
+        db._conn.execute("DROP TABLE named_tokens")
+        db._conn.execute(
+            "UPDATE repo_configs SET token_name = '' WHERE token_name != ''")
     if "path_lists" in tables:
         # 黑/白名单功能已移除（与仓库配置开关重复），删旧表
         db._conn.execute("DROP TABLE path_lists")

@@ -98,9 +98,9 @@ class TestReadFile:
 
     def test_returns_raw_bytes(self):
         with patch("translator.localgit._run_git_bytes",
-                   return_value=b'{"rules": []}'):
+                   return_value=b'# hello'):
             assert localgit.read_file(
-                "/repo", "token_rules.json") == b'{"rules": []}'
+                "/repo", "README.md") == b'# hello'
 
 
 class TestQuotePath:

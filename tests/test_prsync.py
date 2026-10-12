@@ -1,7 +1,7 @@
 """webapp.prsync（PR 状态轮询与影子模式 Jenkins PR 发现）的单元测试。
 
-全部 mock 不触网：client.get_pull_request / list_pull_requests、
-rules_cache、service.load_token_rules 均打桩；db 用 tmp_path 真库。
+全部 mock 不触网：client.get_pull_request / list_pull_requests 打桩；
+命名 token 经环境变量注入；db 用 tmp_path 真库。
 """
 
 import json
@@ -28,11 +28,8 @@ def db(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _stubs(monkeypatch):
-    """默认打桩：默认 token 固定、规则缓存为空时回退加载返回空、API 不触网。"""
+    """默认打桩：默认 token 固定、API 不触网。"""
     monkeypatch.setenv("GITCODE_TOKEN", "default-token")
-    monkeypatch.setattr(prsync.rules_cache, "get_rules", lambda: [])
-    monkeypatch.setattr(prsync.service, "load_token_rules",
-                        MagicMock(return_value=[]))
     monkeypatch.setattr(prsync.client, "get_pull_request",
                         MagicMock(return_value={"state": "open"}))
     monkeypatch.setattr(prsync.client, "list_pull_requests",
@@ -99,58 +96,27 @@ class TestStateMapping:
 
 
 class TestTokenRouting:
-    """规则路径命中用规则 token，未命中用默认 token。"""
+    """仓库配置的命名 token（名称 → Vault）优先于默认 token。"""
 
-    def test_rule_hit_uses_rule_token(self, db, monkeypatch):
+    def test_named_token_used_for_configured_repo(self, db, monkeypatch):
         db_mod.set_shadow(db, False)
-        monkeypatch.setattr(
-            prsync.rules_cache, "get_rules",
-            lambda: [{"keyword": "Ascend", "token": "rule-token"}])
-        _seed_pr(db, org="o1", repo="r1", number=1, path="Ascend/a")
-        _seed_pr(db, org="o2", repo="r2", number=2, path="Other/b")
-        get = _mock_get(monkeypatch, payload={"state": "open"})
-        prsync._poll_once(db, SETTINGS)
-        tokens = {(c.args[0], c.args[3]) for c in get.call_args_list}
-        assert tokens == {("o1", "rule-token"), ("o2", "default-token")}
-
-    def test_db_token_beats_rule_token(self, db, monkeypatch):
-        """设置页配置的仓库专属 token 优先于关键字规则与默认 token。"""
-        db_mod.set_shadow(db, False)
-        monkeypatch.setattr(
-            prsync.rules_cache, "get_rules",
-            lambda: [{"keyword": "Ascend", "token": "rule-token"}])
-        db.upsert_named_token("r1-bot", "db-token")
-        db.upsert_repo_config("O1", "R1", token_name="r1-bot")
+        monkeypatch.setenv("TR_TOKEN_R1_BOT", "db-token")
+        db.upsert_repo_config("O1", "R1", token_name="r1_bot")
         _seed_pr(db, org="o1", repo="r1", number=1, path="Ascend/a")
         _seed_pr(db, org="o2", repo="r2", number=2, path="Ascend/b")
         get = _mock_get(monkeypatch, payload={"state": "open"})
         prsync._poll_once(db, SETTINGS)
         tokens = {(c.args[0], c.args[3]) for c in get.call_args_list}
-        assert tokens == {("o1", "db-token"), ("o2", "rule-token")}
+        assert tokens == {("o1", "db-token"), ("o2", "default-token")}
 
-    def test_empty_cache_loads_rules_via_api_and_caches(
-            self, db, monkeypatch):
-        """缓存为空（重启后无 run）时回退 API 模式加载并回填缓存。"""
+    def test_missing_named_token_skips_pr(self, db, monkeypatch):
+        """配置引用的名称在 Vault 缺失：跳过该 PR（下轮重试），不报错。"""
         db_mod.set_shadow(db, False)
-        rules = [{"keyword": "k", "token": "t"}]
-        load = MagicMock(return_value=rules)
-        monkeypatch.setattr(prsync.service, "load_token_rules", load)
-        set_rules = MagicMock()
-        monkeypatch.setattr(prsync.rules_cache, "set_rules", set_rules)
-        prsync._poll_once(db, SETTINGS)
-        load.assert_called_once()
-        set_rules.assert_called_once_with(rules)
-
-    def test_load_failure_falls_back_to_default_token(self, db, monkeypatch):
-        """规则加载失败只告警，本轮全部使用默认 token 继续。"""
-        db_mod.set_shadow(db, False)
-        _seed_pr(db)
-        monkeypatch.setattr(
-            prsync.service, "load_token_rules",
-            MagicMock(side_effect=client.GitCodeError(500, "boom")))
+        db.upsert_repo_config("O1", "R1", token_name="r1_bot")
+        _seed_pr(db, org="o1", repo="r1", number=1, path="Ascend/a")
         get = _mock_get(monkeypatch, payload={"state": "open"})
         prsync._poll_once(db, SETTINGS)
-        assert get.call_args_list[0].args[3] == "default-token"
+        get.assert_not_called()
 
 
 # ── 单轮 20 仓上限 ────────────────────────────────────────────
@@ -370,22 +336,3 @@ class TestPoller:
         poller.join(timeout=5)
         assert calls
         assert not poller.is_alive()
-
-
-# ── _ensure_rules：设置页 DB 规则优先 ────────────────────────
-
-
-class TestEnsureRules:
-    def test_empty_db_falls_back_to_cache(self, db, monkeypatch):
-        monkeypatch.setattr(prsync.rules_cache, "get_rules",
-                            lambda: [{"keyword": "k", "token": "t"}])
-        rules = prsync._ensure_rules(db, "default-token")
-        assert rules == [{"keyword": "k", "token": "t"}]
-        prsync.service.load_token_rules.assert_not_called()
-
-    def test_empty_db_and_cache_falls_back_to_api(self, db, monkeypatch):
-        load = MagicMock(return_value=[{"keyword": "a", "token": "t"}])
-        monkeypatch.setattr(prsync.service, "load_token_rules", load)
-        rules = prsync._ensure_rules(db, "default-token")
-        assert rules == [{"keyword": "a", "token": "t"}]
-        load.assert_called_once()
