@@ -227,8 +227,13 @@ class Database:
             self._conn.commit()
             return cur.lastrowid
 
-    def mark_run(self, run_id, status=None, error=None, incremental=None):
-        """更新 run 状态；终态时自动写 finished_at。"""
+    def mark_run(self, run_id, status=None, error=None, incremental=None,
+                 push_before=None):
+        """更新 run 状态；终态时自动写 finished_at。
+
+        push_before 供单 commit 触发回填对比基点（父提交需克隆来源仓后
+        才能解析，create_run 时不可知）。
+        """
         fields = []
         params = []
         if status is not None:
@@ -243,6 +248,9 @@ class Database:
         if incremental is not None:
             fields.append("incremental = ?")
             params.append(1 if incremental else 0)
+        if push_before is not None:
+            fields.append("push_before = ?")
+            params.append(push_before)
         if not fields:
             return
         params.append(run_id)

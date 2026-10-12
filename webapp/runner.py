@@ -9,6 +9,10 @@
   （支持增量 diff），影子模式只落 would_submit 不提交，active 模式先过
   仓库配置门控（设置页维护，按仓库粒度，默认拒绝），再逐仓解析 Token
   （webapp.token_router：命名 Token 名称 → Vault 注入的值）+ submit_repo
+- 单 commit 触发（trigger.commit）：克隆后补取目标 commit 与其第一父
+  提交，内容取自目标 commit 的树、diff 区间为「父..目标」，即只处理该
+  commit 自身引入的变更；commit 不可达或为根提交时 run 判失败，不回退
+  全量（接口已承诺单 commit 语义）
 - 命名 Token 明文只存 Vault（TR_TOKEN_<名称>），服务侧 DB 只存名称引用；
   引用的名称在 Vault 缺失时该仓判失败（fail-closed，不回退默认 Token）
 - 日志缓冲落库（50 行/2 秒批量 append_log）+ 全链路 token 脱敏：
@@ -121,8 +125,11 @@ def execute_run(trigger, settings, db):
     default_token = secrets.get("GITCODE_TOKEN", "").strip()
     shadow = is_shadow(db)
     # 全量扫或手动触发时没有可信增量区间（Trigger 合并语义已保证手动
-    # 触发 sha 为空，这里再兜一层）
-    if trigger.full_scan or trigger.trigger != "push":
+    # 触发 sha 为空，这里再兜一层）；单 commit 触发 after 即该 commit，
+    # before（父提交）需克隆来源仓后解析，暂记 None
+    if trigger.commit:
+        push_before, push_after = None, trigger.commit
+    elif trigger.full_scan or trigger.trigger != "push":
         push_before = push_after = None
     else:
         push_before, push_after = trigger.before_sha, trigger.after_sha
@@ -149,6 +156,27 @@ def execute_run(trigger, settings, db):
         # 命名 token 明文只存 Vault：枚举其值纳入脱敏集合（服务 DB 只存名称）
         masker.add_secrets(secrets.list_token_values())
 
+        # ── 单 commit 变更集：解析父提交作为对比基点，内容取自该 commit ──
+        # 克隆 tip 是默认分支 HEAD，目标 commit 未必在其中，需单独补取；
+        # 父提交 sha 可直接从提交对象读出（无需父对象），再按 sha 补取。
+        # 任一环节缺失（commit 不可达、根提交无父）都判 run 失败，不回退
+        # 全量——接口已承诺「单 commit 语义」，静默全量会违背调用方预期。
+        source_ref = None
+        if trigger.commit:
+            source_ref = trigger.commit
+            log(f"单 commit 模式：解析 {source_ref} 的父提交")
+            localgit.fetch_commit(src_dir, source_ref, log=log)
+            parents = localgit.commit_parents(src_dir, source_ref)
+            if not parents:
+                db.mark_run(
+                    run_id, status="failed",
+                    error=f"权威仓 commit {source_ref} 无父提交（根提交），"
+                          "无法确定变更集")
+                return
+            push_before = parents[0]
+            localgit.fetch_commit(src_dir, push_before, log=log)
+            db.mark_run(run_id, push_before=push_before)
+
         # ── 扫描（本地化 + 可选增量 diff） ──
         # 逐仓解析访问目标仓库的 Token（仓库配置的命名 Token，缺失即失败）
         def _token_resolver(org, repo_name, _path):
@@ -161,7 +189,8 @@ def execute_run(trigger, settings, db):
             token_resolver=_token_resolver, log=log,
             source_repo_dir=src_dir,
             clone_root=os.path.join(workdir, "clones"),
-            diff_before=push_before, diff_after=push_after)
+            diff_before=push_before, diff_after=push_after,
+            source_ref=source_ref)
         if not scan.get("ok"):
             db.mark_run(run_id, status="failed",
                         error=masker.mask(scan.get("error") or "扫描失败"))

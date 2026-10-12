@@ -97,6 +97,32 @@ class TestTriggerMerge:
         assert pending.before_sha is None
         assert pending.after_sha is None
 
+    def test_commit_same_sha_merge_keeps_commit(self):
+        """同一 commit 的两个触发合并：保持单 commit 变更集语义。"""
+        pending = Trigger.commit_sha("c" * 40)
+        pending.merge(Trigger.commit_sha(
+            "c" * 40, received_at="2026-09-29T00:00:09+00:00"))
+        assert pending.trigger == "commit"
+        assert pending.commit == "c" * 40
+        assert pending.full_scan is False
+        assert pending.merged_count == 2
+
+    def test_commit_different_sha_upgrades_to_full(self):
+        """不同 commit 无法合成单一增量区间，升级全量（宁多勿漏）。"""
+        pending = Trigger.commit_sha("c" * 40)
+        pending.merge(Trigger.commit_sha(
+            "d" * 40, received_at="2026-09-29T00:00:09+00:00"))
+        assert pending.full_scan is True
+        assert pending.commit == ""
+        assert pending.trigger == "manual"
+
+    def test_commit_merged_with_push_upgrades_to_full(self):
+        """单 commit 与 push 合并：范围不互保证覆盖，升级全量。"""
+        pending = Trigger.commit_sha("c" * 40)
+        pending.merge(_push(1))
+        assert pending.full_scan is True
+        assert pending.commit == ""
+
     def test_missing_sha_drops_to_full(self):
         """任一 sha 缺失时增量区间无意义，回退全量。"""
         pending = _push(1)

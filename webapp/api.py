@@ -12,6 +12,9 @@
   X-Admin-Token 管理端点；admin_token 未配置时放开（内部工具，默认
   内网部署），配置后校验。命名 token 名称清单来自 Vault（只读，运维
   经 Vault 手动注入），服务不保存也不写入任何 token 值
+- POST /api/runs 传 commit（权威仓 40 位 sha）触发「单 commit 变更集」：
+  只处理该 commit 自身引入的变更；格式非法或权威仓不可达直接 422 拒绝，
+  不回退全量
 
 lifespan：init_db → init_shadow（env 仅作种子，之后以库为准）→ 僵尸
 running run 恢复为 interrupted → 停机补偿（最后一次成功 run 的
@@ -156,6 +159,25 @@ def _recover_missed_pushes(settings, db, queue):
     log.info("停机补偿：基线 %s 落后远端 HEAD %s，入队一次全量扫描",
              baseline["push_after"], head_sha)
     queue.push(Trigger.manual(full_scan=True))
+
+
+def _assert_source_commit(commit):
+    """校验权威仓存在该 commit，否则 422 拒绝（单 commit 接口的可达性前置）。
+
+    用 contents 根目录列表探测：ref 指向未知 commit 时 GitCode 返回 404，
+    list_dir 统一抛 GitCodeError。此校验在请求线程内同步发起一次 API 调用
+    （低频管理端点，可接受）。失败不静默回退全量——接口承诺单 commit 语义，
+    作者期望明确知道该 commit 是否有效。
+    """
+    owner, repo = common._source_repo()
+    token = secrets.get("GITCODE_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(422, "GITCODE_TOKEN 未配置，无法校验 commit")
+    try:
+        client.list_dir(owner, repo, "", commit, token)
+    except client.GitCodeError as e:
+        raise HTTPException(
+            422, f"权威仓 {owner}/{repo} 中不存在 commit {commit}: {e}")
 
 
 def create_app(settings=None):
@@ -486,19 +508,33 @@ def create_app(settings=None):
 
     @app.post("/api/runs", dependencies=[Depends(require_admin)])
     async def api_create_run(request: Request):
-        """手动触发（Build Now 替代）：{full_scan, keyword} 入队，202。"""
+        """手动触发（Build Now 替代）：{full_scan, keyword, commit} 入队，202。
+
+        commit 非空时触发「单 commit 变更集」（只处理该 commit 自身引入
+        的变更）：须为 40 位十六进制 sha，且经可达性校验存在于权威仓，
+        否则 422 拒绝（不静默回退全量）。commit 与 full_scan/keyword 互斥，
+        同时给出时以 commit 为准。
+        """
         try:
             body = await request.json()
         except Exception:
             body = {}
         if not isinstance(body, dict):
             body = {}
-        trigger = Trigger.manual(
-            full_scan=bool(body.get("full_scan", True)),
-            keyword=str(body.get("keyword") or ""))
+        commit = str(body.get("commit") or "").strip().lower()
+        if commit:
+            if not re.fullmatch(r"[0-9a-f]{40}", commit):
+                raise HTTPException(422, "commit 必须是 40 位十六进制 sha")
+            _assert_source_commit(commit)
+            trigger = Trigger.commit_sha(commit)
+        else:
+            trigger = Trigger.manual(
+                full_scan=bool(body.get("full_scan", True)),
+                keyword=str(body.get("keyword") or ""))
         queued = request.app.state.queue.push(trigger)
         return JSONResponse({"queued": queued, "full_scan": trigger.full_scan,
-                             "keyword": trigger.keyword}, status_code=202)
+                             "keyword": trigger.keyword,
+                             "commit": trigger.commit}, status_code=202)
 
     @app.post("/api/runs/{run_id}/retry",
               dependencies=[Depends(require_admin)])

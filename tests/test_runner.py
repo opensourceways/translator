@@ -9,7 +9,7 @@ import os
 import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -358,6 +358,53 @@ class TestIncrementalArgs:
         assert run["push_before"] is None
         assert run["push_after"] is None
         assert run["trigger"] == "manual"
+
+
+class TestCommitTrigger:
+    """单 commit 触发：补取 commit 与第一父提交，内容取该 commit，失败即拒绝。"""
+
+    def _patch_git(self, monkeypatch, parents=("p" * 40,), fetch_side=None):
+        fetch = MagicMock(return_value=None, side_effect=fetch_side)
+        monkeypatch.setattr(runner.localgit, "fetch_commit", fetch)
+        monkeypatch.setattr(runner.localgit, "commit_parents",
+                            MagicMock(return_value=list(parents)))
+        return fetch
+
+    def test_fetches_commit_and_parent_passes_source_ref(
+            self, settings, db, token_env, engine, monkeypatch):
+        fetch = self._patch_git(monkeypatch)
+        execute_run(Trigger.commit_sha("c" * 40), settings, db)
+
+        # 依次补取目标 commit 与父提交
+        fetched = [c.args[1] for c in fetch.call_args_list]
+        assert fetched == ["c" * 40, "p" * 40]
+        _, kwargs = engine.scan_changed.call_args
+        assert kwargs["source_ref"] == "c" * 40
+        assert kwargs["diff_before"] == "p" * 40
+        assert kwargs["diff_after"] == "c" * 40
+        run = db.list_runs()[0]
+        assert run["trigger"] == "commit"
+        assert run["push_before"] == "p" * 40
+        assert run["push_after"] == "c" * 40
+        assert run["status"] == "success"
+
+    def test_root_commit_fails_without_scan(
+            self, settings, db, token_env, engine, monkeypatch):
+        self._patch_git(monkeypatch, parents=())
+        execute_run(Trigger.commit_sha("c" * 40), settings, db)
+        engine.scan_changed.assert_not_called()
+        run = db.list_runs()[0]
+        assert run["status"] == "failed"
+        assert "根提交" in run["error"]
+
+    def test_unreachable_commit_fails_not_full(
+            self, settings, db, token_env, engine, monkeypatch):
+        """fetch 失败：run 判失败，绝不回退全量扫描。"""
+        self._patch_git(
+            monkeypatch, fetch_side=client.GitCodeError(200, "bad object"))
+        execute_run(Trigger.commit_sha("c" * 40), settings, db)
+        engine.scan_changed.assert_not_called()
+        assert db.list_runs()[0]["status"] == "failed"
 
 
 class TestMasking:

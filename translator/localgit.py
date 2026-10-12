@@ -229,6 +229,20 @@ def fetch_commit(repo_dir, sha, token=None, log=print):
     return sha
 
 
+def commit_parents(repo_dir, sha):
+    """返回本地仓库指定提交的父提交 sha 列表（首个为第一父）。
+
+    ``git show -s --format=%P`` 直接读提交对象，父 sha 无需父对象本身
+    存在——单 commit 增量对比据此拿到对比基点，再按 sha 单独补取。
+    根提交无父返回空列表。
+
+    Returns:
+        list[str]: 父提交 sha 列表（可能为空）。
+    """
+    out = _run_git(repo_dir, "show", "-s", "--format=%P", sha)
+    return out.split()
+
+
 def diff_paths(repo_dir, before, after):
     """列出 before..after 之间的全部变更路径（含新增/删除/修改/改名）。
 

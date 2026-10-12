@@ -1120,7 +1120,7 @@ def _local_mode_mocks(source_tree, target_trees, source_dir="/src"):
     clone_mock = MagicMock(return_value="/clones/dummy")
     cat_blob_mock = MagicMock(return_value=b"content")
 
-    def tree_map(repo_dir):
+    def tree_map(repo_dir, ref="HEAD"):
         if repo_dir == source_dir:
             return source_tree
         return target_trees.get(os.path.basename(repo_dir), {})
@@ -1444,6 +1444,23 @@ class TestScanChangedIncremental:
                 "", "tok", log=SILENT, source_repo_dir="/src",
                 clone_root="/clones", **kwargs)
         return result, clone_mock, cat_blob_mock, fetch_mock, diff_mock
+
+    def test_source_ref_selects_content_tree(self):
+        """source_ref 指定时，来源内容按该 ref 的树取（tree_map 收到 ref）。"""
+        client_mock = _make_scan_client_mock()
+        tree = MagicMock(return_value=self.SOURCE_TREE)
+        with _patch_scan_client(client_mock), \
+                patch("translator.localgit.tree_map", tree), \
+                patch("translator.localgit.clone",
+                      MagicMock(return_value="/clones/dummy")), \
+                patch("translator.localgit.cat_blob",
+                      MagicMock(return_value=b"content")):
+            result = scan.scan_changed(
+                "", "tok", log=SILENT, source_repo_dir="/src",
+                clone_root="/clones", source_ref="c" * 40)
+        assert result["ok"] is True
+        # 首次 tree_map 是来源仓目录索引，ref 必须是目标 commit
+        assert tree.call_args_list[0].kwargs.get("ref") == "c" * 40
 
     def test_incremental_filters_unrelated_repos(self):
         """只有变更路径命中的仓库被处理，其余仓库完全不碰（不克隆）。"""

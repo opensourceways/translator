@@ -152,6 +152,18 @@ curl -X POST http://localhost:8000/api/runs \
   -d '{"full_scan": true}'
 ```
 
+- 单 commit 变更集：body 传 `{"commit": "<权威仓 40 位 sha>"}`，只处理
+  该 commit 自身引入的变更（等价 `父提交..该 commit` 的 diff）。sha 格式
+  非法或权威仓不可达时直接 422 拒绝，不静默回退全量；与 `full_scan`/
+  `keyword` 互斥（同时给出以 `commit` 为准）
+
+```bash
+curl -X POST http://localhost:8000/api/runs \
+  -H "X-Admin-Token: <TR_ADMIN_TOKEN 的值>" \
+  -H "Content-Type: application/json" \
+  -d '{"commit": "0123456789abcdef0123456789abcdef01234567"}'
+```
+
 - 失败重提：run 详情页对 `submit_failed`/`error` 的仓库结果提供
   「重试」按钮（整 run 也有「重试失败项」），对应
   `POST /api/runs/{id}/retry`（`{path}` 重试单行走关键字扫，不带则

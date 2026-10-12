@@ -29,10 +29,11 @@ class Trigger:
     执行时应全量扫描。
     """
 
-    trigger: str  # "push"（webhook）或 "manual"（手动触发）
+    trigger: str  # "push"（webhook）/ "manual"（手动）/ "commit"（单 commit）
     ref: str = ""
     before_sha: str | None = None
     after_sha: str | None = None
+    commit: str = ""  # 单 commit 变更集的目标 sha（trigger="commit" 时非空）
     received_at: str = field(default_factory=_utc_now)
     full_scan: bool = False
     keyword: str = ""
@@ -56,6 +57,16 @@ class Trigger:
         return cls(trigger="manual", received_at=received_at or _utc_now(),
                    full_scan=full_scan, keyword=keyword)
 
+    @classmethod
+    def commit_sha(cls, commit, received_at=None):
+        """构造单 commit 变更集触发：只处理该 commit 自身引入的变更。
+
+        before_sha 不在入队时确定（父提交需在 Worker 克隆来源仓后才能
+        解析），执行时由 runner 回填为第一父提交。
+        """
+        return cls(trigger="commit", commit=commit, full_scan=False,
+                   received_at=received_at or _utc_now())
+
     def merge(self, other: "Trigger") -> None:
         """把 other 合并进本元素（latest-wins）。
 
@@ -68,11 +79,19 @@ class Trigger:
           会让 Worker 误走增量、漏掉范围外变更。
         - 关键字扫与 push 或不同关键字合并：升级为全量扫——关键字范围与
           对方范围互不保证覆盖，全量是两者意图的并集。
+        - 单 commit 触发与任何其它触发（或不同 commit）合并：升级为全量
+          扫——两个不同 commit 无法合成单一增量区间，保留单个会漏掉另一
+          个的变更；同一 commit 可合并保留。
         """
         first, last = (self, other) if self.received_at <= other.received_at \
             else (other, self)
         if self.full_scan or other.full_scan:
             self._to_full()
+        elif self.commit or other.commit:
+            if self.commit and self.commit == other.commit:
+                pass  # 同一 commit：保持单 commit 变更集
+            else:
+                self._to_full()
         elif self.keyword or other.keyword:
             if self.keyword and self.keyword == other.keyword:
                 pass  # 相同关键字：保持关键字扫
@@ -93,11 +112,14 @@ class Trigger:
         self.merged_count += other.merged_count
 
     def _to_full(self) -> None:
-        """转为全量扫：清空增量范围与关键字限制。"""
+        """转为全量扫：清空增量范围、关键字与单 commit 限制。"""
         self.full_scan = True
         self.keyword = ""
+        self.commit = ""
         self.before_sha = None
         self.after_sha = None
+        if self.trigger == "commit":
+            self.trigger = "manual"  # 已退化为全量扫，不再是单 commit 语义
 
 
 class CoalescingQueue:

@@ -899,3 +899,53 @@ class TestSecurityHeaders:
             text = client.get("/").text
             assert "<script>alert(1)</script>" not in text
             assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
+
+
+class TestCreateRunCommit:
+    """POST /api/runs?commit=：单 commit 触发（格式/可达性 422，成功 202）。"""
+
+    URL = "/api/runs"
+
+    def test_malformed_commit_422(self, tmp_path, monkeypatch):
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.post(self.URL, json={"commit": "not-a-sha"})
+            assert r.status_code == 422
+            assert app.state.queue.pending_count() == 0
+
+    def test_unreachable_commit_422(self, tmp_path, monkeypatch):
+        """可达性校验失败（权威仓无该 commit）：422 拒绝，不入队。"""
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            monkeypatch.setattr(
+                api.client, "list_dir",
+                MagicMock(side_effect=api.client.GitCodeError(404, "not found")))
+            r = client.post(self.URL, json={"commit": "c" * 40})
+            assert r.status_code == 422
+            assert "commit" in r.json()["detail"]
+            assert app.state.queue.pending_count() == 0
+
+    def test_valid_commit_queued_202(self, tmp_path, monkeypatch):
+        """合法 sha：可达性通过后入队，返回 202 且 commit 归一化为小写。"""
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            monkeypatch.setattr(
+                api.client, "list_dir",
+                MagicMock(return_value=[{"type": "file", "path": "README.md"}]))
+            r = client.post(self.URL, json={"commit": "C" * 40})
+            assert r.status_code == 202
+            assert r.json()["commit"] == "c" * 40
+            item = app.state.queue.pop(timeout=0)
+            assert item is not None
+            assert item.trigger == "commit"
+            assert item.commit == "c" * 40
+
+    def test_no_commit_keeps_manual_semantics(self, tmp_path, monkeypatch):
+        """不传 commit 时仍是原手动语义（full_scan 缺省 True）。"""
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            r = client.post(self.URL, json={})
+            assert r.status_code == 202
+            assert r.json()["full_scan"] is True
+            item = app.state.queue.pop(timeout=0)
+            assert item.full_scan is True and item.commit == ""

@@ -253,7 +253,7 @@ def _local_target_tree(project, cmp_token, clone_root, log):
 
 def scan_changed(keyword="", token="", token_resolver=None, log=print,
                  source_repo_dir=None, clone_root=None, diff_before=None,
-                 diff_after=None):
+                 diff_after=None, source_ref=None):
     """扫描全部（或按关键字过滤的）仓库级目录，找出有变更的译稿仓库。
 
     逐仓下载译稿并与目标仓库同路径文件做内容对比（blob sha 比对），
@@ -277,6 +277,12 @@ def scan_changed(keyword="", token="", token_resolver=None, log=print,
     新译稿的仓库（上游单方面维护导致内容差异）也不会被无关推送
     再次触发。回退全量的场景：diff 失败（sha 不可达等）、变更路径
     命中根目录 README.md（影响面说明变更时全量补扫）。
+
+    source_ref 指定本地来源仓库中读取译稿内容的 ref（默认 HEAD）。
+    增量对比时内容必须取「本次要处理的那个状态」——传单 commit sha
+    时，内容取自该 commit 的树，配合 diff_before/diff_after=父..该
+    commit 即「单 commit 变更集」语义；不传时仍取克隆 HEAD（webhook
+    场景下克隆 tip 即 after，语义一致）。
 
     Returns:
         dict with:
@@ -321,9 +327,10 @@ def scan_changed(keyword="", token="", token_resolver=None, log=print,
     try:
         if local_mode:
             log(f"使用本地克隆目录索引: {source_repo_dir}")
-            tree = localgit.tree_map(source_repo_dir)
+            ref = source_ref or "HEAD"
+            tree = localgit.tree_map(source_repo_dir, ref=ref)
             paths = _repo_dirs_from_tree(tree)
-            branch = "HEAD"
+            branch = ref
         else:
             tree = None
             repo_info = client.get_repo(*_source_repo(), token)
