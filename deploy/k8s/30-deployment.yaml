@@ -16,6 +16,23 @@ spec:
       app: translator
   template:
     metadata:
+      annotations:
+        # 凭据经 Vault Agent Injector 挂载为 /vault/secrets/.env（0400），
+        # 应用直接读文件、凭据不进进程环境（见 translator/secrets.py），
+        # env 只传非敏感配置（ConfigMap）。注解模式对齐 hotopic 服务。
+        # 上线前需与运维确认：Vault KV 路径、role 名与本 Pod ServiceAccount
+        # 的绑定关系，以及 KV 中存放 .env 全文的键名（此处为 env）。
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+        vault.hashicorp.com/role: "translator"
+        vault.hashicorp.com/agent-service-account-token-volume-name: "token-vol"
+        vault.hashicorp.com/tls-skip-verify: "true"
+        vault.hashicorp.com/agent-inject-secret-.env: "internal/data/infra-test/translator"
+        vault.hashicorp.com/agent-inject-template-.env: "{{- with secret \"internal/data/infra-test/translator\" -}}\n{{ .Data.data.env }}\n{{- end }}\n"
+        vault.hashicorp.com/agent-inject-perms-.env: "0400"
+        vault.hashicorp.com/agent-run-as-user: "1000"
+        vault.hashicorp.com/agent-run-as-group: "1000"
+        vault.hashicorp.com/secret-volume-path: "/vault/secrets"
       labels:
         app: translator
     spec:
@@ -33,11 +50,11 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
+          # 仅非敏感配置走 env（ConfigMap）；凭据由 Vault 挂载
+          # /vault/secrets/.env 提供，不再使用 envFrom.secretRef
           envFrom:
             - configMapRef:
                 name: translator-config
-            - secretRef:
-                name: translator-secret
           volumeMounts:
             - name: data
               mountPath: /data
@@ -61,6 +78,14 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 30
       volumes:
+        # Vault Agent k8s 认证用的投影 SA token（hotopic 同款配置）
+        - name: token-vol
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: api
+                  expirationSeconds: 600
+                  path: token
         - name: data
           persistentVolumeClaim:
             claimName: translator-data
