@@ -35,8 +35,14 @@
 .tab .badge[data-state] { cursor: pointer; }
 .tab .badge[data-state]:hover { filter: brightness(0.94); }
 .tab .badge[data-state].filter-on { box-shadow: inset 0 0 0 1.5px currentColor; font-weight: 700; }
+/* 仓库搜索框：过滤两级 tab（社区名命中保留整社区，否则按仓库名/分支过滤） */
+.toolbar { margin-top: 14px; }
+.toolbar input { width: 260px; max-width: 100%; padding: 7px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; font-family: inherit; }
 </style>
 <h1>Pull Requests</h1>
+<div class="toolbar">
+  <input id="repo-search" type="search" placeholder="搜索社区 / 仓库 / 分支（不区分大小写）" autocomplete="off">
+</div>
 <div class="cards" id="prs-summary">
   <div class="card"><div class="num" data-sum="total">{{ summary.prs_total }}</div><div class="label">PR 总数</div></div>
   <div class="card"><div class="num" data-sum="open">{{ summary.prs_by_state.get('open', 0) }}</div><div class="label">Open</div></div>
@@ -114,7 +120,18 @@ let activeOrg = null;
 const activeRepoByOrg = {};
 // 状态筛选：按社区记忆（点社区 tab 上的 open/merged/closed 徽章切换，再点一次取消）
 const stateFilterByOrg = {};
+// 仓库搜索：关键字过滤两级 tab；输入框在 #prs-groups 之外，5s 轮询重绘不丢失
+let searchQ = '';
 function repoKey(g) { return g.repo + '|' + (g.branch || ''); }
+function filterOrgs(orgs) {
+  const q = searchQ.trim().toLowerCase();
+  if (!q) return orgs;
+  const hit = s => (s || '').toLowerCase().includes(q);
+  return orgs
+    .map(org => hit(org.org) ? org
+      : (org => ({ ...org, repos: org.repos.filter(g => hit(g.repo) || hit(g.branch)) }))(org))
+    .filter(org => org.repos.length);
+}
 
 document.addEventListener('click', e => {
   // 先匹配状态徽章（在 tab 内部，命中后不再走 tab 切换分支）
@@ -176,8 +193,11 @@ function renderGroup(g, active, stateFilter) {
     (g.branch ? `<span class="badge">${esc(g.branch)}</span>` : '') +
     latest + `</div>` + body + `</div>`;
 }
-function renderOrgs(orgs) {
-  if (!orgs.length) return '<p class="muted">暂无数据：尚未有任何 run 或 PR 记录。</p>';
+function renderOrgs(allOrgs) {
+  const orgs = filterOrgs(allOrgs);
+  if (!orgs.length) return searchQ.trim()
+    ? '<p class="muted">没有匹配「' + esc(searchQ.trim()) + '」的社区或仓库。</p>'
+    : '<p class="muted">暂无数据：尚未有任何 run 或 PR 记录。</p>';
   if (!orgs.some(o => o.org === activeOrg)) activeOrg = orgs[0].org;
   const tabs = orgs.map(org => {
     const f = stateFilterByOrg[org.org];
@@ -221,5 +241,9 @@ async function refresh() {
   } catch (e) { /* 轮询失败下轮再试 */ }
 }
 setInterval(refresh, 5000);
+document.getElementById('repo-search').addEventListener('input', e => {
+  searchQ = e.target.value;
+  refresh();
+});
 </script>
 {% endblock %}
