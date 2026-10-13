@@ -12,8 +12,9 @@
   X-Admin-Token 管理端点；admin_token 未配置时放开（内部工具，默认
   内网部署），配置后校验。命名 token 名称清单来自 Vault（只读，运维
   经 Vault 手动注入），服务不保存也不写入任何 token 值
-- POST /api/runs 传 commit（权威仓 40 位 sha）触发「单 commit 变更集」：
-  只处理该 commit 自身引入的变更；格式非法或权威仓不可达直接 422 拒绝，
+- POST /api/runs 传 commit（权威仓 sha，完整 40 位或最短 4 位缩写）触发
+  「单 commit 变更集」：只处理该 commit 自身引入的变更；缩写经权威仓
+  commits 端点归一化为全量，格式非法或权威仓不可达直接 422 拒绝，
   不回退全量
 
 lifespan：init_db → init_shadow（env 仅作种子，之后以库为准）→ 僵尸
@@ -161,23 +162,29 @@ def _recover_missed_pushes(settings, db, queue):
     queue.push(Trigger.manual(full_scan=True))
 
 
-def _assert_source_commit(commit):
-    """校验权威仓存在该 commit，否则 422 拒绝（单 commit 接口的可达性前置）。
+def _resolve_source_commit(sha):
+    """把（可能是缩写的）sha 解析为权威仓中完整的 40 位提交 sha。
 
-    用 contents 根目录列表探测：ref 指向未知 commit 时 AtomGit 返回 404，
-    list_dir 统一抛 AtomGitError。此校验在请求线程内同步发起一次 API 调用
-    （低频管理端点，可接受）。失败不静默回退全量——接口承诺单 commit 语义，
-    作者期望明确知道该 commit 是否有效。
+    用 commits 端点一次调用同时完成两件事：校验该 commit 在权威仓可达、
+    并把缩写 sha（最短 4 位）归一化为全量——下游 runner 与落库统一按 40
+    位处理。此校验在请求线程内同步发起一次 API 调用（低频管理端点，可
+    接受）。不可达或缩写歧义时抛 AtomGitError，一律 422 拒绝，不静默回退
+    全量——接口承诺单 commit 语义，调用方期望明确知道该 sha 是否有效。
     """
     owner, repo = common._source_repo()
     token = secrets.get("ATOMGIT_TOKEN", "").strip()
     if not token:
         raise HTTPException(422, "ATOMGIT_TOKEN 未配置，无法校验 commit")
     try:
-        client.list_dir(owner, repo, "", commit, token)
+        info = client.get_commit(owner, repo, sha, token)
     except client.AtomGitError as e:
         raise HTTPException(
-            422, f"权威仓 {owner}/{repo} 中不存在 commit {commit}: {e}")
+            422, f"权威仓 {owner}/{repo} 中无法解析 commit {sha}: {e}")
+    full = str(info.get("sha") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", full):
+        raise HTTPException(
+            422, f"权威仓 {owner}/{repo} 返回的 commit sha 非法: {full!r}")
+    return full
 
 
 def create_app(settings=None):
@@ -511,9 +518,9 @@ def create_app(settings=None):
         """手动触发（Build Now 替代）：{full_scan, keyword, commit} 入队，202。
 
         commit 非空时触发「单 commit 变更集」（只处理该 commit 自身引入
-        的变更）：须为 40 位十六进制 sha，且经可达性校验存在于权威仓，
-        否则 422 拒绝（不静默回退全量）。commit 与 full_scan/keyword 互斥，
-        同时给出时以 commit 为准。
+        的变更）：须为十六进制 sha——完整 40 位或最短 4 位缩写，经权威仓
+        commits 端点解析为全量并校验可达，否则 422 拒绝（不静默回退全量）。
+        commit 与 full_scan/keyword 互斥，同时给出时以 commit 为准。
         """
         try:
             body = await request.json()
@@ -523,9 +530,9 @@ def create_app(settings=None):
             body = {}
         commit = str(body.get("commit") or "").strip().lower()
         if commit:
-            if not re.fullmatch(r"[0-9a-f]{40}", commit):
-                raise HTTPException(422, "commit 必须是 40 位十六进制 sha")
-            _assert_source_commit(commit)
+            if not re.fullmatch(r"[0-9a-f]{4,40}", commit):
+                raise HTTPException(422, "commit 必须是 4-40 位十六进制 sha")
+            commit = _resolve_source_commit(commit)
             trigger = Trigger.commit_sha(commit)
         else:
             trigger = Trigger.manual(

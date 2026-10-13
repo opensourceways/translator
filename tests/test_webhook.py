@@ -909,8 +909,9 @@ class TestCreateRunCommit:
     def test_malformed_commit_422(self, tmp_path, monkeypatch):
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
-            r = client.post(self.URL, json={"commit": "not-a-sha"})
-            assert r.status_code == 422
+            for bad in ("not-a-sha", "abc", "z" * 40, "c" * 41):
+                r = client.post(self.URL, json={"commit": bad})
+                assert r.status_code == 422, bad
             assert app.state.queue.pending_count() == 0
 
     def test_unreachable_commit_422(self, tmp_path, monkeypatch):
@@ -918,26 +919,42 @@ class TestCreateRunCommit:
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
             monkeypatch.setattr(
-                api.client, "list_dir",
+                api.client, "get_commit",
                 MagicMock(side_effect=api.client.AtomGitError(404, "not found")))
-            r = client.post(self.URL, json={"commit": "c" * 40})
+            r = client.post(self.URL, json={"commit": "c" * 8})
             assert r.status_code == 422
             assert "commit" in r.json()["detail"]
             assert app.state.queue.pending_count() == 0
 
     def test_valid_commit_queued_202(self, tmp_path, monkeypatch):
-        """合法 sha：可达性通过后入队，返回 202 且 commit 归一化为小写。"""
+        """合法全量 sha：可达性通过后入队，返回 202 且归一化为小写。"""
         settings = _make_settings(tmp_path)
         with _client(settings, monkeypatch) as (client, app, _, _):
             monkeypatch.setattr(
-                api.client, "list_dir",
-                MagicMock(return_value=[{"type": "file", "path": "README.md"}]))
+                api.client, "get_commit",
+                MagicMock(return_value={"sha": "c" * 40}))
             r = client.post(self.URL, json={"commit": "C" * 40})
             assert r.status_code == 202
             assert r.json()["commit"] == "c" * 40
             item = app.state.queue.pop(timeout=0)
             assert item is not None
             assert item.trigger == "commit"
+            assert item.commit == "c" * 40
+
+    def test_short_commit_normalized_to_full(
+            self, tmp_path, monkeypatch):
+        """缩写 sha：经权威仓解析为完整 40 位后入队。"""
+        settings = _make_settings(tmp_path)
+        with _client(settings, monkeypatch) as (client, app, _, _):
+            m = MagicMock(return_value={"sha": "c" * 40})
+            monkeypatch.setattr(api.client, "get_commit", m)
+            r = client.post(self.URL, json={"commit": "C" * 7})
+            assert r.status_code == 202
+            assert r.json()["commit"] == "c" * 40
+            # 解析调用收到的是归一化小写后的缩写 sha
+            assert m.call_args.args[2] == "c" * 7
+            item = app.state.queue.pop(timeout=0)
+            assert item is not None
             assert item.commit == "c" * 40
 
     def test_no_commit_keeps_manual_semantics(self, tmp_path, monkeypatch):

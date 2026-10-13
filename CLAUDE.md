@@ -69,8 +69,9 @@ curl localhost:8000/healthz        # 探活 + 影子状态 + 队列深度
   键 `tc_admin_token` 与设置页共用
 - 触发方式：`POST /api/runs` 支持 `{full_scan|keyword}`（全量/关键字扫）
   与 `{commit}`（单 commit 变更集，只处理该 commit 自身引入的变更，内容
-  取自该 commit 的树、diff 区间为 `父..该 commit`）；commit 需 40 位 sha
-  且经权威仓可达性校验，否则 422 拒绝（不回退全量），与另外两种互斥
+  取自该 commit 的树、diff 区间为 `父..该 commit`）；commit 可写完整 40
+  位或最短 4 位缩写，经权威仓 commits 端点解析为全量并做可达性校验，
+  否则 422 拒绝（不回退全量），与另外两种互斥
 
 ## run 状态口径
 

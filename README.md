@@ -155,10 +155,11 @@ curl -X POST http://localhost:8000/api/runs \
   -d '{"full_scan": true}'
 ```
 
-- 单 commit 变更集：body 传 `{"commit": "<权威仓 40 位 sha>"}`，只处理
-  该 commit 自身引入的变更（等价 `父提交..该 commit` 的 diff）。sha 格式
-  非法或权威仓不可达时直接 422 拒绝，不静默回退全量；与 `full_scan`/
-  `keyword` 互斥（同时给出以 `commit` 为准）
+- 单 commit 变更集：body 传 `{"commit": "<权威仓 sha>"}`，只处理该 commit
+  自身引入的变更（等价 `父提交..该 commit` 的 diff）。sha 可写完整 40 位
+  或最短 4 位缩写（经权威仓 commits 端点解析为全量）；格式非法或权威仓
+  不可达时直接 422 拒绝，不静默回退全量；与 `full_scan`/`keyword` 互斥
+  （同时给出以 `commit` 为准）
 
 ```bash
 curl -X POST http://localhost:8000/api/runs \

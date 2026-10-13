@@ -124,6 +124,18 @@ def get_repo(owner, repo, token):
     return _do_request("GET", f"{BASE_URL}/repos/{owner}/{repo}", token)
 
 
+def get_commit(owner, repo, ref, token):
+    """按 ref 查询提交（分支/标签/完整或缩写 sha），返回提交对象。
+
+    AtomGit 的 commits 端点可解析缩写 sha（最短 4 位，与 git 的
+    MINIMUM_ABBREV 一致）并在响应 sha 字段回填完整 40 位 sha，可用于
+    把短 sha 归一化为全量；ref 不可达或缩写歧义时抛 AtomGitError。
+    """
+    return _do_request(
+        "GET", f"{BASE_URL}/repos/{owner}/{repo}/commits/{quote(ref, safe='')}",
+        token)
+
+
 def _paginate(url, token, params, per_page=100):
     """按 page 参数分页拉取全量数组（分支/PR 等列表接口）。
 
