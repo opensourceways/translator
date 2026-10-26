@@ -10,16 +10,9 @@ Vault 注入的 secrets 文件 `source` 成环境变量，改由应用按需直�
 """
 
 import os
-import re
 
 # Vault Agent Injector 注入的 secrets 文件路径（参照 jenkins-log-viewer 先例）
 DEFAULT_SECRETS_FILE = "/vault/secrets/.env"
-
-# 命名 token 的键前缀：Vault 中形如 TR_TOKEN_<名称大写>，服务只保存名称
-TOKEN_PREFIX = "TR_TOKEN_"
-
-# 名称只允许小写字母开头，后接小写字母/数字/下划线（与 env 变量名兼容）
-_TOKEN_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
 # mtime 缓存：同一文件未变更时不重复读盘（get 会被高频调用）
 _cache = {"path": None, "mtime": None, "data": {}}
@@ -86,43 +79,3 @@ def get(name, default=""):
     if value is not None:
         return value
     return os.environ.get(name, default)
-
-
-def is_valid_token_name(name):
-    """校验命名 token 名称：小写字母开头，仅含小写字母/数字/下划线。
-
-    名称会拼成 Vault 键 TR_TOKEN_<名称大写>，故限制为 env 变量名可用的字符集。
-    """
-    return bool(_TOKEN_NAME_RE.match((name or "").strip()))
-
-
-def get_named_token(name):
-    """按名称取命名 token 值：读 Vault 键 TR_TOKEN_<名称大写>。
-
-    名称为空或非法、或对应键未配置时返回空串。
-    """
-    name = (name or "").strip()
-    if not is_valid_token_name(name):
-        return ""
-    return get(TOKEN_PREFIX + name.upper(), "").strip()
-
-
-def list_token_names():
-    """枚举已配置的命名 token 名称（Vault 文件键 ∪ 环境变量键），升序去重。
-
-    只返回名称合法且已配置非空值的条目；服务前端据此渲染下拉框。
-    """
-    keys = set(load_env().keys()) | set(os.environ.keys())
-    names = set()
-    for key in keys:
-        if not key.startswith(TOKEN_PREFIX):
-            continue
-        name = key[len(TOKEN_PREFIX):].strip().lower()
-        if is_valid_token_name(name) and get_named_token(name):
-            names.add(name)
-    return sorted(names)
-
-
-def list_token_values():
-    """返回全部命名 token 的值（供日志脱敏），不含键名。"""
-    return [v for v in (get_named_token(n) for n in list_token_names()) if v]

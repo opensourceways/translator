@@ -1,41 +1,36 @@
-"""Worker 线程与 run 执行编排：克隆 → 扫描 → 提交 → 落库。
+"""提交任务执行：克隆权威仓 → 校验/读取指定文件 → 逐仓幂等提 PR。
 
-对应服务化改造计划「runner 行」的展开：
-
-- 全局唯一 Worker 线程消费 CoalescingQueue，逐 Trigger 执行 execute_run
-- execute_run 复刻 Jenkinsfile 的本地化流程：克隆来源仓到
-  work_dir/run-<id>/（blobs=True 全量浅克隆，等价
-  ``git clone --depth=1 --no-checkout``），scan_changed 走本地化模式
-  （支持增量 diff），影子模式只落 would_submit 不提交，active 模式先过
-  仓库配置门控（设置页维护，按仓库粒度，默认拒绝），再逐仓解析 Token
-  （webapp.token_router：命名 Token 名称 → Vault 注入的值）+ submit_repo
-- 单 commit 触发（trigger.commit）：克隆后补取目标 commit 与其第一父
-  提交，内容取自目标 commit 的树、diff 区间为「父..目标」，即只处理该
-  commit 自身引入的变更；commit 不可达或为根提交时 run 判失败，不回退
-  全量（接口已承诺单 commit 语义）
-- 命名 Token 明文只存 Vault（TR_TOKEN_<名称>），服务侧 DB 只存名称引用；
-  引用的名称在 Vault 缺失时该仓判失败（fail-closed，不回退默认 Token）
-- 日志缓冲落库（50 行/2 秒批量 append_log）+ 全链路 token 脱敏：
-  localgit.clone 失败会把含 token 的 URL 包进 AtomGitError（Jenkins
-  曾有 token 明文落构建日志的事故），所有落库文本必须先过 SecretMasker
-- finally 阶段回写 last_run_at、回填 push 事件、清理 workdir
+流程：
+1. API 已把路径解析为 (org, repo, branch) 分组并落库；Worker 只消费
+   (submission_id, caller_token)，token 仅存在于内存中
+2. 克隆权威仓默认分支（blobs=True）到任务工作目录，按权威仓文件树校验
+   所有路径必须存在；任一缺失即整单失败，避免部分 PR 被误创建
+3. 读取文件内容并做单文件/累计大小校验，按目标仓分组后调用
+   translator.submit.submit_repo（Fork → 固定分支 → 单 commit → PR 去重）
+4. 权威仓读取使用服务侧默认 ATOMGIT_TOKEN；目标仓 Fork/PR 使用调用方
+   token
+5. dry_run 只校验并记录 would_submit，不创建 PR
+6. 任何落库/日志文本先过 SecretMasker，调用方 token 永不落库
 """
 
+import base64
+import json
 import os
 import shutil
 import threading
-import time
 import traceback
+import time
 from datetime import datetime, timezone
 
 from translator import common, localgit, secrets, service
+from translator.common import MAX_FILE_SIZE, MAX_TOTAL_SIZE
 
-from webapp import token_router
-from webapp.db import is_shadow
-
-# 日志缓冲刷写阈值：满 50 行或距上次落库超过 2 秒
 LOG_FLUSH_LINES = 50
 LOG_FLUSH_INTERVAL = 2.0
+
+# 权威仓读取分支：留空表示克隆仓库默认分支（当前为 main）。
+# 不硬编码 master：权威仓默认分支已改为 main，写死会导致整单失败。
+SOURCE_REF = ""
 
 
 def _utcnow():
@@ -46,54 +41,47 @@ def _utcnow():
 class SecretMasker:
     """token 脱敏器：把集合中每个非空秘密值替换为 ``***``。
 
-    脱敏集合动态包含：默认 token（ATOMGIT_TOKEN）+ 全部命名 token
-    （Vault 中 TR_TOKEN_<名称> 的值）+ TR_ADMIN_TOKEN /
-    TR_WEBHOOK_TOKEN / TR_DASH_TOKEN。命名 token 在每次 run 通过
-    secrets.list_token_values() 枚举后追加。线程安全（Worker 写、log
-    回调读）。
+    每个提交任务独立构造，集合包含服务侧默认 token 与本次调用方 token；
+    调用方 token 不落库，只在任务执行期间存在于内存与脱敏集合中。
     """
 
-    def __init__(self, secrets=()):
+    def __init__(self, values=()):
         self._lock = threading.Lock()
-        self._secrets = []
-        self.add_secrets(secrets)
+        self._values = []
+        self.add(values)
 
-    def add_secrets(self, secrets):
+    def add(self, values):
         """追加秘密值（空值忽略）；长的先替换，避免短前缀先命中漏掉长值。"""
         with self._lock:
-            for s in secrets or []:
-                s = (s or "").strip()
-                if s and s not in self._secrets:
-                    self._secrets.append(s)
-            self._secrets.sort(key=len, reverse=True)
+            for value in values or []:
+                value = (value or "").strip()
+                if value and value not in self._values:
+                    self._values.append(value)
+            self._values.sort(key=len, reverse=True)
 
     def mask(self, text):
-        """返回脱敏后的文本（即计划文档中的 _mask()）。"""
+        """返回脱敏后的文本。"""
         if not text:
             return text
         with self._lock:
-            secrets = list(self._secrets)
-        for s in secrets:
-            text = text.replace(s, "***")
+            values = list(self._values)
+        for value in values:
+            text = text.replace(value, "***")
         return text
 
 
 class LogBuffer:
-    """引擎 log 回调：逐行收集，满 50 行或超过 2 秒批量 append_log 落库。
+    """任务日志缓冲：满 50 行或超过 2 秒批量落库，行先脱敏。"""
 
-    每行先过脱敏器再缓冲；run 结束必须调用 flush() 强制刷库。
-    """
-
-    def __init__(self, db, run_id, masker):
+    def __init__(self, db, submission_id, masker):
         self._db = db
-        self._run_id = run_id
+        self._submission_id = submission_id
         self._masker = masker
         self._lines = []
         self._last_flush = time.monotonic()
         self._lock = threading.Lock()
 
     def __call__(self, message):
-        """引擎日志入口（print 风格单行调用）。"""
         line = self._masker.mask(str(message))
         with self._lock:
             self._lines.append(line)
@@ -103,7 +91,7 @@ class LogBuffer:
                 self._flush_locked()
 
     def flush(self):
-        """强制把缓冲中剩余日志落库（run 收尾时调用）。"""
+        """强制把缓冲中剩余日志落库。"""
         with self._lock:
             self._flush_locked()
 
@@ -112,183 +100,173 @@ class LogBuffer:
             return
         text = "\n".join(self._lines) + "\n"
         self._lines.clear()
-        self._db.append_log(self._run_id, text)
+        self._db.append_log(self._submission_id, text)
         self._last_flush = time.monotonic()
 
 
-def execute_run(trigger, settings, db):
-    """执行一次 run：克隆 → 扫描 → 影子门控/逐仓提交 → 落库。
+class ValidationError(Exception):
+    """提交前校验失败（路径不存在/文件过大等），整单失败。"""
 
-    任何异常都不向上抛（Worker 线程必须存活）：run 记 failed，error
-    与日志一律脱敏后落库。ATOMGIT_TOKEN 为空时直接 failed，不克隆。
+
+def _read_files(items, src_dir, log):
+    """读取并校验任务全部目标文件，返回 {item_id: submit files}。
+
+    Raises:
+        ValidationError: 任一文件不存在、超过单文件上限或累计大小超限。
     """
-    default_token = secrets.get("ATOMGIT_TOKEN", "").strip()
-    shadow = is_shadow(db)
-    # 全量扫或手动触发时没有可信增量区间（Trigger 合并语义已保证手动
-    # 触发 sha 为空，这里再兜一层）；单 commit 触发 after 即该 commit，
-    # before（父提交）需克隆来源仓后解析，暂记 None
-    if trigger.commit:
-        push_before, push_after = None, trigger.commit
-    elif trigger.full_scan or trigger.trigger != "push":
-        push_before = push_after = None
-    else:
-        push_before, push_after = trigger.before_sha, trigger.after_sha
-    run_id = db.create_run(trigger=trigger.trigger, shadow=shadow,
-                           keyword=trigger.keyword or "",
-                           push_before=push_before, push_after=push_after)
-    masker = SecretMasker([default_token, settings.admin_token,
-                           settings.webhook_token, settings.dash_token])
-    log = LogBuffer(db, run_id, masker)
-    workdir = os.path.join(settings.work_dir, f"run-{run_id}")
-    try:
-        if not default_token:
-            log("ATOMGIT_TOKEN 未配置，无法执行扫描")
-            db.mark_run(run_id, status="failed",
-                        error="ATOMGIT_TOKEN 未配置，请检查服务环境变量")
-            return
+    prepared = {}
+    total_size = 0
+    for item in items:
+        files = []
+        for meta in item["files"]:
+            source_path = meta["source_path"]
+            try:
+                content = localgit.read_file(src_dir, source_path)
+            except Exception as exc:
+                raise ValidationError(
+                    f"读取权威仓文件失败: {source_path}: {exc}") from exc
+            if len(content) > MAX_FILE_SIZE:
+                raise ValidationError(
+                    f"文件 {source_path} 大小 "
+                    f"{len(content) / 1024 / 1024:.1f} MB 超过单文件上限 "
+                    f"{MAX_FILE_SIZE / 1024 / 1024:.0f} MB")
+            total_size += len(content)
+            if total_size > MAX_TOTAL_SIZE:
+                raise ValidationError(
+                    f"累计文件大小 {total_size / 1024 / 1024:.1f} MB 超过"
+                    f"上限 {MAX_TOTAL_SIZE / 1024 / 1024:.0f} MB")
+            log(f"  读取文件: {source_path} -> {meta['target_path']}")
+            files.append({
+                "target_path": meta["target_path"],
+                "content_b64": base64.b64encode(content).decode("ascii"),
+            })
+        prepared[item["id"]] = files
+    return prepared
 
-        # ── 克隆来源仓（本地化模式，零 API） ──
+
+def _item_status(result):
+    """把 submit_repo 返回值映射为结果项状态。"""
+    if not result.get("ok"):
+        return "failed"
+    if result.get("noop"):
+        return "noop"
+    if result.get("pr_existed"):
+        return "already_exists"
+    return "submitted"
+
+
+def _save_item(db, item_id, status, result=None):
+    """把单仓提交结果写回 submission_items。"""
+    result = result or {}
+    db.update_submission_item(
+        item_id,
+        status=status,
+        pr_number=result.get("pr_number"),
+        pr_url=result.get("pr_url"),
+        pr_title=result.get("pr_title"),
+        pr_existed=(None if result.get("pr_existed") is None
+                    else int(bool(result.get("pr_existed")))),
+        stage=result.get("stage"),
+        error=result.get("error"),
+    )
+
+
+def _finish(db, submission_id, status, error=None):
+    """写任务终态。"""
+    db.finish_submission(submission_id, status, error=error)
+
+
+def execute_submission(submission_id, caller_token, settings, db):
+    """执行一次提交任务；任何异常都不向 Worker 线程抛出。"""
+    submission = db.get_submission(submission_id)
+    if submission is None or submission["status"] != "queued":
+        return
+
+    db.mark_submission_running(submission_id)
+    caller_token = (caller_token or "").strip()
+    source_token = secrets.get("ATOMGIT_TOKEN", "").strip()
+    masker = SecretMasker([source_token, caller_token])
+    log = LogBuffer(db, submission_id, masker)
+    workdir = os.path.join(settings.work_dir, "submissions",
+                           f"submission-{submission_id}")
+    items = db.get_submission_items(submission_id)
+    try:
+        if not caller_token:
+            raise ValidationError("调用方 AtomGit token 为空")
+        if not source_token:
+            raise ValidationError(
+                "服务未配置 ATOMGIT_TOKEN，无法读取权威仓")
+        if not items:
+            raise ValidationError("提交任务没有待处理文件")
+
         owner, repo = common._source_repo()
         src_dir = os.path.join(workdir, "src")
-        log(f"正在克隆来源仓库 {owner}/{repo} ...")
-        localgit.clone(owner, repo, None, default_token, src_dir,
+        log(f"正在克隆权威仓 {owner}/{repo}（默认分支）...")
+        localgit.clone(owner, repo, SOURCE_REF, source_token, src_dir,
                        log=log, blobs=True)
-        # 命名 token 明文只存 Vault：枚举其值纳入脱敏集合（服务 DB 只存名称）
-        masker.add_secrets(secrets.list_token_values())
 
-        # ── 单 commit 变更集：解析父提交作为对比基点，内容取自该 commit ──
-        # 克隆 tip 是默认分支 HEAD，目标 commit 未必在其中，需单独补取；
-        # 父提交 sha 可直接从提交对象读出（无需父对象），再按 sha 补取。
-        # 任一环节缺失（commit 不可达、根提交无父）都判 run 失败，不回退
-        # 全量——接口已承诺「单 commit 语义」，静默全量会违背调用方预期。
-        source_ref = None
-        if trigger.commit:
-            source_ref = trigger.commit
-            log(f"单 commit 模式：解析 {source_ref} 的父提交")
-            localgit.fetch_commit(src_dir, source_ref, log=log)
-            parents = localgit.commit_parents(src_dir, source_ref)
-            if not parents:
-                db.mark_run(
-                    run_id, status="failed",
-                    error=f"权威仓 commit {source_ref} 无父提交（根提交），"
-                          "无法确定变更集")
-                return
-            push_before = parents[0]
-            localgit.fetch_commit(src_dir, push_before, log=log)
-            db.mark_run(run_id, push_before=push_before)
-
-        # ── 扫描（本地化 + 可选增量 diff） ──
-        # 逐仓解析访问目标仓库的 Token（仓库配置的命名 Token，缺失即失败）
-        def _token_resolver(org, repo_name, _path):
-            tok, _name, err = token_router.resolve_repo_token(
-                db, org, repo_name, default_token)
-            return tok or default_token, err
-
-        scan = service.scan_changed(
-            trigger.keyword, default_token,
-            token_resolver=_token_resolver, log=log,
-            source_repo_dir=src_dir,
-            clone_root=os.path.join(workdir, "clones"),
-            diff_before=push_before, diff_after=push_after,
-            source_ref=source_ref)
-        if not scan.get("ok"):
-            db.mark_run(run_id, status="failed",
-                        error=masker.mask(scan.get("error") or "扫描失败"))
-            return
-        db.mark_run(run_id, incremental=scan.get("incremental"))
-        # 扫描错误可能携带含 token 的 URL，脱敏后再落库
-        scan = dict(scan)
-        scan["errors"] = [
-            {**e, "error": masker.mask(str(e.get("error") or ""))}
-            for e in scan.get("errors") or []
+        tree = localgit.tree_map(src_dir)
+        missing = [
+            meta["source_path"]
+            for item in items for meta in item["files"]
+            if meta["source_path"] not in tree
         ]
+        if missing:
+            raise ValidationError(
+                "以下文件在权威仓默认分支中不存在: " + ", ".join(missing))
 
-        # ── 影子门控 / 逐仓提交 ──
-        if shadow:
-            db.record_scan_results(run_id, scan, shadow=True)
-            log("影子模式：仅记录待提交清单，不创建 PR")
+        prepared = _read_files(items, src_dir, log)
+
+        if submission["dry_run"]:
+            log("dry_run=true：仅校验路径与大小，不创建 PR")
+            for item in items:
+                _save_item(db, item["id"], "would_submit")
+            _finish(db, submission_id, "success")
+            return
+
+        statuses = []
+        for item in items:
+            label = f"{item['org']}/{item['repo']}@{item['branch']}"
+            log(f"正在提交 {label}（{len(item['files'])} 个文件）...")
+            try:
+                result = dict(service.submit_repo(
+                    item["org"], item["repo"], item["branch"],
+                    prepared[item["id"]], caller_token, log))
+            except Exception as exc:
+                result = {"ok": False, "stage": "exception",
+                          "error": str(exc)}
+            if result.get("error"):
+                result["error"] = masker.mask(str(result["error"]))
+            status = _item_status(result)
+            statuses.append(status)
+            _save_item(db, item["id"], status, result)
+
+        if statuses and all(s == "failed" for s in statuses):
+            _finish(db, submission_id, "failed",
+                    error="全部仓库提交失败，详见各结果项")
+        elif any(s == "failed" for s in statuses):
+            _finish(db, submission_id, "partial",
+                    error="部分仓库提交失败，详见各结果项")
         else:
-            db.record_scan_results(run_id, scan, shadow=False)
-            counts = _submit_all(run_id, scan.get("changed") or [],
-                                 default_token, log, masker, db)
-        status = "partial" if scan["errors"] or (
-            not shadow and counts["failed"]) else "success"
-        db.mark_run(run_id, status=status)
-        log(f"run 结束，状态: {status}")
-    except Exception as e:
-        # clone 失败会把含 token 的 URL 包进 AtomGitError，必须脱敏
-        log(f"run 异常终止: {masker.mask(str(e))}")
-        db.mark_run(run_id, status="failed", error=masker.mask(str(e)))
+            _finish(db, submission_id, "success")
+        log(f"任务结束，状态: {db.get_submission(submission_id)['status']}")
+    except ValidationError as exc:
+        error = masker.mask(str(exc))
+        log(f"任务校验失败: {error}")
+        db.fail_queued_items(submission_id, error)
+        _finish(db, submission_id, "failed", error=error)
+    except Exception as exc:
+        error = masker.mask(str(exc))
+        log(f"任务异常终止: {error}")
+        db.fail_queued_items(submission_id, error)
+        _finish(db, submission_id, "failed", error=error)
     finally:
         log.flush()
-        db.kv_set("last_run_at", _utcnow())
-        for event_id in trigger.push_event_ids or []:
-            db.link_push_event(event_id, run_id)
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _submit_all(run_id, changed, default_token, log, masker, db):
-    """active 模式逐仓提交：仓库配置门控 + Token 路由 + submit_repo，结果落库。
-
-    未在设置页启用（无条目或已禁用）的仓库直接记 noop
-    （stage='auto_pr_off'）跳过，默认拒绝。已启用的仓库按仓库配置解析
-    Token（命名 Token 名称 → Vault 值；未配置名称则用默认 default_token），
-    名称在 Vault 缺失时该仓判失败（stage='token_missing'，fail-closed
-    不回退）。保留 submit_repo 返回的完整粒度（head_branch / noop /
-    pr_existed）供落库。单仓失败不中断；有 pr_number 的结果同步
-    upsert 到 prs 表（source='service'，供 prsync 轮询）。
-
-    Returns:
-        dict: record_submit_results 的计数汇总。
-    """
-    results = []
-    for i, item in enumerate(changed, 1):
-        path = item["project"]["path"]
-        log(f"正在提交 ({i}/{len(changed)}): {item['org']}/{item['repo']}")
-        if not db.is_auto_pr_enabled(item["org"], item["repo"],
-                                     item["branch"]):
-            # 设置页未添加条目或已禁用：默认拒绝，记 noop 不提交
-            log("  仓库配置未启用（设置页无此条目或已禁用），跳过")
-            result = {"ok": True, "noop": True, "stage": "auto_pr_off"}
-        else:
-            item_token, token_name, token_error = (
-                token_router.resolve_repo_token(
-                    db, item["org"], item["repo"], default_token))
-            if token_error:
-                log(f"  {token_error}，跳过提交")
-                result = {"ok": False, "stage": "token_missing",
-                          "error": token_error}
-            else:
-                if token_name:
-                    log(f"  使用命名 Token「{token_name}」提交")
-                try:
-                    result = dict(service.submit_repo(
-                        item["org"], item["repo"], item["branch"],
-                        item["files"], item_token, log))
-                except Exception as e:
-                    result = {"ok": False, "stage": "exception",
-                              "error": str(e)}
-        if result.get("error"):
-            result["error"] = masker.mask(str(result["error"]))
-        result.update(path=path, org=item["org"], repo=item["repo"],
-                      branch=item["branch"])
-        results.append(result)
-        if result.get("pr_number"):
-            db.upsert_pr(item["org"], item["repo"], result["pr_number"],
-                         branch=item["branch"], path=path,
-                         url=result.get("pr_url"),
-                         title=result.get("pr_title"),
-                         state="open", source="service", run_id=run_id)
-    return db.record_submit_results(run_id, results)
-
-
-class Worker:
-    """全局唯一的 run 执行线程：阻塞 pop 队列，逐 Trigger 执行 execute_run。
-
-    协作式停止：stop() 只置退出标志，正在执行的 run 会跑完后线程才
-    退出——引擎在 run 中途无法安全中断（克隆/推送可能处于半完成状态），
-    因此不提供强杀；调用方用 join() 等待线程自然结束。
-    """
+class SubmissionWorker:
+    """全局唯一的提交任务执行线程（协作式停止）。"""
 
     def __init__(self, queue, settings, db, poll_timeout=1.0):
         self._queue = queue
@@ -297,32 +275,32 @@ class Worker:
         self._poll_timeout = poll_timeout
         self._stopping = threading.Event()
         self._thread = threading.Thread(
-            target=self._loop, name="translator-worker", daemon=True)
+            target=self._loop, name="translator-submission-worker",
+            daemon=True)
 
     def start(self):
-        """启动 Worker 线程。"""
         self._thread.start()
 
     def stop(self):
-        """请求停止：置标志位（协作式，不打断进行中的 run）。"""
+        """请求停止：置标志位（不打断进行中的任务）。"""
         self._stopping.set()
 
     def join(self, timeout=None):
-        """等待 Worker 线程退出。"""
         self._thread.join(timeout)
 
     @property
     def alive(self):
-        """Worker 线程是否在运行。"""
         return self._thread.is_alive()
 
     def _loop(self):
         while not self._stopping.is_set():
-            trigger = self._queue.pop(timeout=self._poll_timeout)
-            if trigger is None:
+            entry = self._queue.pop(timeout=self._poll_timeout)
+            if entry is None:
                 continue
+            submission_id, token = entry
             try:
-                execute_run(trigger, self._settings, self._db)
+                execute_submission(
+                    submission_id, token, self._settings, self._db)
             except Exception:
-                # execute_run 内部已兜底，这里是防御性保护：Worker 必须存活
+                # execute_submission 内部已兜底，这里是防御性保护
                 traceback.print_exc()

@@ -4,11 +4,15 @@ metadata:
   name: translator-config
   namespace: translator
 data:
-  # SQLite 库与 run 工作目录根（PVC 挂载点）
+  # SQLite 库与任务工作目录根（PVC 挂载点）
   TR_DATA_DIR: "/data"
-  # Poller 轮询 open PR 状态的间隔秒数
-  TR_POLL_INTERVAL: "300"
-  # 影子模式初始值种子（之后以库中值为准，运行时页面/接口切换）
-  TR_SHADOW: "1"
+  # POST /api/v1/submissions 带 wait=true 时的最长等待秒数
+  TR_WAIT_TIMEOUT: "30"
+  # 单次提交请求允许的最大文件路径数
+  TR_MAX_PATHS: "200"
+  # 待执行提交任务队列容量（满则返回 429）
+  TR_QUEUE_MAX: "100"
+  # 提交任务与结果保留天数
+  TR_SUBMISSION_RETENTION_DAYS: "90"
   # 来源仓覆盖：留空即权威仓 Computing_Ecosystem_Docs/Computing_Ecosystem_Docs-EN
   ATOMGIT_SOURCE_REPO: ""

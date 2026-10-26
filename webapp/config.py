@@ -1,32 +1,12 @@
 """服务配置：从环境变量加载 Settings。
 
-凭据项（TR_WEBHOOK_TOKEN / TR_ADMIN_TOKEN / TR_DASH_TOKEN）优先读 secrets
-文件（/vault/secrets/.env，见 translator.secrets），文件中无该键时回退环境
-变量——生产环境凭据不进进程环境。ATOMGIT_TOKEN / ATOMGIT_SOURCE_REPO 由引擎
-（translator）自行读取，本模块不接管。TR_SHADOW 仅作影子开关的初始值种子
-——运行时真值存 SQLite config 表（见 db.is_shadow/set_shadow），支持 POST
-/api/config/shadow 运行时切换并持久化，env 只在库中无记录时生效。
+服务只提供 HTTP API：调用方传 AtomGit token 和权威仓文件路径，服务读取
+权威仓内容后向目标社区仓提交 PR。凭据（ATOMGIT_TOKEN）由引擎经
+translator.secrets 读取（secrets 文件优先、环境变量回退），本模块不接管。
 """
 
 import os
 from dataclasses import dataclass
-
-from translator import secrets
-
-_TRUE_VALUES = {"1", "true", "yes", "on"}
-_FALSE_VALUES = {"0", "false", "no", "off"}
-
-
-def _parse_bool(raw, default):
-    """解析布尔环境变量，无法识别时回落默认值。"""
-    if raw is None:
-        return default
-    v = raw.strip().lower()
-    if v in _TRUE_VALUES:
-        return True
-    if v in _FALSE_VALUES:
-        return False
-    return default
 
 
 def _parse_int(raw, default):
@@ -41,50 +21,42 @@ def _parse_int(raw, default):
 
 @dataclass
 class Settings:
-    """常驻服务的全部配置项。
+    """常驻 API 服务的全部配置项。
 
     Attributes:
-        data_dir: SQLite 库与 run 工作目录的根目录（TR_DATA_DIR）
+        data_dir: SQLite 库与任务工作目录的根目录（TR_DATA_DIR）
         port: HTTP 监听端口（TR_PORT）
-        poll_interval: Poller 轮询间隔秒数（TR_POLL_INTERVAL）
-        webhook_token: webhook 鉴权 token（TR_WEBHOOK_TOKEN）
-        admin_token: 管理端点 token，空则管理端点放开（TR_ADMIN_TOKEN）
-        dash_token: 只读端点 token，空则只读端点放开（TR_DASH_TOKEN）
-        shadow: 影子模式初始值（TR_SHADOW，默认 true 安全优先），
-            仅用于给 SQLite config 表播种，之后以库中值为准
+        wait_timeout: POST /submissions 带 wait=true 时的最长等待秒数
+            （TR_WAIT_TIMEOUT）
+        max_paths: 单次提交请求允许的最大文件路径数（TR_MAX_PATHS）
+        queue_max: 待执行提交任务队列容量（TR_QUEUE_MAX）
+        retention_days: 提交任务与结果保留天数（TR_SUBMISSION_RETENTION_DAYS）
+        api_key: 服务级 API Key（TR_API_KEY）；为空时 create_app 回退从
+            translator.secrets 读同名键（Vault 注入文件优先），仍为空则
+            拒绝启动
     """
 
     data_dir: str = "./data"
     port: int = 8000
-    poll_interval: int = 300
-    webhook_token: str = ""
-    admin_token: str = ""
-    dash_token: str = ""
-    shadow: bool = True
+    wait_timeout: int = 30
+    max_paths: int = 200
+    queue_max: int = 100
+    retention_days: int = 90
+    api_key: str = ""
 
     @classmethod
-    def from_env(cls, env=None, secrets_map=None):
-        """构造 Settings：非敏感项读环境变量，凭据项优先读 secrets 文件。
-
-        env 默认 os.environ；secrets_map 默认读 secrets 文件
-        （/vault/secrets/.env），两者均可注入字典便于测试。secrets 文件存在
-        但不可读时 load_env 抛 RuntimeError，启动即失败（fail-fast）。
-        """
+    def from_env(cls, env=None):
+        """构造 Settings，全部配置项均来自非敏感环境变量。"""
         env = os.environ if env is None else env
-        if secrets_map is None:
-            secrets_map = secrets.load_env()
-
-        def pick(key, default=""):
-            return secrets_map[key] if key in secrets_map else env.get(key, default)
-
         return cls(
             data_dir=env.get("TR_DATA_DIR", "./data"),
             port=_parse_int(env.get("TR_PORT"), 8000),
-            poll_interval=_parse_int(env.get("TR_POLL_INTERVAL"), 300),
-            webhook_token=pick("TR_WEBHOOK_TOKEN", ""),
-            admin_token=pick("TR_ADMIN_TOKEN", ""),
-            dash_token=pick("TR_DASH_TOKEN", ""),
-            shadow=_parse_bool(env.get("TR_SHADOW"), True),
+            wait_timeout=_parse_int(env.get("TR_WAIT_TIMEOUT"), 30),
+            max_paths=_parse_int(env.get("TR_MAX_PATHS"), 200),
+            queue_max=_parse_int(env.get("TR_QUEUE_MAX"), 100),
+            retention_days=_parse_int(
+                env.get("TR_SUBMISSION_RETENTION_DAYS"), 90),
+            api_key=env.get("TR_API_KEY", "").strip(),
         )
 
     @property
@@ -94,5 +66,5 @@ class Settings:
 
     @property
     def work_dir(self):
-        """run 工作目录（克隆来源仓等临时产物）的根。"""
+        """提交任务工作目录（克隆权威仓等临时产物）的根。"""
         return os.path.join(self.data_dir, "work")

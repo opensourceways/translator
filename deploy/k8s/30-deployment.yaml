@@ -37,7 +37,7 @@ spec:
         app: translator
     spec:
       # 非 root 运行（uid/gid 1000）：fsGroup 让 PVC 属组归 1000 且组可写，
-      # 进程即可写 /data（SQLite + run 工作目录）；OnRootMismatch 避免每次启动递归 chown
+      # 进程即可写 /data（SQLite + 任务工作目录）；OnRootMismatch 避免每次启动递归 chown
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

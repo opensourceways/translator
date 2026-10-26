@@ -1,607 +1,422 @@
-"""FastAPI Web 层：webhook 入口、Dashboard 与只读/管理 API。
+"""FastAPI HTTP API：提交任务、任务查询与 PR 状态实时查询。
 
-对应服务化改造计划「API 端点」表：
-- POST /webhook/atomgit：AtomGit push 入口（?token= 鉴权，fail closed）；
-  ref 过滤 ^(refs/heads/main|main|)$ 与 Jenkins regexpFilterExpression
-  一致；所有到达事件（含被拒绝的）均落 push_events，接受的入队返回 202
-- GET /healthz：无鉴权探活；busy 以库中是否存在 running run 判定
-  （重启后也准确），不依赖 Worker 内存状态
-- Dashboard 页面与 /api/* 只读 JSON：TR_DASH_TOKEN 未配置时放开，配置后
-  要求 X-Dash-Token 头或 ?token= query
-- POST /api/runs、/api/config/shadow、/api/settings/repos：
-  X-Admin-Token 管理端点；admin_token 未配置时放开（内部工具，默认
-  内网部署），配置后校验。命名 token 名称清单来自 Vault（只读，运维
-  经 Vault 手动注入），服务不保存也不写入任何 token 值
-- POST /api/runs 传 commit（权威仓 sha，完整 40 位或最短 4 位缩写）触发
-  「单 commit 变更集」：只处理该 commit 自身引入的变更；缩写经权威仓
-  commits 端点归一化为全量，格式非法或权威仓不可达直接 422 拒绝，
-  不回退全量
+端点：
+- GET  /healthz                      探活（无鉴权，K8s 探针用）
+- POST /api/v1/submissions           提交权威仓文件路径，异步创建 PR
+- GET  /api/v1/submissions/{id}      查询提交任务与逐仓库结果（含日志）
+- GET  /api/v1/prs/status            实时查询 PR 状态（URL/编号/request_id）
 
-lifespan：init_db → init_shadow（env 仅作种子，之后以库为准）→ 僵尸
-running run 恢复为 interrupted → 停机补偿（最后一次成功 run 的
-push_after 与来源仓远端默认分支 HEAD 比对，不一致入队一次全量扫；无
-基线或比对失败都跳过，绝不影响启动）→ 启动 Worker/Poller。关停时协作
-式停止两个线程并 join（Worker 正在执行的 run 会跑完）。
+鉴权：
+- 服务级：所有 /api/v1 端点要求 ``X-API-Key``，值来自 TR_API_KEY
+  （settings 或 Vault 注入文件）；未配置则服务拒绝启动（fail-closed）
+- 调用方级：提交接口要求 ``X-AtomGit-Token``，仅用于目标仓 Fork/提交，
+  只存在于请求与 Worker 内存中，永不落库
+
+任务模型：提交落库后进入内存 FIFO 队列，由全局唯一 Worker 顺序执行；
+同一 (org, repo, branch) 的路径合并为一个 PR。``dry_run=true`` 只校验
+路径与大小，不创建 PR。``wait=true`` 在请求内等待任务结束（上限
+settings.wait_timeout），超时返回 202 与 request_id 供后续轮询。
 """
 
-import base64
+import asyncio
 import hmac
 import logging
-import os
 import re
+import time
+import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
+from fastapi.responses import JSONResponse
 
-from translator import client, common, secrets
+from translator import client, secrets
 
 from webapp.config import Settings
-from webapp.db import init_db, init_shadow, is_shadow, set_shadow
+from webapp.db import init_db
+from webapp.paths import group_paths
 from webapp.prstatus import derive
-from webapp.prsync import Poller
-from webapp.queueing import CoalescingQueue, Trigger
-from webapp.runner import Worker
+from webapp.queueing import SubmissionQueue
+from webapp.runner import SubmissionWorker
 
 log = logging.getLogger("webapp.api")
 
-# webhook ref 过滤：与 Jenkins regexpFilterExpression 一致（空串也触发，
-# 对应缺 ref 的兜底语义——sha 为空时队列语义自动全量扫描）
-_REF_PATTERN = re.compile(r"^(refs/heads/main|main|)$")
+# 调用方可选传入的幂等请求 ID：仅允许安全字符，长度受限
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
-_TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+# PR 链接解析：merge_requests 为 AtomGit 现行路径，pulls 为兼容写法
+_PR_URL_RE = re.compile(
+    r"^https?://atomgit\.com/(?P<org>[^/]+)/(?P<repo>[^/]+)"
+    r"/(?:merge_requests|pulls)/(?P<number>\d+)(?:[/?#].*)?$")
 
-# 内容安全策略：脚本仅允许同源 + 每请求 nonce（模板内联 <script> 均带该
-# nonce）；样式保留 'unsafe-inline'（模板大量使用内联 style 属性与 <style>
-# 块）。/docs、/redoc、/openapi.json 由 Swagger UI 从 CDN 加载资源，跳过 CSP
-# 以免破坏文档页（其余安全响应头照常下发）。
-_CSP = ("default-src 'self'; script-src 'self' 'nonce-{nonce}'; "
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-        "connect-src 'self'; object-src 'none'; base-uri 'none'; "
-        "form-action 'self'; frame-ancestors 'none'")
-_CSP_EXEMPT_PATHS = frozenset({"/docs", "/redoc", "/openapi.json"})
+# 等待任务结束的轮询间隔（秒）
+_WAIT_POLL_INTERVAL = 0.2
 
 
-def _group_prs(prs, statuses):
-    """把 PR 列表与最新仓库状态合并为 社区(org) → (repo, branch) 分组结构。
+def _map_state(pr):
+    """把 AtomGit PR 响应映射为状态（merged/closed/open）。
 
-    每组含该仓最新 run 状态（latest，无 run 记录为 None）与该仓全部 PR
-    （number 倒序）；仅在 run_repos 中出现但没有任何 PR 的仓库也会成组
-    （prs 为空，模板据此显示「未发现 PR」）。org 与组内仓库均按字母序
-    稳定排序；org 附 open/merged/closed 三态计数（徽标用）。
-    org/repo 分组大小写不敏感（AtomGit 名称大小写不敏感，run_repos 与
-    prs 两处来源可能大小写不一致），显示名取先见者的原始写法。
+    AtomGit（Gitee 系）PR 的 state 通常只有 open/closed，"已合并"看
+    merged 字段为真或 merged_at 非空，两者任一成立即 merged。
+    """
+    if pr.get("merged") or pr.get("merged_at"):
+        return "merged"
+    if pr.get("state") == "closed":
+        return "closed"
+    return "open"
+
+
+def _extract_labels(pr):
+    """从 PR 响应提取标签（名字+颜色）；无 labels 字段返回 None。"""
+    if "labels" not in pr:
+        return None
+    return [{"name": l.get("name"), "color": l.get("color")}
+            for l in pr.get("labels") or [] if isinstance(l, dict)]
+
+
+def _pr_view(org, repo, number, pr):
+    """把 AtomGit PR 详情整理为对外状态对象（含派生状态 derived）。"""
+    assignees = None
+    if "assignees" in pr:
+        assignees = [a for a in pr.get("assignees") or []
+                     if isinstance(a, dict)]
+    view = {
+        "org": org,
+        "repo": repo,
+        "number": number,
+        "title": pr.get("title"),
+        "url": (pr.get("html_url")
+                or f"https://atomgit.com/{org}/{repo}/merge_requests/{number}"),
+        "state": _map_state(pr),
+        "mergeable": pr.get("mergeable"),
+        "draft": pr.get("draft"),
+        "labels": _extract_labels(pr),
+        "merged_at": pr.get("merged_at"),
+        "closed_at": pr.get("closed_at"),
+        "created_at": pr.get("created_at"),
+        "review_total": (len(assignees) if assignees is not None else None),
+        "review_accepted": (sum(1 for a in assignees if a.get("accept"))
+                            if assignees is not None else None),
+    }
+    view["derived"] = derive(view)
+    return view
+
+
+def _fetch_pr_views(targets, token):
+    """逐个查询 PR 状态（阻塞调用，由端点放进线程池执行）。
+
+    Args:
+        targets: [(org, repo, number)]，已去重。
+        token: 读取 PR 使用的服务侧默认 token。
 
     Returns:
-        list[dict]: [{org, counts, repos: [{org, repo, branch, latest,
-        prs}]}]。
+        (views, errors)：成功的状态对象列表与失败项列表。
     """
-    groups = {}
-    names = {}
-
-    def _key(org, repo, branch):
-        k = ((org or "").lower(), (repo or "").lower(), branch)
-        names.setdefault(k, (org, repo))
-        return k
-
-    for s in statuses:
-        key = _key(s["org"], s["repo"], s["branch"])
-        groups[key] = {
-            "org": names[key][0], "repo": names[key][1],
-            "branch": s["branch"], "latest": s, "prs": []}
-    for pr in prs:
-        key = _key(pr["org"], pr["repo"], pr.get("branch"))
-        groups.setdefault(key, {"org": names[key][0], "repo": names[key][1],
-                                "branch": key[2], "latest": None,
-                                "prs": []})["prs"].append(pr)
-    orgs = {}
-    for key in sorted(groups, key=lambda k: (k[0], k[1], k[2] or "")):
-        g = groups[key]
-        g["prs"].sort(key=lambda p: p["number"], reverse=True)
-        org = orgs.setdefault(key[0], {
-            "org": names[key][0], "counts": {"open": 0, "merged": 0,
-                                             "closed": 0},
-            "repos": []})
-        org["repos"].append(g)
-        for pr in g["prs"]:
-            if pr.get("state") in org["counts"]:
-                org["counts"][pr["state"]] += 1
-    return [orgs[name] for name in sorted(orgs)]
+    views, errors = [], []
+    for org, repo, number in targets:
+        try:
+            pr = client.get_pull_request(org, repo, number, token)
+        except client.AtomGitError as exc:
+            errors.append({"org": org, "repo": repo, "number": number,
+                           "error": str(exc)})
+            continue
+        views.append(_pr_view(org, repo, number, pr))
+    return views, errors
 
 
-def _localtime(value):
-    """库中 UTC ISO8601 时间戳转服务器本地时区显示。"""
-    if not value:
-        return "-"
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        return value
-    return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+def _submission_payload(db, submission, include_log=False):
+    """把提交任务与逐仓结果整理为对外 JSON。"""
+    items = []
+    for item in db.get_submission_items(submission["id"]):
+        items.append({
+            "org": item["org"],
+            "repo": item["repo"],
+            "branch": item["branch"],
+            "status": item["status"],
+            "stage": item["stage"],
+            "source_paths": item["source_paths"],
+            "target_paths": [f["target_path"] for f in item["files"]],
+            "pr_number": item["pr_number"],
+            "pr_url": item["pr_url"],
+            "pr_title": item["pr_title"],
+            "pr_existed": (None if item["pr_existed"] is None
+                           else bool(item["pr_existed"])),
+            "error": item["error"],
+            "updated_at": item["updated_at"],
+        })
+    payload = {
+        "request_id": submission["request_id"],
+        "status": submission["status"],
+        "dry_run": bool(submission["dry_run"]),
+        "path_count": submission["path_count"],
+        "created_at": submission["created_at"],
+        "started_at": submission["started_at"],
+        "finished_at": submission["finished_at"],
+        "error": submission["error"],
+        "items": items,
+    }
+    if include_log:
+        payload["log"] = db.get_submission_log(submission["id"])
+    return payload
 
 
-def _recover_missed_pushes(settings, db, queue):
-    """停机补偿：最后一次成功 run 的 push_after 与来源仓远端 HEAD 比对。
+def _validate_paths(raw_paths, max_paths):
+    """校验并去重 paths 字段（保持调用方顺序）。
 
-    覆盖服务停机/重启窗口内丢失的 webhook（fire-and-forget）。不一致则
-    入队一次全量扫描；无基线（全新库）、无 ATOMGIT_TOKEN 或查询远端失败
-    （网络异常）都跳过——绝不影响启动。
+    Raises:
+        HTTPException: 非数组、空数组、非字符串项、空串或数量超限。
     """
-    token = secrets.get("ATOMGIT_TOKEN", "").strip()
-    if not token:
-        log.info("停机补偿跳过：ATOMGIT_TOKEN 未配置")
-        return
-    baseline = next(
-        (r for r in db.list_runs(limit=50)
-         if r["status"] in ("success", "partial") and r.get("push_after")),
-        None)
-    if baseline is None:
-        log.info("停机补偿跳过：尚无成功 run 作为基线（全新库）")
-        return
-    try:
-        owner, repo = common._source_repo()
-        info = client.get_repo(owner, repo, token)
-        default_branch = info.get("default_branch") or ""
-        branches = client.list_branches(owner, repo, token)
-        head_sha = next(
-            ((b.get("commit") or {}).get("sha") for b in branches
-             if b.get("name") == default_branch), None)
-    except Exception as e:
-        log.warning("停机补偿跳过：查询来源仓远端 HEAD 失败: %s", e)
-        return
-    if not head_sha:
-        log.warning("停机补偿跳过：远端默认分支 %r 未找到", default_branch)
-        return
-    if head_sha == baseline["push_after"]:
-        log.info("停机补偿：远端 HEAD 与基线一致，无需补偿")
-        return
-    log.info("停机补偿：基线 %s 落后远端 HEAD %s，入队一次全量扫描",
-             baseline["push_after"], head_sha)
-    queue.push(Trigger.manual(full_scan=True))
-
-
-def _resolve_source_commit(sha):
-    """把（可能是缩写的）sha 解析为权威仓中完整的 40 位提交 sha。
-
-    用 commits 端点一次调用同时完成两件事：校验该 commit 在权威仓可达、
-    并把缩写 sha（最短 4 位）归一化为全量——下游 runner 与落库统一按 40
-    位处理。此校验在请求线程内同步发起一次 API 调用（低频管理端点，可
-    接受）。不可达或缩写歧义时抛 AtomGitError，一律 422 拒绝，不静默回退
-    全量——接口承诺单 commit 语义，调用方期望明确知道该 sha 是否有效。
-    """
-    owner, repo = common._source_repo()
-    token = secrets.get("ATOMGIT_TOKEN", "").strip()
-    if not token:
-        raise HTTPException(422, "ATOMGIT_TOKEN 未配置，无法校验 commit")
-    try:
-        info = client.get_commit(owner, repo, sha, token)
-    except client.AtomGitError as e:
+    if not isinstance(raw_paths, list) or not raw_paths:
+        raise HTTPException(422, "paths 必须是非空字符串数组")
+    paths, seen = [], set()
+    for value in raw_paths:
+        if not isinstance(value, str):
+            raise HTTPException(422, f"paths 含非字符串项: {value!r}")
+        path = value.strip()
+        if not path:
+            raise HTTPException(422, "paths 不能包含空字符串")
+        if path not in seen:
+            seen.add(path)
+            paths.append(path)
+    if len(paths) > max_paths:
         raise HTTPException(
-            422, f"权威仓 {owner}/{repo} 中无法解析 commit {sha}: {e}")
-    full = str(info.get("sha") or "").strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{40}", full):
+            422, f"paths 数量 {len(paths)} 超过单次上限 {max_paths}")
+    return paths
+
+
+def _parse_pr_url(raw):
+    """解析 AtomGit PR 链接为 (org, repo, number)。"""
+    match = _PR_URL_RE.match(raw.strip())
+    if not match:
         raise HTTPException(
-            422, f"权威仓 {owner}/{repo} 返回的 commit sha 非法: {full!r}")
-    return full
+            422, f"pr_url 不是合法的 AtomGit PR 链接: {raw!r}")
+    return (match.group("org"), match.group("repo"),
+            int(match.group("number")))
 
 
 def create_app(settings=None):
-    """构建 FastAPI 应用；线程与数据库生命周期由 lifespan 管理。
+    """构建 FastAPI 应用；数据库与 Worker 生命周期由 lifespan 管理。
 
     settings 为 None 时从环境变量加载（uvicorn --factory 以零参调用）。
-    app.state 上暴露 db / queue / worker / poller（测试与运维探针用）。
+    app.state 上暴露 db / queue / worker（测试与运维探针用）。
     """
     if settings is None:
         settings = Settings.from_env()
-    templates = Jinja2Templates(directory=_TEMPLATES_DIR)
-    templates.env.filters["localtime"] = _localtime
-    templates.env.autoescape = True  # 显式声明：所有变量输出默认 HTML 转义
+    # API Key 允许放 Vault 注入文件（凭据不进进程环境），环境变量兜底
+    api_key = (settings.api_key or "").strip() or \
+        secrets.get("TR_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "未配置服务级 API Key（TR_API_KEY），拒绝以无鉴权方式启动")
 
     @asynccontextmanager
     async def lifespan(app):
         db = init_db(settings.db_path)
-        init_shadow(db, settings.shadow)
-        interrupted = db.interrupt_running_runs()
+        interrupted = db.fail_unfinished_submissions(
+            "服务重启，排队/执行中的任务已中断，请重新提交")
         if interrupted:
-            log.info("启动恢复：%d 个僵尸 running run 标记为 interrupted",
-                     interrupted)
-        queue = CoalescingQueue()
-        _recover_missed_pushes(settings, db, queue)
-        worker = Worker(queue, settings, db)
-        poller = Poller(db, settings)
+            log.info("启动恢复：%d 个未完成任务标记为 failed", interrupted)
+        cleaned = db.cleanup_old_submissions(settings.retention_days)
+        if cleaned["submissions"]:
+            log.info("启动清理：删除 %d 个超过 %d 天的提交任务",
+                     cleaned["submissions"], settings.retention_days)
+        queue = SubmissionQueue(maxsize=settings.queue_max)
+        worker = SubmissionWorker(queue, settings, db)
         worker.start()
-        poller.start()
         app.state.db = db
         app.state.queue = queue
         app.state.worker = worker
-        app.state.poller = poller
         try:
             yield
         finally:
             worker.stop()
-            poller.stop()
             worker.join()
-            poller.join()
             db.close()
 
     app = FastAPI(title="translator", lifespan=lifespan)
 
-    # ── 安全响应头 ───────────────────────────────────────────
+    # ── 鉴权 ─────────────────────────────────────────────────
 
-    @app.middleware("http")
-    async def security_headers(request: Request, call_next):
-        """为每个响应下发安全头；每请求生成 CSP nonce 供模板内联脚本引用。
-
-        nonce 写入 request.state（scope["state"] 在中间件与路由间共享），
-        _ctx 据此注入 csp_nonce 变量。
-        """
-        nonce = base64.b64encode(os.urandom(16)).decode()
-        request.state.csp_nonce = nonce
-        response = await call_next(request)
-        if request.url.path not in _CSP_EXEMPT_PATHS:
-            response.headers.setdefault(
-                "Content-Security-Policy", _CSP.format(nonce=nonce))
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Referrer-Policy", "same-origin")
-        return response
-
-    # ── 鉴权依赖 ─────────────────────────────────────────────
-
-    def require_dash(request: Request):
-        """只读端点鉴权：dash_token 未配置时放开，否则校验头或 ?token=。"""
-        if not settings.dash_token:
-            return
-        token = request.headers.get("x-dash-token", "")
-        if not token:
-            token = request.query_params.get("token", "")
-        if not hmac.compare_digest(token, settings.dash_token):
-            raise HTTPException(403, "dash token 无效或未提供")
-
-    def require_admin(x_admin_token: str = Header(default="")):
-        """管理端点鉴权：admin_token 未配置时放开（内部工具，默认内网
-        部署），配置后校验 X-Admin-Token 头。"""
-        if not settings.admin_token:
-            return
-        if not hmac.compare_digest(x_admin_token, settings.admin_token):
-            raise HTTPException(403, "admin token 无效")
-
-    dash = [Depends(require_dash)]
-
-    def _ctx(request, **kw):
-        """模板公共上下文：shadow 角标 + dash token 是否启用（模板透传用）。"""
-        return {"request": request,
-                "dash_auth": bool(settings.dash_token),
-                "csp_nonce": getattr(request.state, "csp_nonce", ""),
-                "shadow": is_shadow(request.app.state.db), **kw}
-
-    # ── webhook ──────────────────────────────────────────────
-
-    @app.post("/webhook/atomgit")
-    async def webhook_atomgit(request: Request,
-                              token: str = Query(default="")):
-        """AtomGit push 入口：token 校验 → ref 过滤 → 落库 → 入队。
-
-        body 非 JSON 或缺字段时按 Jenkins 兜底语义处理：ref 视为空串
-        （命中过滤正则），sha 为空 → 队列语义自动全量扫描。
-        """
-        if not settings.webhook_token or not hmac.compare_digest(
-                token, settings.webhook_token):
-            raise HTTPException(403, "webhook token 无效或未配置")
-        try:
-            payload = await request.json()
-        except Exception:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-        db = request.app.state.db
-        ref = str(payload.get("ref") or "")
-        before = str(payload.get("before") or "") or None
-        after = str(payload.get("after") or "") or None
-        accepted, reason = True, ""
-        if not _REF_PATTERN.match(ref):
-            accepted, reason = False, "ref 不在触发范围"
-        elif after and set(after) == {"0"}:
-            accepted, reason = False, "分支删除事件不触发"
-        event_id = db.record_push_event(ref, before, after, accepted)
-        if not accepted:
-            log.info("webhook 事件 #%d 被拒绝：%s (ref=%r)",
-                     event_id, reason, ref)
-            return JSONResponse(
-                {"accepted": False, "reason": reason, "event_id": event_id})
-        queued = request.app.state.queue.push(
-            Trigger.from_push(ref, before, after, event_id))
-        return JSONResponse(
-            {"accepted": True, "event_id": event_id, "queued": queued},
-            status_code=202)
+    def require_api_key(x_api_key: str = Header(default="",
+                                                alias="X-API-Key")):
+        """服务级鉴权：校验 X-API-Key 头。"""
+        if not hmac.compare_digest(x_api_key, api_key):
+            raise HTTPException(401, "X-API-Key 无效或未提供")
 
     # ── 探活 ─────────────────────────────────────────────────
 
     @app.get("/healthz")
     async def healthz(request: Request):
         db = request.app.state.db
-        busy = any(r["status"] == "running" for r in db.list_runs(limit=10))
-        return {"status": "ok", "shadow": is_shadow(db), "busy": busy,
-                "pending": request.app.state.queue.pending_count(),
-                "last_run_at": db.kv_get("last_run_at"),
-                "last_poll_at": db.kv_get("last_poll_at")}
+        return {
+            "status": "ok",
+            "queue": request.app.state.queue.pending_count(),
+            "pending": db.pending_count(),
+            "running": db.running_count(),
+        }
 
-    # ── Dashboard 页面 ───────────────────────────────────────
+    # ── 提交任务 ─────────────────────────────────────────────
 
-    @app.get("/", response_class=HTMLResponse, dependencies=dash)
-    async def page_index(request: Request):
-        db = request.app.state.db
-        return templates.TemplateResponse(
-            request, "index.html",
-            _ctx(request, summary=db.summary(), runs=db.list_runs(limit=20)))
+    @app.post("/api/v1/submissions",
+              dependencies=[Depends(require_api_key)])
+    async def create_submission(
+            request: Request,
+            x_atomgit_token: str = Header(default="",
+                                          alias="X-AtomGit-Token")):
+        """提交权威仓文件路径，异步创建 PR。
 
-    @app.get("/runs", response_class=HTMLResponse, dependencies=dash)
-    async def page_runs(request: Request):
-        db = request.app.state.db
-        return templates.TemplateResponse(
-            request, "runs.html",
-            _ctx(request, runs=db.list_runs(limit=100)))
-
-    @app.get("/runs/{run_id}", response_class=HTMLResponse, dependencies=dash)
-    async def page_run_detail(request: Request, run_id: int):
-        db = request.app.state.db
-        run = db.get_run(run_id)
-        if run is None:
-            raise HTTPException(404, "run 不存在")
-        return templates.TemplateResponse(
-            request, "run_detail.html",
-            _ctx(request, run=run, repos=db.get_run_repos(run_id)))
-
-    @app.get("/prs", response_class=HTMLResponse, dependencies=dash)
-    async def page_prs(request: Request):
-        db = request.app.state.db
-        prs = db.list_prs()
-        for pr in prs:
-            pr["derived"] = derive(pr)
-        return templates.TemplateResponse(
-            request, "prs.html",
-            _ctx(request, summary=db.summary(),
-                 orgs=_group_prs(prs, db.latest_repo_statuses())))
-
-    # ── 只读 JSON ────────────────────────────────────────────
-
-    @app.get("/api/summary", dependencies=dash)
-    async def api_summary(request: Request):
-        db = request.app.state.db
-        return {**db.summary(), "shadow": is_shadow(db)}
-
-    @app.get("/api/runs", dependencies=dash)
-    async def api_runs(request: Request, limit: int = Query(default=50)):
-        limit = min(max(limit, 1), 200)
-        return {"runs": request.app.state.db.list_runs(limit=limit)}
-
-    @app.get("/api/runs/{run_id}", dependencies=dash)
-    async def api_run_detail(request: Request, run_id: int):
-        db = request.app.state.db
-        run = db.get_run(run_id)
-        if run is None:
-            raise HTTPException(404, "run 不存在")
-        run = dict(run)
-        run.pop("log", None)  # log 大字段走独立端点
-        return {"run": run, "repos": db.get_run_repos(run_id)}
-
-    @app.get("/api/runs/{run_id}/log", dependencies=dash)
-    async def api_run_log(request: Request, run_id: int):
-        run = request.app.state.db.get_run(run_id)
-        if run is None:
-            raise HTTPException(404, "run 不存在")
-        return {"run_id": run_id, "log": run.get("log") or ""}
-
-    @app.get("/api/prs", dependencies=dash)
-    async def api_prs(request: Request, state: str = Query(default=""),
-                      group_by: str = Query(default="")):
-        """PR 列表：默认平铺（兼容旧结构）；?group_by=org 返回分组结构。
-
-        每个 PR 对象附 derived 派生状态（key/text/color/guidance，
-        由 prstatus.derive 从原始信号现算，调映射规则无需重新轮询）。
-        """
-        db = request.app.state.db
-        prs = db.list_prs(state=state or None)
-        for pr in prs:
-            pr["derived"] = derive(pr)
-        if group_by == "org":
-            return {"orgs": _group_prs(prs, db.latest_repo_statuses())}
-        return {"prs": prs}
-
-    # ── 仓库配置（设置页）：一个条目配齐一个仓库的开关与专属 Token ──
-
-    @app.get("/settings", response_class=HTMLResponse, dependencies=dash)
-    async def page_settings(request: Request):
-        db = request.app.state.db
-        entries = db.list_repo_configs()
-        known = {(e["org"], e["repo"]) for e in entries}
-        suggestions = []
-        seen = set()
-        for r in db.distinct_repos():
-            key = (r["org"].lower(), r["repo"].lower())
-            if key not in known and key not in seen:
-                seen.add(key)
-                suggestions.append(r)
-        token_names = secrets.list_token_names()
-        return templates.TemplateResponse(
-            request, "settings.html",
-            _ctx(request, entries=entries,
-                 suggestions=suggestions,
-                 token_names=token_names,
-                 admin_auth=bool(settings.admin_token)))
-
-    @app.get("/api/settings/repos", dependencies=dash)
-    async def api_list_repo_configs(request: Request):
-        """仓库配置列表（token_name 为引用名，无敏感值）。"""
-        return {"entries": request.app.state.db.list_repo_configs()}
-
-    @app.post("/api/settings/repos",
-              dependencies=[Depends(require_admin)])
-    async def api_upsert_repo_config(request: Request):
-        """新增/更新仓库配置：{org, repo, enabled?, token_name?}。
-
-        enabled/token_name 缺省表示保持不变（新条目默认 enabled=True、
-        不引用命名 token）；token_name 传空串表示清除引用（回退默认
-        ATOMGIT_TOKEN）；非空的 token_name 必须是 Vault 中已配置的命名
-        token 名称（TR_TOKEN_<名称>）。
+        请求体：{paths: [str], wait?: bool, wait_timeout?: int,
+        dry_run?: bool, request_id?: str}。
+        request_id 可选：重复提交同一 request_id 直接返回已有任务。
         """
         try:
             body = await request.json()
         except Exception:
-            body = {}
+            raise HTTPException(422, "请求体必须是 JSON 对象")
         if not isinstance(body, dict):
-            body = {}
-        org = str(body.get("org") or "").strip()
-        repo = str(body.get("repo") or "").strip()
-        if not org or not repo:
-            raise HTTPException(422, "body 需要非空字段 org 与 repo")
-        enabled = body.get("enabled")
-        if enabled is not None and not isinstance(enabled, bool):
-            raise HTTPException(422, "enabled 必须是布尔值")
-        token_name = body.get("token_name")
-        if token_name is not None:
-            token_name = str(token_name).strip().lower()
-        db = request.app.state.db
-        if token_name and token_name not in secrets.list_token_names():
+            raise HTTPException(422, "请求体必须是 JSON 对象")
+
+        token = (x_atomgit_token or "").strip()
+        if not token:
             raise HTTPException(
-                422, f"命名 Token「{token_name}」未在 Vault 配置，"
-                     f"请联系运维注入 {secrets.TOKEN_PREFIX}"
-                     f"{token_name.upper()}")
-        entry_id = db.upsert_repo_config(org, repo, enabled=enabled,
-                                         token_name=token_name)
-        log.info("仓库配置 upsert：%s/%s enabled=%s token_name=%s",
-                 org.lower(), repo.lower(), enabled,
-                 "清除" if token_name == ""
-                 else (token_name if token_name else "不变"))
-        return {"id": entry_id, "org": org.lower(), "repo": repo.lower()}
+                422, "缺少 X-AtomGit-Token 请求头（调用方 AtomGit token）")
+        if any(ch.isspace() for ch in token):
+            raise HTTPException(422, "X-AtomGit-Token 不能包含空白字符")
 
-    @app.post("/api/settings/repos/{entry_id}",
-              dependencies=[Depends(require_admin)])
-    async def api_toggle_repo_config(request: Request, entry_id: int):
-        """切换条目开关：{enabled: bool}。"""
+        paths = _validate_paths(body.get("paths"), settings.max_paths)
         try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        enabled = body.get("enabled") if isinstance(body, dict) else None
-        if not isinstance(enabled, bool):
-            raise HTTPException(422, "body 需要布尔字段 enabled")
+            groups = group_paths(paths)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+
+        dry_run = body.get("dry_run", False)
+        if not isinstance(dry_run, bool):
+            raise HTTPException(422, "dry_run 必须是布尔值")
+        wait = body.get("wait", False)
+        if not isinstance(wait, bool):
+            raise HTTPException(422, "wait 必须是布尔值")
+        timeout = body.get("wait_timeout")
+        if timeout is None:
+            timeout = settings.wait_timeout
+        elif isinstance(timeout, bool) or not isinstance(timeout, int):
+            raise HTTPException(422, "wait_timeout 必须是整数秒")
+        timeout = min(max(timeout, 1), settings.wait_timeout)
+
+        request_id = str(body.get("request_id") or "").strip()
+        if request_id and not _REQUEST_ID_RE.match(request_id):
+            raise HTTPException(
+                422, "request_id 仅允许字母/数字/点/下划线/连字符，长度 1-64")
         db = request.app.state.db
-        if not db.set_repo_config_enabled(entry_id, enabled):
-            raise HTTPException(404, "条目不存在")
-        log.info("仓库配置 #%d 切换为 %s",
-                 entry_id, "启用" if enabled else "禁用")
-        return {"id": entry_id, "enabled": enabled}
-
-    @app.delete("/api/settings/repos/{entry_id}",
-                dependencies=[Depends(require_admin)])
-    async def api_delete_repo_config(request: Request, entry_id: int):
-        db = request.app.state.db
-        if not db.delete_repo_config(entry_id):
-            raise HTTPException(404, "条目不存在")
-        log.info("仓库配置条目 #%d 已删除", entry_id)
-        return {"id": entry_id, "deleted": True}
-
-    # ── 命名 Token（只读：清单来自 Vault，新增/删除由运维手动操作） ──
-
-    @app.get("/api/settings/tokens", dependencies=dash)
-    async def api_list_named_tokens():
-        """命名 token 名称清单（来自 Vault，仅名称，无任何 token 值）。"""
-        return {"names": secrets.list_token_names()}
-
-    # ── 管理端点 ─────────────────────────────────────────────
-
-    @app.post("/api/runs", dependencies=[Depends(require_admin)])
-    async def api_create_run(request: Request):
-        """手动触发（Build Now 替代）：{full_scan, keyword, commit} 入队，202。
-
-        commit 非空时触发「单 commit 变更集」（只处理该 commit 自身引入
-        的变更）：须为十六进制 sha——完整 40 位或最短 4 位缩写，经权威仓
-        commits 端点解析为全量并校验可达，否则 422 拒绝（不静默回退全量）。
-        commit 与 full_scan/keyword 互斥，同时给出时以 commit 为准。
-        """
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        if not isinstance(body, dict):
-            body = {}
-        commit = str(body.get("commit") or "").strip().lower()
-        if commit:
-            if not re.fullmatch(r"[0-9a-f]{4,40}", commit):
-                raise HTTPException(422, "commit 必须是 4-40 位十六进制 sha")
-            commit = _resolve_source_commit(commit)
-            trigger = Trigger.commit_sha(commit)
+        if request_id:
+            existing = db.get_submission_by_request_id(request_id)
+            if existing is not None:
+                return _submission_payload(db, existing)
         else:
-            trigger = Trigger.manual(
-                full_scan=bool(body.get("full_scan", True)),
-                keyword=str(body.get("keyword") or ""))
-        queued = request.app.state.queue.push(trigger)
-        return JSONResponse({"queued": queued, "full_scan": trigger.full_scan,
-                             "keyword": trigger.keyword,
-                             "commit": trigger.commit}, status_code=202)
+            request_id = uuid.uuid4().hex
 
-    @app.post("/api/runs/{run_id}/retry",
-              dependencies=[Depends(require_admin)])
-    async def api_retry_run(request: Request, run_id: int):
-        """重提失败项：把该 run 中失败（submit_failed/error）的仓库重新入队。
+        queue = request.app.state.queue
+        if queue.pending_count() >= settings.queue_max:
+            raise HTTPException(429, "提交队列已满，请稍后重试")
 
-        body 可带 {path} 精确重试单行；不带 path 则重试全部失败行。
-        重试复用关键字扫描：单路径 keyword=path（子串匹配，可能带出同
-        前缀的兄弟路径，多扫无害）；多个失败路径关键字互不覆盖，入队
-        全量扫（与队列合并语义一致，宁多勿漏，未变更的仓库扫描后自然
-        unchanged 不会重复提 PR）。新 run 按当前影子开关执行。
-        """
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        if not isinstance(body, dict):
-            body = {}
-        path = str(body.get("path") or "").strip()
-        db = request.app.state.db
-        run = db.get_run(run_id)
-        if run is None:
-            raise HTTPException(404, "run 不存在")
-        if run["status"] == "running":
-            raise HTTPException(409, "run 仍在执行中，结束后再重试")
-        failed = [r for r in db.get_run_repos(run_id)
-                  if r["status"] in ("submit_failed", "error")]
-        if path:
-            if not any(r.get("path") == path for r in failed):
-                raise HTTPException(
-                    422, f"路径 {path!r} 不是该 run 的失败项，不能重试")
-            trigger = Trigger.manual(keyword=path)
-        else:
-            if not failed:
-                raise HTTPException(422, "该 run 没有可重试的失败项")
-            paths = {r.get("path") for r in failed if r.get("path")}
-            trigger = (Trigger.manual(keyword=paths.pop())
-                       if len(paths) == 1
-                       else Trigger.manual(full_scan=True))
-        queued = request.app.state.queue.push(trigger)
-        log.info("run #%d 重试入队：keyword=%r full_scan=%s（来源 %s）",
-                 run_id, trigger.keyword, trigger.full_scan,
-                 path or "全部失败项")
+        submission_id = db.create_submission(
+            request_id, paths, groups, dry_run=dry_run)
+        if not queue.push(submission_id, token):
+            error = "提交队列已满，任务被拒绝"
+            db.fail_queued_items(submission_id, error)
+            db.finish_submission(submission_id, "failed", error=error)
+            raise HTTPException(429, error)
+        log.info("提交任务 %s 入队：%d 个路径 / %d 个仓库",
+                 request_id, len(paths), len(groups))
+
+        if wait:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                submission = db.get_submission(submission_id)
+                if db.is_terminal(submission["status"]):
+                    return JSONResponse(
+                        _submission_payload(db, submission), status_code=200)
+                await asyncio.sleep(_WAIT_POLL_INTERVAL)
+        submission = db.get_submission(submission_id)
         return JSONResponse(
-            {"queued": queued, "keyword": trigger.keyword,
-             "full_scan": trigger.full_scan}, status_code=202)
+            _submission_payload(db, submission), status_code=202)
 
-    @app.post("/api/config/shadow", dependencies=[Depends(require_admin)])
-    async def api_set_shadow(request: Request):
-        """影子开关：{enabled: bool} 持久化到 config 表。"""
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        enabled = body.get("enabled") if isinstance(body, dict) else None
-        if not isinstance(enabled, bool):
-            raise HTTPException(422, "body 需要布尔字段 enabled")
+    @app.get("/api/v1/submissions/{request_id}",
+             dependencies=[Depends(require_api_key)])
+    async def get_submission(
+            request: Request, request_id: str,
+            include_log: bool = Query(default=False)):
+        """查询提交任务状态与逐仓库结果；include_log=true 返回脱敏日志。"""
         db = request.app.state.db
-        set_shadow(db, enabled)
-        log.info("影子模式切换为 %s", "开启" if enabled else "关闭")
-        return {"shadow": is_shadow(db)}
+        submission = db.get_submission_by_request_id(request_id)
+        if submission is None:
+            raise HTTPException(404, "提交任务不存在")
+        return _submission_payload(db, submission, include_log=include_log)
+
+    # ── PR 状态实时查询 ──────────────────────────────────────
+
+    @app.get("/api/v1/prs/status", dependencies=[Depends(require_api_key)])
+    async def pr_status(
+            request: Request,
+            pr_url: str = Query(default=""),
+            org: str = Query(default=""),
+            repo: str = Query(default=""),
+            number: int = Query(default=0),
+            request_id: str = Query(default="")):
+        """实时查询 PR 状态（不走缓存，每次直查 AtomGit）。
+
+        三种用法互斥：pr_url；org+repo+number；request_id（该任务下
+        全部已建 PR）。返回对象含原始信号与 derived 派生状态。
+        """
+        token = secrets.get("ATOMGIT_TOKEN", "").strip()
+        if not token:
+            raise HTTPException(503, "服务未配置 ATOMGIT_TOKEN，无法查询 PR")
+        db = request.app.state.db
+
+        submission = None
+        targets = []
+        if pr_url:
+            if org or repo or number or request_id:
+                raise HTTPException(
+                    422, "pr_url 与 org/repo/number/request_id 不能同时使用")
+            targets.append(_parse_pr_url(pr_url))
+        elif request_id:
+            if org or repo or number:
+                raise HTTPException(
+                    422, "request_id 与 org/repo/number 不能同时使用")
+            submission = db.get_submission_by_request_id(request_id)
+            if submission is None:
+                raise HTTPException(404, "提交任务不存在")
+            seen = set()
+            for item in db.get_items_with_pr(submission["id"]):
+                key = (item["org"], item["repo"], item["pr_number"])
+                if key not in seen:
+                    seen.add(key)
+                    targets.append(key)
+        else:
+            if not org or not repo or number <= 0:
+                raise HTTPException(
+                    422, "需提供 pr_url，或 org/repo/number，或 request_id")
+            if "/" in org or "/" in repo:
+                raise HTTPException(422, "org 与 repo 不能包含 /")
+            targets.append((org, repo, number))
+
+        if not targets:
+            payload = {"prs": [], "errors": []}
+            if submission is not None:
+                payload["request_id"] = submission["request_id"]
+                payload["status"] = submission["status"]
+            return payload
+
+        views, errors = await asyncio.to_thread(
+            _fetch_pr_views, targets, token)
+        if submission is None and errors:
+            # 单 PR 查询：失败直接映射 AtomGit 错误（404 未找到 / 502 上游）
+            status = 404 if "404" in errors[0]["error"] else 502
+            raise HTTPException(
+                status, f"查询 PR 状态失败: {errors[0]['error']}")
+        payload = {"prs": views, "errors": errors}
+        if submission is not None:
+            payload["request_id"] = submission["request_id"]
+            payload["status"] = submission["status"]
+        return payload
 
     return app

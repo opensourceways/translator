@@ -390,8 +390,8 @@ def submit_repo(org, repo, branch, files, token, log=print):
 def submit_all(changed, token, log=print):
     """对有变更的仓库逐个幂等提交 PR，单仓失败不中断。
 
-    每个仓库统一使用传入的 token 提交（服务侧已按仓库配置解析出命名
-    Token 或默认 token，见 webapp.token_router）。
+    每个仓库统一使用传入的 token 提交（服务侧为调用方请求头提供的
+    AtomGit token，仅用于目标仓操作）。
 
     Args:
         changed: scan_changed 返回的 changed 清单，

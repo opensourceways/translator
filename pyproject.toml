@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "translator"
 version = "1.0.0"
-description = "译稿自动提 PR 服务 — 译稿仓库更新时由 Jenkins 触发，扫描变更并幂等提交 AtomGit Pull Request"
+description = "译稿自动提 PR 服务 — 通过 HTTP API 接收权威仓文件路径，自动向社区仓提交 AtomGit Pull Request"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.33.0",
@@ -22,15 +22,11 @@ dev = [
 services = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
-    "jinja2>=3.1",
 ]
 
-# 显式列出两个顶层包（webapp 与 translator 平级），并打包 Dashboard 模板
+# 显式列出两个顶层包（webapp 与 translator 平级）
 [tool.setuptools]
 packages = ["translator", "webapp"]
-
-[tool.setuptools.package-data]
-webapp = ["templates/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

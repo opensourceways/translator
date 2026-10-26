@@ -1,597 +1,337 @@
-"""runner（execute_run / Worker / 日志脱敏）的单元测试。
+"""webapp.runner：提交任务执行、脱敏日志与队列 Worker。"""
 
-全部 mock 不触网：patch 到 runner 模块引用点的
-localgit.clone 与 service.scan_changed/submit_repo；
-db 用 tmp_path 真库。
-"""
-
-import os
+import base64
 import threading
 import time
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-from translator import client
 from webapp import runner
-from webapp.config import Settings
-from webapp.db import init_db, set_shadow
-from webapp.queueing import CoalescingQueue, Trigger
-from webapp.runner import LogBuffer, SecretMasker, Worker, execute_run
+from webapp.db import init_db
+from webapp.queueing import SubmissionQueue
 
-DEFAULT_TOKEN = "default-secret-token"
-VAULT_TOKEN = "vault-secret-token"
+CALLER_TOKEN = "caller-token-abc"
+SOURCE_TOKEN = "source-token-xyz"
 
 
 @pytest.fixture
 def settings(tmp_path):
-    """tmp_path 数据目录 + 三个已配置的 TR_* token（脱敏断言用）。"""
-    return Settings(data_dir=str(tmp_path), admin_token="admin-secret",
-                    webhook_token="webhook-secret", dash_token="dash-secret")
+    from webapp.config import Settings
+    return Settings(data_dir=str(tmp_path), wait_timeout=5, queue_max=10)
 
 
 @pytest.fixture
-def db(settings):
-    with init_db(settings.db_path) as db:
-        yield db
+def db(tmp_path):
+    database = init_db(tmp_path / "translator.db")
+    yield database
+    database.close()
 
 
-@pytest.fixture
-def token_env(monkeypatch):
-    """注入默认 token。"""
-    monkeypatch.setenv("ATOMGIT_TOKEN", DEFAULT_TOKEN)
+@pytest.fixture(autouse=True)
+def _fake_secrets(monkeypatch):
+    """服务侧 token 用固定值，权威仓不读 ATOMGIT_SOURCE_REPO 覆盖。"""
+    def fake_get(name, default=""):
+        if name == "ATOMGIT_TOKEN":
+            return SOURCE_TOKEN
+        return default
+    monkeypatch.setattr(runner.secrets, "get", fake_get)
 
 
-def _changed_item(path="Ascend/26.1.0/MindStudio/msprof", org="Ascend",
-                  repo="msprof", branch="26.1.0"):
-    """scan_changed changed 清单的一项（结构与引擎返回一致）。"""
-    return {
-        "project": {"path": path},
-        "org": org, "repo": repo, "branch": branch,
-        "files": [{"target_path": "docs/en/a.md", "content_b64": "YQ=="}],
-        "new_count": 1, "update_count": 0,
-    }
+def _groups():
+    return [
+        {
+            "org": "CANN", "repo": "hccl", "branch": "9.1.0",
+            "source_paths": ["CANN/9.1.0/hccl/docs/a.md"],
+            "files": [{"source_path": "CANN/9.1.0/hccl/docs/a.md",
+                       "target_path": "docs/a.md"}],
+        },
+        {
+            "org": "CANN", "repo": "sip", "branch": "9.1.0",
+            "source_paths": ["CANN/9.1.0/sip/docs/b.md"],
+            "files": [{"source_path": "CANN/9.1.0/sip/docs/b.md",
+                       "target_path": "docs/b.md"}],
+        },
+    ]
 
 
-def _scan(changed=None, errors=None, incremental=False, ok=True,
-          error=None):
-    scan = {"ok": ok, "changed": changed or [], "unchanged": [],
-            "skipped": [], "errors": errors or [], "incremental": incremental}
-    if not ok:
-        scan.update(stage="load_index", error=error or "扫描失败")
-    return scan
+def _prepare(db, request_id="req", dry_run=False, groups=None):
+    groups = groups or _groups()
+    paths = [f["source_path"] for g in groups for f in g["files"]]
+    return db.create_submission(request_id, paths, groups, dry_run=dry_run)
 
 
-@pytest.fixture
-def engine():
-    """把引擎入口全部 mock 到 runner 模块引用点，返回各 mock 句柄。"""
-    with patch.object(runner.localgit, "clone") as clone, \
-            patch.object(runner.service, "scan_changed") as scan, \
-            patch.object(runner.service, "submit_repo") as submit:
-        clone.side_effect = lambda *a, **kw: os.makedirs(a[4], exist_ok=True)
-        scan.return_value = _scan()
-        submit.return_value = {"ok": True, "noop": True,
-                               "head_branch": "translator/auto-26.1.0"}
-        yield SimpleNamespace(clone=clone, scan_changed=scan,
-                              submit_repo=submit)
+def _mock_source(monkeypatch, tree_paths=(), content=b"hello"):
+    """让克隆/文件树/读取全部走假实现（不触网、不落盘）。"""
+    calls = {"clone": [], "read": []}
+
+    def fake_clone(owner, repo, ref, token, dest_dir, log=print, blobs=False):
+        calls["clone"].append({
+            "owner": owner, "repo": repo, "ref": ref,
+            "token": token, "dest": dest_dir, "blobs": blobs})
+        return dest_dir
+
+    def fake_read(repo_dir, path):
+        calls["read"].append(path)
+        return content
+
+    monkeypatch.setattr(runner.localgit, "clone", fake_clone)
+    monkeypatch.setattr(runner.localgit, "tree_map",
+                        lambda repo_dir, ref="HEAD": {
+                            p: "sha" for p in tree_paths})
+    monkeypatch.setattr(runner.localgit, "read_file", fake_read)
+    return calls
 
 
-@pytest.fixture
-def auto_pr_on(db):
-    """为测试用的两个目标仓开启自动提 PR 通配条目（runner 门控放行）。"""
-    db.upsert_repo_config("Ascend", "msprof")
-    db.upsert_repo_config("CANN", "cann")
+class TestSecretMasker:
+    def test_masks_all_values_longest_first(self):
+        masker = runner.SecretMasker(["abc", "abcdef", ""])
+        assert masker.mask("x abcdef abc y") == "x *** *** y"
 
+    def test_add_ignores_empty_and_duplicates(self):
+        masker = runner.SecretMasker()
+        masker.add(["t", " ", "t"])
+        assert masker.mask("t") == "***"
 
-def _push_trigger(**kw):
-    return Trigger(trigger="push", ref="refs/heads/main",
-                   before_sha="b01", after_sha="a02", **kw)
-
-
-class TestShadowMode:
-    """影子模式：扫描照常执行，绝不调用 submit_repo，落 would_submit。"""
-
-    def test_shadow_records_would_submit_without_submit(
-            self, settings, db, token_env, engine):
-        set_shadow(db, True)
-        engine.scan_changed.return_value = _scan(changed=[
-            _changed_item(),
-            _changed_item(path="CANN/9.1.0/sip/cann", org="CANN",
-                          repo="cann", branch="9.1.0"),
-        ])
-        execute_run(_push_trigger(), settings, db)
-
-        engine.submit_repo.assert_not_called()
-        run = db.list_runs()[0]
-        assert run["status"] == "success"
-        assert run["shadow"] == 1
-        repos = db.get_run_repos(run["id"])
-        assert {r["status"] for r in repos} == {"would_submit"}
-        assert repos[0]["files"] == ["docs/en/a.md"]
-
-    def test_shadow_scan_errors_mark_partial(
-            self, settings, db, token_env, engine):
-        set_shadow(db, True)
-        engine.scan_changed.return_value = _scan(
-            errors=[{"path": "A/b/c/d", "error": "对比失败"}])
-        execute_run(_push_trigger(), settings, db)
-        run = db.list_runs()[0]
-        assert run["status"] == "partial"
-        assert run["error_count"] == 1
-
-
-class TestActiveMode:
-    """active 模式：逐仓 resolve_token + submit_repo，完整粒度落库。"""
-
-    def test_submit_each_repo_with_granularity(
-            self, settings, db, token_env, engine, auto_pr_on):
-        set_shadow(db, False)
-        engine.scan_changed.return_value = _scan(changed=[
-            _changed_item(),
-            _changed_item(path="CANN/9.1.0/sip/cann", org="CANN",
-                          repo="cann", branch="9.1.0"),
-        ])
-        engine.submit_repo.side_effect = [
-            {"ok": True, "pr_url": "https://atomgit.com/Ascend/msprof/merge_requests/42",
-             "pr_number": 42, "pr_existed": False,
-             "head_branch": "translator/auto-26.1.0", "pr_title": "同步译稿"},
-            {"ok": True, "noop": True, "head_branch": "translator/auto-9.1.0"},
-        ]
-        execute_run(_push_trigger(), settings, db)
-
-        assert engine.submit_repo.call_count == 2
-        run = db.list_runs()[0]
-        assert run["status"] == "success"
-        repos = {r["path"]: r for r in db.get_run_repos(run["id"])}
-        pr_repo = repos["Ascend/26.1.0/MindStudio/msprof"]
-        assert pr_repo["status"] == "submit_ok"
-        assert pr_repo["pr_number"] == 42
-        assert pr_repo["pr_existed"] == 0
-        assert pr_repo["head_branch"] == "translator/auto-26.1.0"
-        noop_repo = repos["CANN/9.1.0/sip/cann"]
-        assert noop_repo["status"] == "noop"
-        assert noop_repo["head_branch"] == "translator/auto-9.1.0"
-
-        prs = db.list_prs()
-        assert len(prs) == 1
-        assert prs[0]["number"] == 42
-        assert prs[0]["org"] == "Ascend" and prs[0]["repo"] == "msprof"
-        assert prs[0]["state"] == "open"
-        assert prs[0]["source"] == "service"
-        assert prs[0]["run_id"] == run["id"]
-        assert prs[0]["branch"] == "26.1.0"
-
-    def test_pr_existed_upserted(self, settings, db, token_env, engine, auto_pr_on):
-        set_shadow(db, False)
-        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
-        engine.submit_repo.return_value = {
-            "ok": True, "pr_number": 7, "pr_existed": True,
-            "pr_url": "https://atomgit.com/Ascend/msprof/merge_requests/7",
-            "head_branch": "translator/auto-26.1.0"}
-        execute_run(_push_trigger(), settings, db)
-        run = db.list_runs()[0]
-        repo = db.get_run_repos(run["id"])[0]
-        assert repo["status"] == "submit_ok"
-        assert repo["pr_existed"] == 1
-        assert db.list_prs()[0]["number"] == 7
-
-    def test_submit_failure_marks_partial(
-            self, settings, db, token_env, engine, auto_pr_on):
-        set_shadow(db, False)
-        engine.scan_changed.return_value = _scan(changed=[
-            _changed_item(),
-            _changed_item(path="CANN/9.1.0/sip/cann", org="CANN",
-                          repo="cann", branch="9.1.0"),
-        ])
-        engine.submit_repo.side_effect = [
-            {"ok": True, "noop": True},
-            {"ok": False, "stage": "create_pr", "error": "API 500"},
-        ]
-        execute_run(_push_trigger(), settings, db)
-        run = db.list_runs()[0]
-        assert run["status"] == "partial"
-        assert run["failed_count"] == 1
-        repos = {r["status"] for r in db.get_run_repos(run["id"])}
-        assert repos == {"noop", "submit_failed"}
-
-    def test_submit_repo_exception_contained(
-            self, settings, db, token_env, engine, auto_pr_on):
-        """submit_repo 抛异常时按单仓失败处理，不中断其余仓库。"""
-        set_shadow(db, False)
-        engine.scan_changed.return_value = _scan(changed=[
-            _changed_item(),
-            _changed_item(path="CANN/9.1.0/sip/cann", org="CANN",
-                          repo="cann", branch="9.1.0"),
-        ])
-        engine.submit_repo.side_effect = [
-            client.AtomGitError(500, "boom"),
-            {"ok": True, "noop": True},
-        ]
-        execute_run(_push_trigger(), settings, db)
-        run = db.list_runs()[0]
-        assert run["status"] == "partial"
-        assert run["failed_count"] == 1
-        repos = {r["path"]: r for r in db.get_run_repos(run["id"])}
-        assert repos["Ascend/26.1.0/MindStudio/msprof"]["stage"] == "exception"
-
-
-class TestNamedTokenRouting:
-    """仓库配置引用的命名 token（名称 → Vault）：覆盖默认 token，且入脱敏集合。"""
-
-    def test_named_token_from_vault_used(
-            self, settings, db, token_env, engine, auto_pr_on, monkeypatch):
-        monkeypatch.setenv("TR_TOKEN_MSPROF_BOT", VAULT_TOKEN)
-        set_shadow(db, False)
-        db.upsert_repo_config("Ascend", "msprof", token_name="msprof_bot")
-        engine.scan_changed.return_value = _scan(changed=[
-            _changed_item(),
-            _changed_item(path="CANN/9.1.0/sip/cann", org="CANN",
-                          repo="cann", branch="9.1.0"),
-        ])
-        execute_run(_push_trigger(), settings, db)
-        tokens = [c.args[4] for c in engine.submit_repo.call_args_list]
-        # msprof 用命名 token，cann 未配置名称用默认 token
-        assert tokens == [VAULT_TOKEN, DEFAULT_TOKEN]
-
-    def test_named_token_masked_in_submit_error(
-            self, settings, db, token_env, engine, auto_pr_on, monkeypatch):
-        """submit 错误文本带命名 token：run_repos.error 与日志脱敏。"""
-        monkeypatch.setenv("TR_TOKEN_MSPROF_BOT", VAULT_TOKEN)
-        set_shadow(db, False)
-        db.upsert_repo_config("Ascend", "msprof", token_name="msprof_bot")
-        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
-        engine.submit_repo.return_value = {
-            "ok": False, "stage": "create_pr",
-            "error": f"推送失败: https://oauth2:{VAULT_TOKEN}@atomgit.com/x"}
-        execute_run(_push_trigger(), settings, db)
-        run = db.list_runs()[0]
-        repo = db.get_run_repos(run["id"])[0]
-        assert repo["status"] == "submit_failed"
-        assert VAULT_TOKEN not in repo["error"]
-        assert VAULT_TOKEN not in db.get_run(run["id"])["log"]
-
-
-class TestAutoPrGate:
-    """仓库配置门控（仓库粒度）：设置页无条目或已禁用的仓库默认拒绝提交。"""
-
-    def test_no_entry_skips_submit(self, settings, db, token_env, engine):
-        set_shadow(db, False)
-        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
-        execute_run(_push_trigger(), settings, db)
-        engine.submit_repo.assert_not_called()
-        run = db.list_runs()[0]
-        assert run["status"] == "success"  # 跳过不算失败
-        repo = db.get_run_repos(run["id"])[0]
-        assert repo["status"] == "noop"
-        assert repo["stage"] == "auto_pr_off"
-        assert "仓库配置未启用" in db.get_run(run["id"])["log"]
-        assert db.list_prs() == []
-
-    def test_disabled_entry_skips(self, settings, db, token_env, engine):
-        set_shadow(db, False)
-        entry_id = db.upsert_repo_config("Ascend", "msprof")
-        db.set_repo_config_enabled(entry_id, False)
-        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
-        execute_run(_push_trigger(), settings, db)
-        engine.submit_repo.assert_not_called()
-        repo = db.get_run_repos(db.list_runs()[0]["id"])[0]
-        assert repo["stage"] == "auto_pr_off"
-
-    def test_mixed_gate_per_repo(self, settings, db, token_env, engine):
-        """同一 run 内：启用条目的仓提交，无条目的仓跳过。"""
-        set_shadow(db, False)
-        db.upsert_repo_config("Ascend", "msprof")
-        engine.scan_changed.return_value = _scan(changed=[
-            _changed_item(),
-            _changed_item(path="CANN/9.1.0/sip/cann", org="CANN",
-                          repo="cann", branch="9.1.0"),
-        ])
-        execute_run(_push_trigger(), settings, db)
-        assert engine.submit_repo.call_count == 1
-        assert engine.submit_repo.call_args.args[1] == "msprof"
-        repos = {r["path"]: r for r in db.get_run_repos(db.list_runs()[0]["id"])}
-        assert repos["Ascend/26.1.0/MindStudio/msprof"]["status"] == "noop"
-        assert repos["CANN/9.1.0/sip/cann"]["stage"] == "auto_pr_off"
-
-
-class TestStatusMapping:
-    """终态映射：scan 失败→failed；有 errors/提交失败→partial；否则 success。"""
-
-    def test_scan_failure_marks_failed(
-            self, settings, db, token_env, engine):
-        engine.scan_changed.return_value = _scan(
-            ok=False, error="读取目录索引失败")
-        execute_run(_push_trigger(), settings, db)
-        run = db.list_runs()[0]
-        assert run["status"] == "failed"
-        assert "读取目录索引失败" in run["error"]
-
-    def test_exception_marks_failed_and_workdir_cleaned(
-            self, settings, db, token_env, engine):
-        engine.scan_changed.side_effect = RuntimeError("unexpected")
-        execute_run(_push_trigger(), settings, db)
-        run = db.list_runs()[0]
-        assert run["status"] == "failed"
-        assert "unexpected" in run["error"]
-        assert not os.path.exists(
-            os.path.join(settings.work_dir, f"run-{run['id']}"))
-
-    def test_all_success(self, settings, db, token_env, engine):
-        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
-        execute_run(_push_trigger(), settings, db)
-        assert db.list_runs()[0]["status"] == "success"
-
-    def test_missing_token_fails_without_clone(
-            self, settings, db, monkeypatch, engine):
-        monkeypatch.delenv("ATOMGIT_TOKEN", raising=False)
-        execute_run(_push_trigger(), settings, db)
-        engine.clone.assert_not_called()
-        run = db.list_runs()[0]
-        assert run["status"] == "failed"
-        assert "ATOMGIT_TOKEN" in run["error"]
-
-
-class TestIncrementalArgs:
-    """增量参数传递：push 触发带 sha，全量/手动触发一律传 None。"""
-
-    def test_push_trigger_passes_diff_sha(
-            self, settings, db, token_env, engine):
-        engine.scan_changed.return_value = _scan(incremental=True)
-        execute_run(_push_trigger(), settings, db)
-        _, kwargs = engine.scan_changed.call_args
-        assert kwargs["diff_before"] == "b01"
-        assert kwargs["diff_after"] == "a02"
-        run = db.list_runs()[0]
-        assert run["push_before"] == "b01"
-        assert run["push_after"] == "a02"
-        assert run["incremental"] == 1
-
-    def test_full_scan_trigger_drops_sha(
-            self, settings, db, token_env, engine):
-        trigger = Trigger.manual(full_scan=True)
-        execute_run(trigger, settings, db)
-        _, kwargs = engine.scan_changed.call_args
-        assert kwargs["diff_before"] is None
-        assert kwargs["diff_after"] is None
-        run = db.list_runs()[0]
-        assert run["push_before"] is None
-        assert run["push_after"] is None
-        assert run["trigger"] == "manual"
-
-
-class TestCommitTrigger:
-    """单 commit 触发：补取 commit 与第一父提交，内容取该 commit，失败即拒绝。"""
-
-    def _patch_git(self, monkeypatch, parents=("p" * 40,), fetch_side=None):
-        fetch = MagicMock(return_value=None, side_effect=fetch_side)
-        monkeypatch.setattr(runner.localgit, "fetch_commit", fetch)
-        monkeypatch.setattr(runner.localgit, "commit_parents",
-                            MagicMock(return_value=list(parents)))
-        return fetch
-
-    def test_fetches_commit_and_parent_passes_source_ref(
-            self, settings, db, token_env, engine, monkeypatch):
-        fetch = self._patch_git(monkeypatch)
-        execute_run(Trigger.commit_sha("c" * 40), settings, db)
-
-        # 依次补取目标 commit 与父提交
-        fetched = [c.args[1] for c in fetch.call_args_list]
-        assert fetched == ["c" * 40, "p" * 40]
-        _, kwargs = engine.scan_changed.call_args
-        assert kwargs["source_ref"] == "c" * 40
-        assert kwargs["diff_before"] == "p" * 40
-        assert kwargs["diff_after"] == "c" * 40
-        run = db.list_runs()[0]
-        assert run["trigger"] == "commit"
-        assert run["push_before"] == "p" * 40
-        assert run["push_after"] == "c" * 40
-        assert run["status"] == "success"
-
-    def test_root_commit_fails_without_scan(
-            self, settings, db, token_env, engine, monkeypatch):
-        self._patch_git(monkeypatch, parents=())
-        execute_run(Trigger.commit_sha("c" * 40), settings, db)
-        engine.scan_changed.assert_not_called()
-        run = db.list_runs()[0]
-        assert run["status"] == "failed"
-        assert "根提交" in run["error"]
-
-    def test_unreachable_commit_fails_not_full(
-            self, settings, db, token_env, engine, monkeypatch):
-        """fetch 失败：run 判失败，绝不回退全量扫描。"""
-        self._patch_git(
-            monkeypatch, fetch_side=client.AtomGitError(200, "bad object"))
-        execute_run(Trigger.commit_sha("c" * 40), settings, db)
-        engine.scan_changed.assert_not_called()
-        assert db.list_runs()[0]["status"] == "failed"
-
-
-class TestMasking:
-    """脱敏：默认/命名/TR_* token 一律替换为 ***，落库文本无明文。"""
-
-    def test_masker_replaces_all_kinds(self, settings):
-        masker = SecretMasker([DEFAULT_TOKEN, settings.admin_token,
-                               settings.webhook_token, settings.dash_token])
-        masker.add_secrets([VAULT_TOKEN, ""])
-        text = (f"{DEFAULT_TOKEN} {VAULT_TOKEN} admin-secret "
-                "webhook-secret dash-secret")
-        masked = masker.mask(text)
-        assert "***" in masked
-        for secret in (DEFAULT_TOKEN, VAULT_TOKEN, "admin-secret",
-                       "webhook-secret", "dash-secret"):
-            assert secret not in masked
-
-    def test_clone_error_masked_in_run_error_and_log(
-            self, settings, db, token_env, engine):
-        """localgit.clone 抛含 token URL 的 AtomGitError：落库无明文。"""
-        url = f"https://oauth2:{DEFAULT_TOKEN}@atomgit.com/org/repo.git"
-        engine.clone.side_effect = client.AtomGitError(
-            200, f"克隆 org/repo@默认分支 失败: fatal: {url} 鉴权失败")
-        execute_run(_push_trigger(), settings, db)
-        run = db.list_runs()[0]
-        assert run["status"] == "failed"
-        assert DEFAULT_TOKEN not in run["error"]
-        assert "oauth2:***@atomgit.com" in run["error"]
-        assert DEFAULT_TOKEN not in db.get_run(run["id"])["log"]
-
-    def test_scan_errors_masked(self, settings, db, token_env, engine):
-        engine.scan_changed.return_value = _scan(
-            errors=[{"path": "A/b/c/d",
-                     "error": f"克隆失败: {DEFAULT_TOKEN}"}])
-        execute_run(_push_trigger(), settings, db)
-        run = db.list_runs()[0]
-        repo = db.get_run_repos(run["id"])[0]
-        assert repo["status"] == "error"
-        assert DEFAULT_TOKEN not in repo["error"]
+    def test_mask_none_and_empty(self):
+        masker = runner.SecretMasker(["t"])
+        assert masker.mask(None) is None
+        assert masker.mask("") == ""
 
 
 class TestLogBuffer:
-    """日志缓冲：50 行阈值刷库、超时刷库、flush 兜底。"""
+    def _buffer(self, masker=None, sink=None):
+        sink = sink if sink is not None else []
+        db = type("DB", (), {
+            "append_log": staticmethod(
+                lambda sid, text: sink.append((sid, text)))})
+        masker = masker or runner.SecretMasker()
+        return runner.LogBuffer(db, 1, masker), sink
 
-    def test_flush_on_line_threshold(self, settings, db):
-        run_id = db.create_run("push", True)
-        buf = LogBuffer(db, run_id, SecretMasker())
+    def test_flush_on_line_limit(self):
+        buffer, sink = self._buffer(masker=runner.SecretMasker(["tok"]))
         for i in range(runner.LOG_FLUSH_LINES):
-            buf(f"line {i}")
-        assert "line 0" in db.get_run(run_id)["log"]
-        buf("tail")
-        assert "tail" not in db.get_run(run_id)["log"]
-        buf.flush()
-        assert "tail" in db.get_run(run_id)["log"]
+            buffer(f"line-{i} tok")
+        assert len(sink) == 1
+        assert sink[0][1].count("tok") == 0
+        assert "***" in sink[0][1]
 
-    def test_flush_on_time_interval(self, settings, db):
-        run_id = db.create_run("push", True)
-        buf = LogBuffer(db, run_id, SecretMasker())
-        buf("first")
-        buf._last_flush -= runner.LOG_FLUSH_INTERVAL + 1
-        buf("second")
-        assert "second" in db.get_run(run_id)["log"]
+    def test_flush_on_interval(self, monkeypatch):
+        buffer, sink = self._buffer()
+        clock = {"now": 0.0}
+        monkeypatch.setattr(runner.time, "monotonic", lambda: clock["now"])
+        buffer._last_flush = 0.0
+        clock["now"] = runner.LOG_FLUSH_INTERVAL + 1
+        buffer("line")
+        assert len(sink) == 1
 
-
-class TestRunFinalizer:
-    """收尾：last_run_at 回写、push 事件回填 run_id、workdir 清理。"""
-
-    def test_finalize_on_success(self, settings, db, token_env, engine):
-        eid = db.record_push_event("refs/heads/main", "b01", "a02", True)
-        trigger = _push_trigger(push_event_ids=[eid])
-        execute_run(trigger, settings, db)
-        run = db.list_runs()[0]
-        assert db.kv_get("last_run_at") is not None
-        row = db._one("SELECT run_id FROM push_events WHERE id = ?", (eid,))
-        assert row["run_id"] == run["id"]
-        assert not os.path.exists(
-            os.path.join(settings.work_dir, f"run-{run['id']}"))
-
-    def test_finalize_on_exception(self, settings, db, token_env, engine):
-        eid = db.record_push_event("refs/heads/main", "b01", "a02", True)
-        engine.clone.side_effect = RuntimeError("disk full")
-        execute_run(_push_trigger(push_event_ids=[eid]), settings, db)
-        run = db.list_runs()[0]
-        assert run["status"] == "failed"
-        assert db.kv_get("last_run_at") is not None
-        row = db._one("SELECT run_id FROM push_events WHERE id = ?", (eid,))
-        assert row["run_id"] == run["id"]
-        assert not os.path.exists(settings.work_dir) or \
-            not os.listdir(settings.work_dir)
+    def test_explicit_flush(self):
+        buffer, sink = self._buffer()
+        buffer("a")
+        assert sink == []
+        buffer.flush()
+        assert sink == [(1, "a\n")]
+        buffer.flush()  # 无缓冲时不再写
+        assert len(sink) == 1
 
 
-class TestWorker:
-    """Worker 线程：消费队列、协作式停止。"""
+class TestExecuteSubmission:
+    def test_success_creates_prs(self, db, settings, monkeypatch):
+        calls = _mock_source(monkeypatch, [
+            "CANN/9.1.0/hccl/docs/a.md", "CANN/9.1.0/sip/docs/b.md"])
+        submitted = []
 
-    def test_worker_executes_queued_trigger(
-            self, settings, db, token_env, engine):
-        queue = CoalescingQueue()
-        worker = Worker(queue, settings, db, poll_timeout=0.05)
+        def fake_submit_repo(org, repo, branch, files, token, log=print):
+            submitted.append((org, repo, branch, files, token))
+            log(f"正在提交 {org}/{repo}，token={token}")
+            if repo == "sip":
+                return {"ok": True, "pr_existed": True, "pr_number": 2,
+                        "pr_url": "https://atomgit.com/CANN/sip/merge_requests/2"}
+            return {"ok": True, "pr_existed": False, "pr_number": 1,
+                    "pr_url": "https://atomgit.com/CANN/hccl/merge_requests/1",
+                    "pr_title": "新增 a.md 英文版文档"}
+
+        monkeypatch.setattr(runner.service, "submit_repo", fake_submit_repo)
+        sid = _prepare(db)
+
+        runner.execute_submission(sid, CALLER_TOKEN, settings, db)
+
+        submission = db.get_submission(sid)
+        assert submission["status"] == "success"
+        items = {i["repo"]: i for i in db.get_submission_items(sid)}
+        assert items["hccl"]["status"] == "submitted"
+        assert items["hccl"]["pr_number"] == 1
+        assert items["hccl"]["pr_title"] == "新增 a.md 英文版文档"
+        assert items["hccl"]["pr_existed"] == 0
+        assert items["sip"]["status"] == "already_exists"
+        assert items["sip"]["pr_existed"] == 1
+        # 权威仓用服务侧 token、默认分支（ref 留空）、blobs=True
+        assert calls["clone"][0]["token"] == SOURCE_TOKEN
+        assert calls["clone"][0]["ref"] == ""
+        assert calls["clone"][0]["blobs"] is True
+        # 目标仓用调用方 token；文件内容按 base64 传入
+        assert all(c[4] == CALLER_TOKEN for c in submitted)
+        assert submitted[0][3][0]["target_path"] == "docs/a.md"
+        assert base64.b64decode(
+            submitted[0][3][0]["content_b64"]) == b"hello"
+        # 调用方 token 不落库（日志已脱敏）
+        log = db.get_submission_log(sid)
+        assert CALLER_TOKEN not in log
+        assert "***" in log
+        # 工作目录清理
+        from pathlib import Path
+        assert not (Path(settings.work_dir) / "submissions" /
+                    f"submission-{sid}").exists()
+
+    def test_missing_source_file_fails_whole_submission(self, db, settings,
+                                                       monkeypatch):
+        _mock_source(monkeypatch, ["CANN/9.1.0/hccl/docs/a.md"])
+        monkeypatch.setattr(
+            runner.service, "submit_repo",
+            lambda *a, **kw: pytest.fail("不应提交"))
+        sid = _prepare(db)
+
+        runner.execute_submission(sid, CALLER_TOKEN, settings, db)
+
+        submission = db.get_submission(sid)
+        assert submission["status"] == "failed"
+        assert "不存在" in submission["error"]
+        assert "CANN/9.1.0/sip/docs/b.md" in submission["error"]
+        for item in db.get_submission_items(sid):
+            assert item["status"] == "failed"
+            assert item["error"] == submission["error"]
+
+    def test_dry_run_does_not_submit(self, db, settings, monkeypatch):
+        _mock_source(monkeypatch, [
+            "CANN/9.1.0/hccl/docs/a.md", "CANN/9.1.0/sip/docs/b.md"])
+        monkeypatch.setattr(
+            runner.service, "submit_repo",
+            lambda *a, **kw: pytest.fail("dry_run 不应提交"))
+        sid = _prepare(db, dry_run=True)
+
+        runner.execute_submission(sid, CALLER_TOKEN, settings, db)
+
+        assert db.get_submission(sid)["status"] == "success"
+        assert [i["status"] for i in db.get_submission_items(sid)] == \
+            ["would_submit", "would_submit"]
+
+    def test_partial_failure(self, db, settings, monkeypatch):
+        _mock_source(monkeypatch, [
+            "CANN/9.1.0/hccl/docs/a.md", "CANN/9.1.0/sip/docs/b.md"])
+
+        def fake_submit_repo(org, repo, branch, files, token, log=print):
+            if repo == "sip":
+                return {"ok": False, "stage": "create_pr", "error": "boom"}
+            return {"ok": True, "pr_number": 1, "pr_url": "u"}
+
+        monkeypatch.setattr(runner.service, "submit_repo", fake_submit_repo)
+        sid = _prepare(db)
+
+        runner.execute_submission(sid, CALLER_TOKEN, settings, db)
+
+        assert db.get_submission(sid)["status"] == "partial"
+        items = {i["repo"]: i for i in db.get_submission_items(sid)}
+        assert items["hccl"]["status"] == "submitted"
+        assert items["sip"]["status"] == "failed"
+        assert items["sip"]["stage"] == "create_pr"
+        assert items["sip"]["error"] == "boom"
+
+    def test_all_failed(self, db, settings, monkeypatch):
+        _mock_source(monkeypatch, [
+            "CANN/9.1.0/hccl/docs/a.md", "CANN/9.1.0/sip/docs/b.md"])
+        monkeypatch.setattr(
+            runner.service, "submit_repo",
+            lambda *a, **kw: {"ok": False, "stage": "fork_repo",
+                              "error": "nope"})
+        sid = _prepare(db)
+
+        runner.execute_submission(sid, CALLER_TOKEN, settings, db)
+
+        assert db.get_submission(sid)["status"] == "failed"
+        assert all(i["status"] == "failed"
+                   for i in db.get_submission_items(sid))
+
+    def test_submit_exception_becomes_item_failure(self, db, settings,
+                                                   monkeypatch):
+        _mock_source(monkeypatch, [
+            "CANN/9.1.0/hccl/docs/a.md", "CANN/9.1.0/sip/docs/b.md"])
+
+        def boom(*a, **kw):
+            raise RuntimeError(f"网络异常 token={CALLER_TOKEN}")
+
+        monkeypatch.setattr(runner.service, "submit_repo", boom)
+        sid = _prepare(db)
+
+        runner.execute_submission(sid, CALLER_TOKEN, settings, db)
+
+        submission = db.get_submission(sid)
+        assert submission["status"] == "failed"
+        for item in db.get_submission_items(sid):
+            assert item["status"] == "failed"
+            assert item["stage"] == "exception"
+            assert CALLER_TOKEN not in (item["error"] or "")
+        assert CALLER_TOKEN not in db.get_submission_log(sid)
+
+    def test_noop_item(self, db, settings, monkeypatch):
+        _mock_source(monkeypatch, [
+            "CANN/9.1.0/hccl/docs/a.md", "CANN/9.1.0/sip/docs/b.md"])
+        monkeypatch.setattr(
+            runner.service, "submit_repo",
+            lambda *a, **kw: {"ok": True, "noop": True})
+        sid = _prepare(db)
+
+        runner.execute_submission(sid, CALLER_TOKEN, settings, db)
+
+        assert db.get_submission(sid)["status"] == "success"
+        assert [i["status"] for i in db.get_submission_items(sid)] == \
+            ["noop", "noop"]
+
+    @pytest.mark.parametrize("token", ["", "   "])
+    def test_empty_caller_token_fails(self, db, settings, token):
+        sid = _prepare(db)
+        runner.execute_submission(sid, token, settings, db)
+        submission = db.get_submission(sid)
+        assert submission["status"] == "failed"
+        assert "调用方 AtomGit token 为空" in submission["error"]
+
+    def test_missing_source_token_fails(self, db, settings, monkeypatch):
+        monkeypatch.setattr(runner.secrets, "get",
+                            lambda name, default="": default)
+        sid = _prepare(db)
+        runner.execute_submission(sid, CALLER_TOKEN, settings, db)
+        submission = db.get_submission(sid)
+        assert submission["status"] == "failed"
+        assert "ATOMGIT_TOKEN" in submission["error"]
+
+    def test_only_queued_submission_executes(self, db, settings, monkeypatch):
+        sid = _prepare(db)
+        db.finish_submission(sid, "success")
+        calls = _mock_source(monkeypatch)
+        runner.execute_submission(sid, CALLER_TOKEN, settings, db)
+        assert calls["clone"] == []          # 未重新执行
+        assert db.get_submission(sid)["status"] == "success"
+
+    def test_unknown_submission_is_noop(self, db, settings):
+        runner.execute_submission(999, CALLER_TOKEN, settings, db)
+
+
+class TestSubmissionWorker:
+    def test_executes_pushed_tasks_then_stops(self, db, settings, monkeypatch):
+        executed = []
+        done = threading.Event()
+
+        def fake_execute(submission_id, token, settings_, db_):
+            executed.append((submission_id, token))
+            done.set()
+
+        monkeypatch.setattr(runner, "execute_submission", fake_execute)
+        queue = SubmissionQueue(maxsize=2)
+        worker = runner.SubmissionWorker(queue, settings, db,
+                                         poll_timeout=0.01)
         worker.start()
-        try:
-            queue.push(_push_trigger())
-            deadline = time.monotonic() + 5
-            while not db.list_runs() and time.monotonic() < deadline:
-                time.sleep(0.02)
-            assert db.list_runs()[0]["status"] == "success"
-        finally:
-            worker.stop()
-            worker.join(timeout=5)
-        assert not worker.alive
-
-    def test_stop_is_cooperative(self, settings, db):
-        """stop() 不打断进行中的 run：run 跑完后线程才退出。"""
-        started = threading.Event()
-        release = threading.Event()
-
-        def slow_run(trigger, s, d):
-            started.set()
-            release.wait(timeout=5)
-
-        queue = CoalescingQueue()
-        worker = Worker(queue, settings, db, poll_timeout=0.05)
-        with patch.object(runner, "execute_run", side_effect=slow_run):
-            worker.start()
-            try:
-                queue.push(_push_trigger())
-                assert started.wait(timeout=5)
-                worker.stop()
-                time.sleep(0.2)
-                assert worker.alive  # run 未结束，线程不退出
-                release.set()
-                worker.join(timeout=5)
-                assert not worker.alive
-            finally:
-                release.set()
-                worker.stop()
-                worker.join(timeout=5)
-
-    def test_stop_on_idle_exits(self, settings, db):
-        queue = CoalescingQueue()
-        worker = Worker(queue, settings, db, poll_timeout=0.05)
-        worker.start()
+        assert worker.alive
+        assert queue.push(7, "tok") is True
+        assert done.wait(2)
         worker.stop()
-        worker.join(timeout=5)
+        worker.join(timeout=2)
         assert not worker.alive
-
-
-class TestNamedTokenFailClosed:
-    """命名 token 缺失/非法时该仓直接失败（fail-closed），不回退默认 token。"""
-
-    def test_missing_named_token_fails_closed(
-            self, settings, db, token_env, engine, auto_pr_on):
-        """配置引用的名称在 Vault 无对应键：不提交，记 token_missing。"""
-        set_shadow(db, False)
-        db.upsert_repo_config("Ascend", "msprof", token_name="gone")
-        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
-        execute_run(_push_trigger(), settings, db)
-        engine.submit_repo.assert_not_called()
-        run = db.list_runs()[0]
-        repo = db.get_run_repos(run["id"])[0]
-        assert repo["status"] == "submit_failed"
-        assert repo["stage"] == "token_missing"
-
-    def test_invalid_named_token_name_fails_closed(
-            self, settings, db, token_env, engine, auto_pr_on):
-        """配置里存了非法名称（如带连字符）：同样判失败，不提交。"""
-        set_shadow(db, False)
-        db.upsert_repo_config("Ascend", "msprof", token_name="bot-a")
-        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
-        execute_run(_push_trigger(), settings, db)
-        engine.submit_repo.assert_not_called()
-        repo = db.get_run_repos(db.list_runs()[0]["id"])[0]
-        assert repo["stage"] == "token_missing"
-
-    def test_named_token_masked_in_log(
-            self, settings, db, token_env, engine, auto_pr_on, monkeypatch):
-        """命名 token 与其他秘密一样全链路脱敏。"""
-        monkeypatch.setenv("TR_TOKEN_MSPROF_BOT", VAULT_TOKEN)
-        set_shadow(db, False)
-        db.upsert_repo_config("Ascend", "msprof", token_name="msprof_bot")
-        engine.scan_changed.return_value = _scan(changed=[_changed_item()])
-        engine.submit_repo.side_effect = Exception(
-            f"push 失败 https://{VAULT_TOKEN}@atomgit.com/x/y")
-        execute_run(_push_trigger(), settings, db)
-        run = db.list_runs()[0]
-        assert run["status"] == "partial"
-        repo = db.get_run_repos(run["id"])[0]
-        assert VAULT_TOKEN not in (db.get_run(run["id"])["log"] or "")
-        assert VAULT_TOKEN not in (repo["error"] or "")
-
-
+        assert executed == [(7, "tok")]

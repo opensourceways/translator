@@ -1,1 +1,1 @@
-"""translator 服务化 Web 应用包：webhook 入口、Worker、Poller 与 Dashboard。"""
+"""translator 服务化 Web 应用包：提交 API、任务 Worker 与 PR 状态派生。"""

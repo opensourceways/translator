@@ -65,10 +65,9 @@ pipeline {
         stage('AutoPR') {
             steps {
                 // Token 由任务的 Password Parameter 注入为环境变量；
-                // 引擎不再读取权威仓的 token_rules.json，扫描与提交统一
-                // 使用默认 ATOMGIT_TOKEN（按仓库细分的命名 token 仅由
-                // 服务侧 webapp.token_router 从 Vault 解析）
-                sh '.venv/bin/python -m translator_ci'
+                // CLI 模式统一使用默认 ATOMGIT_TOKEN（服务模式的调用方
+                // token 由 HTTP 请求头传入，与此无关）
+                sh '.venv/bin/python -m translator'
             }
         }
     }
