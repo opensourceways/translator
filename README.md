@@ -13,7 +13,7 @@ flowchart LR
     D --> E[幂等提交: Fork → 固定分支 → 单 commit → PR]
     E --> F[目标社区仓库的 Pull Request]
     B --> G[(SQLite: 任务/逐仓结果/日志)]
-    G --> H[GET /api/v1/submissions/{id}]
+    G --> H["GET /api/v1/submissions/{id}"]
 ```
 
 ## 工作方式
