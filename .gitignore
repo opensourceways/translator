@@ -8,3 +8,5 @@ build/
 data/
 selfcheck.md
 container-selfcheck.md
+.trae/
+ppt-outline.md
