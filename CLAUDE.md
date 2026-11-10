@@ -23,7 +23,6 @@ translator：AtomGit 译稿自动提 PR 服务。调用方通过 HTTP API 提交
 | `tests/` | pytest，全部 mock 不触网 |
 | `deploy/k8s/` | K8s 清单（Namespace/ConfigMap/PVC/Deployment/Service/Ingress） |
 | `Dockerfile` `docker-compose.yml` | 一体化 API 服务容器 |
-| `Jenkinsfile` | 历史遗留（translator-ci 时代），仅存档参考，勿用于新部署 |
 
 ## 常用命令
 

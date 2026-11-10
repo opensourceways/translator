@@ -154,9 +154,9 @@ curl http://localhost:8000/healthz   # {"status":"ok","queue":0,...}
 - 进程崩溃靠 `restart: unless-stopped` + 启动恢复兜底：排队/执行中的任务
   统一标记 `failed`，超过 `TR_SUBMISSION_RETENTION_DAYS` 的历史任务自动清理
 
-## CLI / Jenkins 模式（历史）
+## CLI 模式（历史）
 
-引擎包可脱离服务单独跑（Jenkinsfile 为 translator-ci 时代的存档参考）：
+引擎包可脱离服务单独跑（CLI 为 translator-ci 时代的历史模式）：
 
 ```bash
 pip install -r requirements.txt
@@ -187,7 +187,6 @@ translator/
 ├── Dockerfile             # openEuler 24.03 + git（Python 3.11），uvicorn 工厂模式（workers=1）
 ├── docker-compose.yml     # env_file + ./data:/data 持久化
 ├── .env.example           # 全部配置项模板（token 本体不落仓库）
-├── Jenkinsfile            # 历史存档（translator-ci 时代），勿用于新部署
 ├── CLAUDE.md              # AI 助手上手指南（硬性约束、配置约定）
 ├── translator/            # 引擎包
 │   ├── cli.py             # 命令行入口（参数、退出码、stdout 日志）

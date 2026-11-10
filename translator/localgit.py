@@ -8,7 +8,7 @@ git 命令本地完成索引与对比——git 协议不经过 API，不受该�
 少量写操作。
 
 克隆策略：
-- 源（译稿权威）仓库由 Jenkinsfile 克隆，用 --no-checkout 全量浅克隆，
+- 源（译稿权威）仓库由外部 CI 克隆，用 --no-checkout 全量浅克隆，
   git cat-file 读内容完全本地、即时。
 - 目标仓库由本模块克隆，用 --filter=blob:none 只拉提交与目录树（体积
   小、快），对比只需目录树，无需 blob；失败不拉取。

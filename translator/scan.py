@@ -265,7 +265,7 @@ def scan_changed(keyword="", token="", token_resolver=None, log=print,
     Token）：error 非空时该仓记入 errors 并跳过；未提供回调时全部使用
     默认 token。
 
-    本地化模式（source_repo_dir 非空，通常由 Jenkinsfile 克隆权威仓库
+    本地化模式（source_repo_dir 非空，通常由外部 CI 克隆权威仓库
     后通过 ATOMGIT_LOCAL_SOURCE_DIR 注入）：索引与列文件走本地 git，
     目标仓库按需浅克隆（clone_root 指定目录）后本地对比，彻底绕开 API
     限流；clone_root 未设置时仅索引本地化、对比回退 API。

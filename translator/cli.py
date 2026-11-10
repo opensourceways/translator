@@ -7,7 +7,7 @@
 不存在时回退环境变量（Jenkins 凭据注入），不读任何本地配置文件：
     ATOMGIT_TOKEN            默认 Token（必需；读译稿权威仓库与提交均用它）
 
-本地化模式（绕开 API 限流，由 Jenkinsfile 克隆权威仓库后注入）：
+本地化模式（绕开 API 限流，由外部 CI 克隆权威仓库后注入）：
     ATOMGIT_LOCAL_SOURCE_DIR 权威仓库的本地克隆目录（设置后索引/列文件
                              走本地 git，不再调用 API）
     ATOMGIT_CLONE_DIR        目标仓库本地克隆目录（设置后目标对比也本地
@@ -54,7 +54,7 @@ def main(argv=None):
         _log("错误：未配置 ATOMGIT_TOKEN（secrets 文件或环境变量，默认 Token）")
         return 1
 
-    # 本地化模式：权威仓库已在 agent 上克隆（Jenkinsfile 注入）
+    # 本地化模式：权威仓库已在 agent 上克隆（外部 CI 注入）
     local_source_dir = os.environ.get("ATOMGIT_LOCAL_SOURCE_DIR", "").strip() or None
     clone_root = os.environ.get("ATOMGIT_CLONE_DIR", "").strip() or None
     if local_source_dir:
