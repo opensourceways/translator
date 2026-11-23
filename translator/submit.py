@@ -10,6 +10,8 @@ submit_all:  批量提交（单仓失败不中断）
 单 commit 覆盖固定分支；内容无变化时不强推（避免 PR 噪音）。历史
 遗留的多 commit 固定分支会被强制压缩为单个 commit。重建以目标分支
 为基点，源目录中已消失的旧文件自然不在新树中，无需清理逻辑。
+无新变更且无未合并 PR 时，回传该固定分支上的历史 PR（优先已合并），
+让调用方仍能拿到 PR 链接做合并状态判定。
 """
 
 import os
@@ -161,6 +163,46 @@ def _make_pr_title_body(succeeded):
             lines.append(f"- `{f['path']}`")
 
     return title, "\n".join(lines)
+
+
+def _branch_url(org, repo, branch):
+    """目标仓分支链接：内容已在目标分支时的「已合入」标识。
+
+    ``/api/v1/prs/status`` 认得这种链接并直接返回 ``state=merged``，
+    让调用方据此把任务推进到「已上线」，而不必发明一个不存在的 PR。
+    """
+    return f"https://atomgit.com/{org}/{repo}/tree/{branch}"
+
+
+def _find_previous_pr(org, repo, head, branch, token, log):
+    """回捞该 head/base 上的历史 PR（含已合并/已关闭）。
+
+    noop 场景（内容已与目标分支一致、且无未合并 PR）时仍需给出 PR 链接，
+    调用方才能据其判定「已上线」；这里按「已合并优先、编号最大优先」取
+    最近一条。查询失败一律返回 None，不影响主流程。
+
+    Returns:
+        dict | None: {"pr_url", "pr_number"}。
+    """
+    for state in ("all", "closed"):
+        try:
+            prs = client.list_pull_requests(org, repo, token, state=state)
+        except Exception as exc:
+            log(f"回查历史 PR 失败（state={state}）：{exc}")
+            continue
+        matched = [p for p in prs if _pr_matches(p, head, branch)]
+        if not matched:
+            continue
+        matched.sort(
+            key=lambda p: (bool(p.get("merged") or p.get("merged_at")),
+                           p.get("number") or 0),
+            reverse=True)
+        best = matched[0]
+        number = best.get("number")
+        url = (best.get("html_url")
+               or f"https://atomgit.com/{org}/{repo}/merge_requests/{number}")
+        return {"pr_url": url, "pr_number": number}
+    return None
 
 
 def _pr_matches(pr, head, branch):
@@ -334,8 +376,30 @@ def submit_repo(org, repo, branch, files, token, log=print):
 
     # 无已开 PR 且本次无新变更（或仅压缩了存量历史）：没有可创建的 PR
     if not succeeded:
-        log("无新变更且无已开 PR，本次无需创建 PR")
-        return {"ok": True, "noop": True, "head_branch": head_branch}
+        previous = _find_previous_pr(org, repo, head, branch, token, log)
+        if previous:
+            log(f"无新变更且无未合并 PR，回传历史 PR: {previous['pr_url']}")
+            return {
+                "ok": True,
+                "pr_existed": True,
+                "pr_url": previous["pr_url"],
+                "pr_number": previous["pr_number"],
+                "head_branch": head_branch,
+                "succeeded": succeeded,
+            }
+        # 连历史 PR 都没有：说明内容已在目标分支（Fork 分支已与上游同步），
+        # 业务上等价于「已合入」。返回目标分支链接，由 /api/v1/prs/status
+        # 识别为 merged，避免调用方把任务永久停在「已提交PR」。
+        log("无新变更且无历史 PR：内容已在目标分支，回传目标分支链接")
+        return {
+            "ok": True,
+            "pr_existed": True,
+            "content_exists": True,
+            "pr_url": _branch_url(org, repo, branch),
+            "pr_number": None,
+            "head_branch": head_branch,
+            "succeeded": succeeded,
+        }
 
     # ── 阶段 6：创建 Pull Request ──
     pr_title, pr_body = _make_pr_title_body(succeeded)

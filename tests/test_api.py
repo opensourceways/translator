@@ -13,7 +13,7 @@ from webapp.config import Settings
 API_KEY = "test-key"
 CALLER_TOKEN = "caller-token"
 HEADERS = {"X-API-Key": API_KEY, "X-AtomGit-Token": CALLER_TOKEN}
-PATH = "CANN/9.1.0/hccl/docs/en/a.md"
+PATH = "CANN/hccl/9.1.0/docs/en/a.md"
 
 
 def _finish_fake(submission_id, token, settings, db):
@@ -133,7 +133,7 @@ class TestCreateSubmission:
         assert resp.status_code == 422
 
     def test_too_many_paths_422(self, open_client, settings):
-        paths = [f"CANN/9.1.0/hccl/docs/{i}.md" for i in range(6)]
+        paths = [f"CANN/hccl/9.1.0/docs/{i}.md" for i in range(6)]
         with open_client(settings) as (client_, _app):
             resp = client_.post("/api/v1/submissions",
                                 json={"paths": paths}, headers=HEADERS)
@@ -152,8 +152,8 @@ class TestCreateSubmission:
             assert payload["items"][0]["source_paths"] == [PATH]
 
     def test_grouping_merges_same_repo(self, open_client, settings):
-        body = {"paths": [PATH, "CANN/9.1.0/hccl/docs/en/b.md",
-                          "CANN/9.1.0/sip/docs/en/a.md"]}
+        body = {"paths": [PATH, "CANN/hccl/9.1.0/docs/en/b.md",
+                          "CANN/sip/9.1.0/docs/en/a.md"]}
         with open_client(settings) as (client_, _app):
             resp = client_.post("/api/v1/submissions", json=body,
                                 headers=HEADERS)
@@ -161,7 +161,7 @@ class TestCreateSubmission:
         items = resp.json()["items"]
         assert len(items) == 2
         hccl = [i for i in items if i["repo"] == "hccl"][0]
-        assert hccl["source_paths"] == [PATH, "CANN/9.1.0/hccl/docs/en/b.md"]
+        assert hccl["source_paths"] == [PATH, "CANN/hccl/9.1.0/docs/en/b.md"]
         assert hccl["target_paths"] == ["docs/en/a.md", "docs/en/b.md"]
 
     def test_returns_202_and_get_by_request_id(self, open_client, settings):
@@ -322,6 +322,58 @@ class TestPrStatus:
         assert pr["state"] == "open"
         assert pr["review_total"] == 2 and pr["review_accepted"] == 1
         assert pr["derived"]["key"] == "reviewing"
+
+    def test_by_pr_url_gitcode_domain(self, open_client, settings,
+                                      monkeypatch):
+        """gitcode.com 与 atomgit.com 是同一后端，两种域名的 PR 链接都接受。"""
+        monkeypatch.setattr(api.client, "get_pull_request",
+                            lambda org, repo, number, token: self._pr())
+        with open_client(settings) as (client_, _app):
+            resp = client_.get(
+                "/api/v1/prs/status",
+                params={"pr_url": "https://gitcode.com/CANN/hccl/"
+                                  "merge_requests/12"},
+                headers={"X-API-Key": API_KEY})
+        assert resp.status_code == 200
+        assert resp.json()["prs"][0]["number"] == 12
+
+    def test_branch_url_means_content_already_in_branch(self, open_client,
+                                                        settings,
+                                                        monkeypatch):
+        """noop 回传的目标分支链接 → 合成 merged 状态，不查 AtomGit。"""
+        def boom(*args, **kwargs):
+            raise AssertionError("不应查询 AtomGit")
+
+        monkeypatch.setattr(api.client, "get_pull_request", boom)
+        with open_client(settings) as (client_, _app):
+            resp = client_.get(
+                "/api/v1/prs/status",
+                params={"pr_url": "https://atomgit.com/Ascend/msprof/"
+                                  "tree/26.1.0"},
+                headers={"X-API-Key": API_KEY})
+        assert resp.status_code == 200
+        pr = resp.json()["prs"][0]
+        assert pr["state"] == "merged"
+        assert pr["synthetic"] is True
+        assert pr["branch"] == "26.1.0"
+        assert pr["derived"]["key"] == "merged"
+        assert resp.json()["errors"] == []
+
+    def test_branch_url_needs_no_atomgit_token(self, settings, monkeypatch):
+        """合成状态不依赖 ATOMGIT_TOKEN（缺 token 也应返回 200）。"""
+
+        def no_token(name, default=""):
+            return default
+
+        monkeypatch.setattr(api.secrets, "get", no_token)
+        app = api.create_app(settings)
+        with TestClient(app) as client_:
+            resp = client_.get(
+                "/api/v1/prs/status",
+                params={"pr_url": "https://gitcode.com/CANN/hccl/tree/9.2.0"},
+                headers={"X-API-Key": API_KEY})
+        assert resp.status_code == 200
+        assert resp.json()["prs"][0]["state"] == "merged"
 
     def test_by_org_repo_number_merged(self, open_client, settings,
                                        monkeypatch):

@@ -1,15 +1,14 @@
 # translator：译稿自动提 PR 服务
 
-调用方通过 HTTP API 提交译稿权威仓库
-（AtomGit 私有仓库 `Computing_Ecosystem_Docs/Computing_Ecosystem_Docs-EN`）
-中的文件路径，服务读取这些文件内容后，向对应的目标社区仓库幂等提交
-Pull Request；任务异步执行、逐仓库落库，可通过 API 查询结果与 PR 状态。
+调用方通过 HTTP API 提交**目标仓坐标**（组织/仓库/分支/文件相对路径），
+服务按权威仓目录布局读取对应译稿内容，向该目标仓库幂等提交 Pull
+Request；任务异步执行、逐仓库落库，可通过 API 查询结果与 PR 状态。
 
 ```mermaid
 flowchart LR
     A[调用方<br/>paths + AtomGit token] -->|POST /api/v1/submissions| B[translator 服务<br/>FIFO 队列 + 唯一 Worker]
     B --> C[解析路径: org/repo/branch]
-    C --> D[克隆权威仓默认分支<br/>校验并读取文件]
+    C --> D[克隆权威仓默认分支<br/>精确解析并读取文件]
     D --> E[幂等提交: Fork → 固定分支 → 单 commit → PR]
     E --> F[目标社区仓库的 Pull Request]
     B --> G[(SQLite: 任务/逐仓结果/日志)]
@@ -18,9 +17,15 @@ flowchart LR
 
 ## 工作方式
 
-- **路径驱动**：请求体给出权威仓内文件路径（如
-  `Ascend/MindStudio/26.2.0/msprof/docs/en/a.md`），服务按组织目录约定
-  解析出目标 `org/repo/branch`，无需调用方指定版本或分支
+- **路径驱动**：请求体给出目标仓坐标（如
+  `Ascend/msagent/26.2.0/docs/en/agent_guide/accuracy.md` 表示提交到
+  `Ascend/msagent` 仓的 `26.2.0` 分支、仓内路径
+  `docs/en/agent_guide/accuracy.md`），调用方无需了解权威仓目录布局，
+  也不用指定版本或分支
+- **权威仓路径精确解析**：Worker 克隆权威仓后按组织布局建索引 ——
+  `Ascend` 为 `org/产品/版本/仓库/...`，`CANN` 等为 `org/版本/仓库/...`，
+  少数仓库本身是顶层目录（如 `Ascend/docs/子产品/版本/...`）；目标坐标
+  唯一命中才提交，找不到或命中多个一律整单失败，不做模糊匹配
 - **同仓合并**：同一 `(org, repo, branch)` 的多个路径合并为一个 PR；
   全部文件一次校验（任一缺失/超限则整单失败），避免部分 PR 误创建
 - **读取与提交分离**：权威仓克隆/读取使用服务侧默认 `ATOMGIT_TOKEN`；
@@ -31,6 +36,10 @@ flowchart LR
   全部变更合并为**单个 commit** 后 force push（分支为工具独占，重建安全）。
   内容无变化时不强推；目标仓库已存在同一 head/base 的未合并 PR 时不重复
   创建，PR diff 随分支重建自动更新
+- **内容已在目标分支时**：不创建 PR，回传该目标仓库的分支链接
+  （`https://atomgit.com/<org>/<repo>/tree/<branch>`）；`/api/v1/prs/status`
+  对这种链接直接回 `state=merged`（`synthetic=true`），调用方据此把任务
+  推进到「已上线」，而不是卡在「已提交PR」
 - **目标路径按仓改写**：个别目标仓库的内容根与源目录结构不同，按
   `translator/index.py` 中的 `TARGET_PATH_RULES` 改写（`CANN/docs` 补
   `docs/` 前缀；`CANN/release-management` 只有 master 分支、版本号是
@@ -50,11 +59,12 @@ curl -X POST http://localhost:8000/api/v1/submissions \
   -H "X-API-Key: <TR_API_KEY>" \
   -H "X-AtomGit-Token: <调用方 AtomGit token>" \
   -H "Content-Type: application/json" \
-  -d '{"paths": ["Ascend/MindStudio/26.2.0/msprof/docs/en/a.md"],
+  -d '{"paths": ["Ascend/msagent/26.2.0/docs/en/agent_guide/accuracy.md"],
        "wait": true, "request_id": "release-26.2.0-001"}'
 ```
 
-- `paths`（必填）：权威仓内相对路径数组，单次上限 `TR_MAX_PATHS`
+- `paths`（必填）：目标仓坐标数组（`组织/仓库/分支/文件相对路径`），
+  单次上限 `TR_MAX_PATHS`
 - `wait`（可选，默认 false）：在请求内等待任务结束（上限
   `TR_WAIT_TIMEOUT` 秒）；完成返回 200，超时返回 202 + `request_id`
 - `request_id`（可选）：调用方幂等键，重复提交同一值直接返回已有任务；
@@ -91,6 +101,10 @@ curl "http://localhost:8000/api/v1/prs/status?request_id=<request_id>" \
 
 实时直查 AtomGit（不走缓存），返回含 `derived` 派生状态（CI 标签 →
 状态与下一步指引）。查询使用服务侧默认 `ATOMGIT_TOKEN`。
+
+例外：`pr_url` 传目标仓分支链接（`.../tree/<branch>`，提交时内容已在
+目标分支的情况下回传）时不查 AtomGit，直接返回 `state=merged` 且
+`synthetic=true` 的合成状态。
 
 ### 任务状态口径
 
@@ -200,7 +214,7 @@ translator/
 │   └── common.py          # 公共常量（AUTO_BRANCH_PREFIX 等）
 ├── webapp/                # 常驻 API 服务（FastAPI）
 │   ├── api.py             # create_app(settings)：提交/查询/PR 状态端点
-│   ├── paths.py           # 路径 → org/repo/branch/target_path 解析与分组
+│   ├── paths.py           # 目标仓坐标解析、分组与权威仓路径索引
 │   ├── runner.py          # Worker 线程：克隆→校验读取→逐仓提交→落库
 │   ├── prstatus.py        # PR 派生状态（CI 标签 → 状态 + 下一步指引）
 │   ├── queueing.py        # FIFO 提交队列（有界、不合并）

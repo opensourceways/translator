@@ -2,7 +2,7 @@
 
 端点：
 - GET  /healthz                      探活（无鉴权，K8s 探针用）
-- POST /api/v1/submissions           提交权威仓文件路径，异步创建 PR
+- POST /api/v1/submissions           提交目标仓文件路径，异步创建 PR
 - GET  /api/v1/submissions/{id}      查询提交任务与逐仓库结果（含日志）
 - GET  /api/v1/prs/status            实时查询 PR 状态（URL/编号/request_id）
 
@@ -13,9 +13,11 @@
   只存在于请求与 Worker 内存中，永不落库
 
 任务模型：提交落库后进入内存 FIFO 队列，由全局唯一 Worker 顺序执行；
-同一 (org, repo, branch) 的路径合并为一个 PR。``dry_run=true`` 只校验
-路径与大小，不创建 PR。``wait=true`` 在请求内等待任务结束（上限
-settings.wait_timeout），超时返回 202 与 request_id 供后续轮询。
+同一 (org, repo, branch) 的路径合并为一个 PR。``paths`` 是目标仓坐标
+（组织/仓库/分支/文件相对路径），权威仓内的实际存放路径由 Worker 在克隆
+后精确解析。``dry_run=true`` 只校验路径与大小，不创建 PR。``wait=true``
+在请求内等待任务结束（上限 settings.wait_timeout），超时返回 202 与
+request_id 供后续轮询。
 """
 
 import asyncio
@@ -43,10 +45,17 @@ log = logging.getLogger("webapp.api")
 # 调用方可选传入的幂等请求 ID：仅允许安全字符，长度受限
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
-# PR 链接解析：merge_requests 为 AtomGit 现行路径，pulls 为兼容写法
+# PR 链接解析：merge_requests 为现行路径，pulls 为兼容写法；
+# atomgit.com 与 gitcode.com 是同一后端的两个访问域名，两种都接受
 _PR_URL_RE = re.compile(
-    r"^https?://atomgit\.com/(?P<org>[^/]+)/(?P<repo>[^/]+)"
+    r"^https?://(?:atomgit|gitcode)\.com/(?P<org>[^/]+)/(?P<repo>[^/]+)"
     r"/(?:merge_requests|pulls)/(?P<number>\d+)(?:[/?#].*)?$")
+
+# 目标仓分支链接（内容已在目标分支时的「已合入」标识，由 translator/submit.py
+# 在 noop 且无历史 PR 时回传）
+_BRANCH_URL_RE = re.compile(
+    r"^https?://(?:atomgit|gitcode)\.com/(?P<org>[^/]+)/(?P<repo>[^/]+)"
+    r"/tree/(?P<branch>[^/]+)/?$")
 
 # 等待任务结束的轮询间隔（秒）
 _WAIT_POLL_INTERVAL = 0.2
@@ -96,6 +105,34 @@ def _pr_view(org, repo, number, pr):
         "review_total": (len(assignees) if assignees is not None else None),
         "review_accepted": (sum(1 for a in assignees if a.get("accept"))
                             if assignees is not None else None),
+    }
+    view["derived"] = derive(view)
+    return view
+
+
+def _branch_view(org, repo, branch, url):
+    """把「内容已在目标分支」的分支链接整理成 PR 状态对象。
+
+    不是真实 PR，但语义等价于已合入：内容已在目标分支上，调用方据此把
+    任务推进到「已上线」。``synthetic=True`` 供排查时区分。
+    """
+    view = {
+        "org": org,
+        "repo": repo,
+        "number": None,
+        "title": f"内容已在目标分支 {branch}",
+        "url": url,
+        "state": "merged",
+        "mergeable": None,
+        "draft": None,
+        "labels": None,
+        "merged_at": None,
+        "closed_at": None,
+        "created_at": None,
+        "review_total": None,
+        "review_accepted": None,
+        "synthetic": True,
+        "branch": branch,
     }
     view["derived"] = derive(view)
     return view
@@ -262,7 +299,7 @@ def create_app(settings=None):
             request: Request,
             x_atomgit_token: str = Header(default="",
                                           alias="X-AtomGit-Token")):
-        """提交权威仓文件路径，异步创建 PR。
+        """提交目标仓文件路径，异步创建 PR。
 
         请求体：{paths: [str], wait?: bool, wait_timeout?: int,
         dry_run?: bool, request_id?: str}。
@@ -365,7 +402,22 @@ def create_app(settings=None):
 
         三种用法互斥：pr_url；org+repo+number；request_id（该任务下
         全部已建 PR）。返回对象含原始信号与 derived 派生状态。
+
+        特殊：``pr_url`` 若是目标仓分支链接（``/tree/<branch>``，由
+        noop 提交回传，表示内容已在目标分支），不查 AtomGit，直接返回
+        ``state=merged`` 的合成状态。
         """
+        if pr_url:
+            if org or repo or number or request_id:
+                raise HTTPException(
+                    422, "pr_url 与 org/repo/number/request_id 不能同时使用")
+            branch_match = _BRANCH_URL_RE.match(pr_url.strip())
+            if branch_match:
+                return {"prs": [_branch_view(
+                    branch_match.group("org"), branch_match.group("repo"),
+                    branch_match.group("branch"), pr_url.strip())],
+                    "errors": []}
+
         token = secrets.get("ATOMGIT_TOKEN", "").strip()
         if not token:
             raise HTTPException(503, "服务未配置 ATOMGIT_TOKEN，无法查询 PR")
@@ -374,9 +426,6 @@ def create_app(settings=None):
         submission = None
         targets = []
         if pr_url:
-            if org or repo or number or request_id:
-                raise HTTPException(
-                    422, "pr_url 与 org/repo/number/request_id 不能同时使用")
             targets.append(_parse_pr_url(pr_url))
         elif request_id:
             if org or repo or number:

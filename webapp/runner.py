@@ -3,8 +3,9 @@
 流程：
 1. API 已把路径解析为 (org, repo, branch) 分组并落库；Worker 只消费
    (submission_id, caller_token)，token 仅存在于内存中
-2. 克隆权威仓默认分支（blobs=True）到任务工作目录，按权威仓文件树校验
-   所有路径必须存在；任一缺失即整单失败，避免部分 PR 被误创建
+2. 克隆权威仓默认分支（blobs=True）到任务工作目录，把每个目标仓坐标
+   （组织/仓库/分支/相对路径）精确解析为权威仓内文件路径；找不到或命中
+   多个即整单失败，避免部分 PR 被误创建
 3. 读取文件内容并做单文件/累计大小校验，按目标仓分组后调用
    translator.submit.submit_repo（Fork → 固定分支 → 单 commit → PR 去重）
 4. 权威仓读取使用服务侧默认 ATOMGIT_TOKEN；目标仓 Fork/PR 使用调用方
@@ -24,6 +25,7 @@ from datetime import datetime, timezone
 
 from translator import common, localgit, secrets, service
 from translator.common import MAX_FILE_SIZE, MAX_TOTAL_SIZE
+from webapp.paths import build_source_index
 
 LOG_FLUSH_LINES = 50
 LOG_FLUSH_INTERVAL = 2.0
@@ -108,11 +110,58 @@ class ValidationError(Exception):
     """提交前校验失败（路径不存在/文件过大等），整单失败。"""
 
 
-def _read_files(items, src_dir, log):
-    """读取并校验任务全部目标文件，返回 {item_id: submit files}。
+def _file_rel(meta):
+    """文件相对路径：优先用分组时写入的 rel，旧记录回退按坐标解析。"""
+    rel = meta.get("rel")
+    if rel:
+        return rel
+    segments = str(meta.get("source_path") or "").split("/")
+    return "/".join(segments[3:])
+
+
+def _resolve_sources(items, index):
+    """把每个文件的目标仓坐标解析为权威仓内路径（精确匹配，不猜）。
+
+    Args:
+        items: DB 中的提交结果项（含 org/repo/branch/files）。
+        index: ``webapp.paths.SourceIndex``。
+
+    Returns:
+        (resolved, missing, ambiguous)：resolved 为
+        {(item_id, source_path): 权威仓路径}；missing 为「权威仓中找不到」的
+        说明；ambiguous 为「命中多个、无法确定」的说明。
+    """
+    resolved, missing, ambiguous = {}, [], []
+    for item in items:
+        label = f"{item['org']}/{item['repo']}@{item['branch']}"
+        for meta in item["files"]:
+            rel = _file_rel(meta)
+            hits = index.candidates(item["org"], item["repo"],
+                                    item["branch"], rel)
+            if len(hits) == 1:
+                resolved[(item["id"], meta["source_path"])] = hits[0]
+            elif not hits:
+                missing.append(f"{meta['source_path']}（{label} 下无 {rel}）")
+            else:
+                ambiguous.append(
+                    f"{meta['source_path']} -> " + " / ".join(hits))
+    return resolved, missing, ambiguous
+
+
+def _read_files(items, src_dir, resolved, log):
+    """按解析出的权威仓路径读取并校验任务全部文件。
+
+    Args:
+        items: 提交结果项。
+        src_dir: 权威仓克隆目录。
+        resolved: {(item_id, source_path): 权威仓路径}。
+        log: 日志函数。
+
+    Returns:
+        dict: {item_id: [{"target_path", "content_b64"}]}
 
     Raises:
-        ValidationError: 任一文件不存在、超过单文件上限或累计大小超限。
+        ValidationError: 任一文件读取失败、超过单文件上限或累计大小超限。
     """
     prepared = {}
     total_size = 0
@@ -120,11 +169,12 @@ def _read_files(items, src_dir, log):
         files = []
         for meta in item["files"]:
             source_path = meta["source_path"]
+            authority_path = resolved[(item["id"], source_path)]
             try:
-                content = localgit.read_file(src_dir, source_path)
+                content = localgit.read_file(src_dir, authority_path)
             except Exception as exc:
                 raise ValidationError(
-                    f"读取权威仓文件失败: {source_path}: {exc}") from exc
+                    f"读取权威仓文件失败: {authority_path}: {exc}") from exc
             if len(content) > MAX_FILE_SIZE:
                 raise ValidationError(
                     f"文件 {source_path} 大小 "
@@ -135,7 +185,8 @@ def _read_files(items, src_dir, log):
                 raise ValidationError(
                     f"累计文件大小 {total_size / 1024 / 1024:.1f} MB 超过"
                     f"上限 {MAX_TOTAL_SIZE / 1024 / 1024:.0f} MB")
-            log(f"  读取文件: {source_path} -> {meta['target_path']}")
+            log(f"  读取文件: {source_path} -> {authority_path}"
+                f"（目标 {meta['target_path']}）")
             files.append({
                 "target_path": meta["target_path"],
                 "content_b64": base64.b64encode(content).decode("ascii"),
@@ -206,16 +257,17 @@ def execute_submission(submission_id, caller_token, settings, db):
                        log=log, blobs=True)
 
         tree = localgit.tree_map(src_dir)
-        missing = [
-            meta["source_path"]
-            for item in items for meta in item["files"]
-            if meta["source_path"] not in tree
-        ]
+        index = build_source_index(tree)
+        resolved, missing, ambiguous = _resolve_sources(items, index)
+        if ambiguous:
+            raise ValidationError(
+                "以下文件在权威仓中匹配到多个文件，无法确定提交哪一份: "
+                + "; ".join(ambiguous))
         if missing:
             raise ValidationError(
                 "以下文件在权威仓默认分支中不存在: " + ", ".join(missing))
 
-        prepared = _read_files(items, src_dir, log)
+        prepared = _read_files(items, src_dir, resolved, log)
 
         if submission["dry_run"]:
             log("dry_run=true：仅校验路径与大小，不创建 PR")

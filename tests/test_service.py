@@ -568,8 +568,8 @@ class TestSubmitRepo:
             assert result["pr_existed"] is True
             client_mock.create_pr.assert_not_called()
 
-    def test_legacy_history_rewrite_without_pr_is_noop(self):
-        """历史压缩后无已开 PR：没有可展示的 diff，不创建空 PR。"""
+    def test_legacy_history_rewrite_without_pr_returns_branch_url(self):
+        """历史压缩后无已开 PR：不创建空 PR，回传目标分支链接。"""
         client_mock = _make_submit_client_mock()
         localgit_mock = _make_localgit_mock(pushed=True, written=[])
         with patch("translator.submit.client", client_mock), \
@@ -577,7 +577,53 @@ class TestSubmitRepo:
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
-            assert result.get("noop") is True
+            assert result["content_exists"] is True
+            assert result["pr_url"].endswith("/tree/26.1.0")
+            client_mock.create_pr.assert_not_called()
+
+    def test_noop_with_merged_history_pr_returns_it(self):
+        """noop 且存在已合并的历史 PR：回传该 PR，供调用方判定已上线。"""
+        client_mock = _make_submit_client_mock()
+        client_mock.list_pull_requests.side_effect = [
+            [],  # 当前没有未合并 PR
+            [{  # state=all 时回捞到的历史 PR
+                "number": 7,
+                "html_url": "http://x/7",
+                "merged": True,
+                "head": {"label": "translator/auto-26.1.0",
+                         "ref": "translator/auto-26.1.0"},
+                "base": {"ref": "26.1.0"},
+            }],
+        ]
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit",
+                      _make_localgit_mock(pushed=False, written=[])):
+            result = submit.submit_repo(
+                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
+            assert result["ok"] is True
+            assert result.get("noop") is not True
+            assert result["pr_existed"] is True
+            assert result["pr_url"] == "http://x/7"
+            assert result["pr_number"] == 7
+            client_mock.create_pr.assert_not_called()
+
+    def test_noop_without_any_pr_returns_branch_url(self):
+        """noop 且历史里也没有该分支的 PR：返回目标分支链接（内容已在分支）。
+
+        调用方拿这个链接查 /prs/status 会得到 merged，任务得以推进到已上线。
+        """
+        client_mock = _make_submit_client_mock()  # list_pull_requests 恒为空
+        with patch("translator.submit.client", client_mock), \
+                patch("translator.submit.localgit",
+                      _make_localgit_mock(pushed=False, written=[])):
+            result = submit.submit_repo(
+                "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
+            assert result["ok"] is True
+            assert result.get("noop") is not True
+            assert result["content_exists"] is True
+            assert result["pr_url"] == (
+                "https://atomgit.com/Ascend/msprof/tree/26.1.0")
+            assert result["pr_number"] is None
             client_mock.create_pr.assert_not_called()
 
     def test_pr_title_body_groups_create_update(self):
@@ -594,8 +640,8 @@ class TestSubmitRepo:
             [{"path": "b.md", "action": "update"}])
         assert title == "更新 b.md 英文版文档"
 
-    def test_identical_content_skipped_no_push(self):
-        """分支内容已是最新（rebuild 未推送）且无 PR：纯幂等空转。"""
+    def test_identical_content_returns_branch_url(self):
+        """内容与目标分支一致（rebuild 未推送）且无 PR：回传分支链接。"""
         client_mock = _make_submit_client_mock()
         localgit_mock = _make_localgit_mock(pushed=False, written=[])
         with patch("translator.submit.client", client_mock), \
@@ -603,7 +649,9 @@ class TestSubmitRepo:
             result = submit.submit_repo(
                 "Ascend", "msprof", "26.1.0", _make_files(), "tok", log=SILENT)
             assert result["ok"] is True
-            assert result.get("noop") is True
+            assert result["content_exists"] is True
+            assert result["pr_url"] == (
+                "https://atomgit.com/Ascend/msprof/tree/26.1.0")
             client_mock.create_pr.assert_not_called()
 
     def test_open_pr_dedup(self):

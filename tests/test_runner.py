@@ -200,6 +200,55 @@ class TestExecuteSubmission:
             assert item["status"] == "failed"
             assert item["error"] == submission["error"]
 
+    def test_ascend_target_resolved_to_authority_path(self, db, settings,
+                                                      monkeypatch):
+        """目标坐标缺产品层时由索引补齐：Ascend/<产品>/<版本>/<仓库>/..."""
+        calls = _mock_source(
+            monkeypatch, ["Ascend/MindStudio/26.2.0/msagent/docs/en/a.md"])
+        groups = [{
+            "org": "Ascend", "repo": "msagent", "branch": "26.2.0",
+            "source_paths": ["Ascend/msagent/26.2.0/docs/en/a.md"],
+            "files": [{
+                "source_path": "Ascend/msagent/26.2.0/docs/en/a.md",
+                "rel": "docs/en/a.md",
+                "target_path": "docs/en/a.md"}],
+        }]
+        monkeypatch.setattr(
+            runner.service, "submit_repo",
+            lambda *a, **kw: {"ok": True, "pr_number": 1, "pr_url": "u"})
+        sid = _prepare(db, groups=groups)
+
+        runner.execute_submission(sid, CALLER_TOKEN, settings, db)
+
+        assert db.get_submission(sid)["status"] == "success"
+        assert calls["read"] == [
+            "Ascend/MindStudio/26.2.0/msagent/docs/en/a.md"]
+
+    def test_ambiguous_source_fails_whole_submission(self, db, settings,
+                                                    monkeypatch):
+        """同一坐标命中多份权威仓文件：整单失败，不猜其中一份。"""
+        _mock_source(monkeypatch, [
+            "Ascend/alpha/26.2.0/kml/docs/a.md",
+            "Ascend/beta/26.2.0/kml/docs/a.md"])
+        groups = [{
+            "org": "Ascend", "repo": "kml", "branch": "26.2.0",
+            "source_paths": ["Ascend/kml/26.2.0/docs/a.md"],
+            "files": [{
+                "source_path": "Ascend/kml/26.2.0/docs/a.md",
+                "rel": "docs/a.md",
+                "target_path": "docs/a.md"}],
+        }]
+        monkeypatch.setattr(
+            runner.service, "submit_repo",
+            lambda *a, **kw: pytest.fail("歧义时不应提交"))
+        sid = _prepare(db, groups=groups)
+
+        runner.execute_submission(sid, CALLER_TOKEN, settings, db)
+
+        submission = db.get_submission(sid)
+        assert submission["status"] == "failed"
+        assert "匹配到多个文件" in submission["error"]
+
     def test_dry_run_does_not_submit(self, db, settings, monkeypatch):
         _mock_source(monkeypatch, [
             "CANN/9.1.0/hccl/docs/a.md", "CANN/9.1.0/sip/docs/b.md"])
