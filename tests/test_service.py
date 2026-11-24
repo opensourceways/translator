@@ -536,7 +536,7 @@ class TestRebuildBranch:
         """对本地 bare 仓库执行 rebuild_branch，返回 (结果, 克隆目录)。"""
         dest = os.path.join(tempfile.gettempdir(),
                             f"rebuild-test-{id(spec)}-{os.getpid()}")
-        with patch.object(localgit, "_auth_url", lambda *a: str(bare)):
+        with patch.object(localgit, "_repo_url", lambda *a: str(bare)):
             result = localgit.rebuild_branch(
                 "u", "r", "tok", "master", self.HEAD,
                 [{"target_path": p,
@@ -664,7 +664,7 @@ class TestRebuildBranch:
                            os.path.join(fake_home, "gitconfig-empty"))
         try:
             # 显式传入账号绑定邮箱
-            with patch.object(localgit, "_auth_url", lambda *a: str(fork_bare)):
+            with patch.object(localgit, "_repo_url", lambda *a: str(fork_bare)):
                 result = localgit.rebuild_branch(
                     "u", "r", "tok", "master", self.HEAD,
                     [{"target_path": "a.md",

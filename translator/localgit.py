@@ -18,21 +18,65 @@ git 命令全部走 subprocess，不在进程内解析 git 对象库格式；失
 """
 
 import base64
+import contextlib
 import os
+import shlex
 import shutil
 import subprocess
+import tempfile
 
 from translator import client
 from translator.common import GIT_HOST
 
 
-def _auth_url(owner, repo, token):
-    """构造带凭据的 git clone 地址（oauth2 用户名对应 AtomGit 个人访问令牌）。
+def _repo_url(owner, repo):
+    """不含凭据的仓库地址。
 
-    与既有 atomgit remote 的写法一致；token 出现在克隆命令里，由 Jenkins
-    密码参数注入，构建日志中会被脱敏。
+    凭据不再拼进 URL：URL 会进入进程参数（同 uid 可 ps 看到）并被 git
+    写进 .git/config（git remote -v 直接可见）。改由 GIT_ASKPASS 提供。
     """
-    return f"https://oauth2:{token}@{GIT_HOST.lstrip('https://')}/{owner}/{repo}.git"
+    return f"{GIT_HOST}/{owner}/{repo}.git"
+
+
+@contextlib.contextmanager
+def _git_auth(token):
+    """准备一次 git 调用的凭据环境，退出时清理临时文件。
+
+    token 写进 0600 的临时文件，git 通过 GIT_ASKPASS 脚本读取：既不出现
+    在命令行参数里，也不进 .git/config 与日志。脚本与 token 都放在临时
+    目录，用完即删。
+    """
+    auth_dir = os.path.join(
+        tempfile.gettempdir(),
+        f"translator-auth-{os.getpid()}-{os.urandom(4).hex()}")
+    os.makedirs(auth_dir)
+    try:
+        os.chmod(auth_dir, 0o700)
+    except OSError:
+        pass              # Windows 开发机没有 POSIX 权限位
+    try:
+        token_path = os.path.join(auth_dir, "token")
+        with open(token_path, "w", encoding="utf-8") as fh:
+            fh.write((token or "").strip())
+        script_path = os.path.join(auth_dir, "askpass.sh")
+        with open(script_path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(
+                "#!/bin/sh\n"
+                'case "$1" in\n'
+                "  *sername*) printf '%s\\n' oauth2 ;;\n"
+                f"  *) cat {shlex.quote(token_path)} ;;\n"
+                "esac\n")
+        for path, mode in ((token_path, 0o600), (script_path, 0o700)):
+            try:
+                os.chmod(path, mode)
+            except OSError:
+                pass          # Windows 开发机没有 POSIX 权限位
+        env = dict(os.environ)
+        env["GIT_ASKPASS"] = script_path
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        yield env
+    finally:
+        shutil.rmtree(auth_dir, ignore_errors=True)
 
 
 def clone(owner, repo, ref, token, dest_dir, log=print, blobs=False):
@@ -53,9 +97,11 @@ def clone(owner, repo, ref, token, dest_dir, log=print, blobs=False):
         cmd.append("--filter=blob:none")
     if ref:
         cmd += ["--branch", ref]
-    cmd += [_auth_url(owner, repo, token), dest_dir]
+    cmd += [_repo_url(owner, repo), dest_dir]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        with _git_auth(token) as env:
+            subprocess.run(cmd, check=True, capture_output=True, text=True,
+                           env=env)
     except subprocess.CalledProcessError as e:
         raise client.AtomGitError(
             200, f"克隆 {owner}/{repo}@{ref or '默认分支'} 失败: "
@@ -102,12 +148,13 @@ def rebuild_branch(owner, repo, token, base_branch, head_branch, files,
     parent = os.path.dirname(dest_dir)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    url = _auth_url(owner, repo, token)
+    url = _repo_url(owner, repo)
     try:
-        subprocess.run(
-            ["git", "clone", "--depth=1", "--no-checkout",
-             "--no-single-branch", url, dest_dir],
-            check=True, capture_output=True, text=True)
+        with _git_auth(token) as env:
+            subprocess.run(
+                ["git", "clone", "--depth=1", "--no-checkout",
+                 "--no-single-branch", url, dest_dir],
+                check=True, capture_output=True, text=True, env=env)
     except subprocess.CalledProcessError as e:
         raise client.AtomGitError(
             200, f"克隆 Fork {owner}/{repo} 失败: "
@@ -191,7 +238,8 @@ def rebuild_branch(owner, repo, token, base_branch, head_branch, files,
                 "reason": "远端已是最新单 commit"}
 
     # ── 7. 强推（重建历史必须 force；分支为工具独占，安全）──
-    _run_git(dest_dir, "push", "--force", "origin", head_branch)
+    with _git_auth(token) as env:
+        _run_git(dest_dir, "push", "--force", "origin", head_branch, env=env)
     log(f"已推送单 commit（{len(written)} 个文件变更）: {head_branch}")
     return {"pushed": True, "written": written, "reason": "重建完成"}
 
@@ -221,18 +269,19 @@ def read_file(repo_dir, path):
         raise client.AtomGitError(404, f"本地仓库不存在文件: {path}")
 
 
-def _run_git(repo_dir, *args):
-    return _run_git_bytes(repo_dir, *args).decode("utf-8", errors="replace")
+def _run_git(repo_dir, *args, env=None):
+    return _run_git_bytes(repo_dir, *args, env=env).decode(
+        "utf-8", errors="replace")
 
 
-def _run_git_bytes(repo_dir, *args):
+def _run_git_bytes(repo_dir, *args, env=None):
     # core.quotepath=false：禁止 git 把非 ASCII 路径输出为 C 风格转义串
     # （"…\346\233\264…"），否则 ls-tree/diff 的路径解析会得到带引号的
     # 垃圾路径，进而拼出不存在的 org/repo（中文目录曾因此导致 400）
     try:
         proc = subprocess.run(
             ["git", "-c", "core.quotepath=false", "-C", repo_dir, *args],
-            check=True, capture_output=True)
+            check=True, capture_output=True, env=env)
     except subprocess.CalledProcessError as e:
         raise client.AtomGitError(
             200, f"git {' '.join(args)} 失败: "

@@ -4,6 +4,7 @@
 测试通过 mock subprocess 拦截，不执行真实 git 命令。
 """
 
+import os
 import subprocess
 from unittest.mock import patch
 
@@ -13,10 +14,27 @@ from translator import localgit
 from translator.client import AtomGitError
 
 
-class TestAuthUrl:
-    def test_embeds_oauth2_token(self):
-        url = localgit._auth_url("Ascend", "msprof", "tok")
-        assert url == "https://oauth2:tok@atomgit.com/Ascend/msprof.git"
+class TestRepoUrl:
+    def test_url_has_no_credentials(self):
+        url = localgit._repo_url("Ascend", "msprof")
+        assert url == "https://atomgit.com/Ascend/msprof.git"
+        assert "@" not in url
+
+
+class TestGitAuth:
+    def test_token_lives_in_file_not_env(self):
+        with localgit._git_auth("s3cr3t-token") as env:
+            assert "s3cr3t-token" not in " ".join(str(v) for v in env.values())
+            script = env["GIT_ASKPASS"]
+            assert os.path.exists(script)
+            assert env["GIT_TERMINAL_PROMPT"] == "0"
+            body = open(script, encoding="utf-8").read()
+            assert "oauth2" in body and "cat" in body
+            # token 文件与脚本同目录，仅属主可读
+            token_path = os.path.join(os.path.dirname(script), "token")
+            with open(token_path, encoding="utf-8") as fh:
+                assert fh.read() == "s3cr3t-token"
+        assert not os.path.exists(script)      # 用完清理
 
 
 class TestClone:
@@ -24,46 +42,53 @@ class TestClone:
         kwargs.setdefault("log", lambda m: None)
         return localgit.clone(*args, **kwargs)
 
-    def test_partial_clone_command(self):
+    def test_partial_clone_command(self, tmp_path):
+        dest = str(tmp_path / "d")
         with patch("translator.localgit.subprocess.run") as run_mock:
-            self._clone("Ascend", "msprof", "26.1.0", "tok", "/tmp/d")
+            self._clone("Ascend", "msprof", "26.1.0", "tok", dest)
             cmd = run_mock.call_args.args[0]
             assert cmd[:2] == ["git", "clone"]
             assert "--depth=1" in cmd and "--no-checkout" in cmd
             assert "--filter=blob:none" in cmd
             assert "--branch" in cmd and "26.1.0" in cmd
-            assert cmd[-1] == "/tmp/d"
-            assert cmd[-2].startswith("https://oauth2:tok@")
+            assert cmd[-1] == dest
+            assert cmd[-2] == "https://atomgit.com/Ascend/msprof.git"
+            # token 既不在 URL 也不在任何参数里
+            assert "tok" not in " ".join(cmd)
+            env = run_mock.call_args.kwargs["env"]
+            assert env["GIT_ASKPASS"] and env["GIT_TERMINAL_PROMPT"] == "0"
 
-    def test_full_clone_with_blobs(self):
+    def test_full_clone_with_blobs(self, tmp_path):
         """blobs=True 时不加 --filter，保留全部 blob（内容本地读取）。"""
         with patch("translator.localgit.subprocess.run") as run_mock:
-            self._clone("Ascend", "msprof", "26.1.0", "tok", "/tmp/d",
-                        blobs=True)
+            self._clone("Ascend", "msprof", "26.1.0", "tok",
+                        str(tmp_path / "d"), blobs=True)
             cmd = run_mock.call_args.args[0]
             assert "--filter=blob:none" not in cmd
 
-    def test_empty_ref_clones_default_branch(self):
+    def test_empty_ref_clones_default_branch(self, tmp_path):
         with patch("translator.localgit.subprocess.run") as run_mock:
-            self._clone("Ascend", "msprof", "", "tok", "/tmp/d")
+            self._clone("Ascend", "msprof", "", "tok", str(tmp_path / "d"))
             cmd = run_mock.call_args.args[0]
             assert "--branch" not in cmd
 
-    def test_removes_existing_dir(self):
-        with patch("translator.localgit.subprocess.run") as run_mock, \
+    def test_removes_existing_dir(self, tmp_path):
+        dest = str(tmp_path / "d")
+        with patch("translator.localgit.subprocess.run"), \
                 patch("translator.localgit.shutil.rmtree") as rm_mock, \
                 patch("translator.localgit.os.path.isdir",
                       return_value=True):
-            self._clone("Ascend", "msprof", "26.1.0", "tok", "/tmp/d")
-            rm_mock.assert_called_once_with("/tmp/d")
+            self._clone("Ascend", "msprof", "26.1.0", "tok", dest)
+            rm_mock.assert_any_call(dest)
 
-    def test_failure_raises_atomgit_error(self):
+    def test_failure_raises_atomgit_error(self, tmp_path):
         err = subprocess.CalledProcessError(
             128, "git clone", stderr="fatal: Repository not found")
         with patch("translator.localgit.subprocess.run",
                    side_effect=err):
             with pytest.raises(AtomGitError) as exc_info:
-                self._clone("Ascend", "msprof", "26.1.0", "tok", "/tmp/d")
+                self._clone("Ascend", "msprof", "26.1.0", "tok",
+                            str(tmp_path / "d"))
             assert "Repository not found" in str(exc_info.value)
 
 
