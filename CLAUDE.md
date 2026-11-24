@@ -18,7 +18,7 @@ translator：AtomGit 译稿自动提 PR 服务。调用方通过 HTTP API 提交
 
 | 目录/文件 | 说明 |
 | --- | --- |
-| `translator/` | 引擎包：client.py（AtomGit API）、submit.py（提 PR）、localgit.py（克隆/读取文件）、index.py（目录层级与路径改写）、scan.py（CLI 扫描）、service.py（门面导出）、secrets.py（凭据读取）、cli.py |
+| `translator/` | 引擎包：client.py（AtomGit API）、submit.py（提 PR）、localgit.py（克隆/读取文件）、index.py（目录层级与路径改写）、service.py（门面导出，仅 submit_repo）、secrets.py（凭据读取）。历史 CLI（cli.py/scan.py）已移除，仓库只保留 HTTP 服务形态 |
 | `webapp/` | 常驻 API 服务（FastAPI）：api.py（提交/查询/PR 状态端点）、paths.py（路径解析与分组）、runner.py（Worker 执行编排）、queueing.py（FIFO 队列）、prstatus.py（PR 派生状态）、db.py（SQLite）、config.py（Settings） |
 | `tests/` | pytest，全部 mock 不触网 |
 | `deploy/k8s/` | K8s 清单（Namespace/ConfigMap/PVC/Deployment/Service/Ingress） |

@@ -195,24 +195,15 @@ curl http://localhost:8000/healthz   # {"status":"ok","queue":0,...}
 - 进程崩溃靠 `restart: unless-stopped` + 启动恢复兜底：排队/执行中的任务
   统一标记 `failed`，超过 `TR_SUBMISSION_RETENTION_DAYS` 的历史任务自动清理
 
-## CLI 模式（历史）
+## 已移除的 CLI 模式
 
-引擎包可脱离服务单独跑（CLI 为 translator-ci 时代的历史模式）：
+历史版本提供一个供 Jenkins 调用的 CLI（`python -m translator`，全量扫描 +
+批量提交，增量参数来自 push webhook 的 `GIT_PUSH_BEFORE/AFTER`）。该入口
+已移除：仓库现在只保留 HTTP 服务形态，`translator/scan.py`、`cli.py`、
+`service.scan_changed/submit_all/sync_source` 及对应的增量 git 调用一并删除。
 
-```bash
-pip install -r requirements.txt
-export ATOMGIT_TOKEN=<默认 Token>
-python -m translator                   # 全量扫描并提交
-python -m translator --keyword msprof  # 按关键字缩小范围（调试）
-```
-
-CLI 模式不读任何规则/名单文件，扫描与提交统一使用默认 `ATOMGIT_TOKEN`。
-
-没有权威仓库的 Webhook 权限时，可用自己的 Fork 做来源：
-`ATOMGIT_SOURCE_REPO` 指向 Fork 完整路径，CLI 加 `--sync-source`
-（Fork 不会自动跟进上游，扫描前先同步）。
-
-退出码：0 成功（含「没有变更」）；1 运行失败；2 部分仓库提交失败。
+移除原因：增量 diff 的 sha 来自环境变量且未校验，会经 `git fetch/diff` 的
+位置参数形成选项注入面；服务形态不存在该输入，因此直接删除而不是打补丁。
 
 ## 测试
 
@@ -230,12 +221,10 @@ translator/
 ├── .env.example           # 全部配置项模板（token 本体不落仓库）
 ├── CLAUDE.md              # AI 助手上手指南（硬性约束、配置约定）
 ├── translator/            # 引擎包
-│   ├── cli.py             # 命令行入口（参数、退出码、stdout 日志）
-│   ├── service.py         # 门面导出：同步来源/扫描对比/幂等提交
-│   ├── scan.py            # 变更扫描（全量 blob 对比 / 增量 diff）
+│   ├── service.py         # 门面导出（只导出 submit_repo）
 │   ├── submit.py          # 幂等提交：Fork → 固定分支 → 单 commit → PR
 │   ├── localgit.py        # 本地浅克隆与文件读取（git 协议，不受 API 限流）
-│   ├── index.py           # 目录层级识别与目标路径改写 TARGET_PATH_RULES
+│   ├── index.py           # 目录层级常量与目标路径改写 TARGET_PATH_RULES
 │   ├── client.py          # AtomGit REST API v5 客户端
 │   ├── secrets.py         # 凭据读取（secrets 文件优先、env 回退）
 │   └── common.py          # 公共常量（AUTO_BRANCH_PREFIX 等）

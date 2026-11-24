@@ -81,26 +81,6 @@ class TestTreeMap:
                 "docs/en/b.png": "2" * 40,
             }
 
-    def test_cat_blob_returns_bytes(self):
-        with patch("translator.localgit._run_git_bytes",
-                   return_value=b"\x00\x01") as m:
-            assert localgit.cat_blob("/repo", "abc") == b"\x00\x01"
-            m.assert_called_once_with("/repo", "cat-file", "blob", "abc")
-
-
-class TestCommitParents:
-    def test_returns_parent_list(self):
-        with patch("translator.localgit._run_git",
-                   return_value="aaaa bbbb\n") as m:
-            assert localgit.commit_parents("/repo", "cccc") == ["aaaa", "bbbb"]
-            m.assert_called_once_with("/repo", "show", "-s", "--format=%P",
-                                      "cccc")
-
-    def test_root_commit_has_no_parent(self):
-        with patch("translator.localgit._run_git", return_value=""):
-            assert localgit.commit_parents("/repo", "cccc") == []
-
-
 class TestReadFile:
     def test_missing_file_maps_to_404(self):
         with patch("translator.localgit._run_git_bytes",

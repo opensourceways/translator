@@ -213,49 +213,6 @@ def tree_map(repo_dir, ref="HEAD"):
     return result
 
 
-def cat_blob(repo_dir, blob_sha):
-    """读取本地仓库指定 blob 的原始字节（部分克隆时按需从远端补取）。"""
-    return _run_git_bytes(repo_dir, "cat-file", "blob", blob_sha)
-
-
-def fetch_commit(repo_dir, sha, token=None, log=print):
-    """按需补取指定提交（增量对比需要 before 提交，浅克隆未包含）。
-
-    不带凭据 fetch 公开仓库即可；token 保留参数位以备私有仓库需要。
-    拉取失败（如 webhook 传来的 sha 已不可达）抛 AtomGitError，由调用方
-    决定回退全量扫描。
-    """
-    _run_git(repo_dir, "fetch", "--depth=1", "origin", sha, "--quiet")
-    return sha
-
-
-def commit_parents(repo_dir, sha):
-    """返回本地仓库指定提交的父提交 sha 列表（首个为第一父）。
-
-    ``git show -s --format=%P`` 直接读提交对象，父 sha 无需父对象本身
-    存在——单 commit 增量对比据此拿到对比基点，再按 sha 单独补取。
-    根提交无父返回空列表。
-
-    Returns:
-        list[str]: 父提交 sha 列表（可能为空）。
-    """
-    out = _run_git(repo_dir, "show", "-s", "--format=%P", sha)
-    return out.split()
-
-
-def diff_paths(repo_dir, before, after):
-    """列出 before..after 之间的全部变更路径（含新增/删除/修改/改名）。
-
-    git diff --name-only 直接给路径集合；before 不可达（对象不存在）
-    时 git 报错，由 _run_git 统一抛 AtomGitError，调用方回退全量。
-
-    Returns:
-        set[str]: 变更文件/目录路径集合（无变更返回空集合）。
-    """
-    out = _run_git(repo_dir, "diff", "--name-only", before, after)
-    return {line for line in out.splitlines() if line.strip()}
-
-
 def read_file(repo_dir, path):
     """读取本地仓库 HEAD 上指定路径的原始字节（文件不存在视为 404）。"""
     try:

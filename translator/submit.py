@@ -4,7 +4,6 @@ submit_repo: 单仓库幂等提交（识别用户/Fork → 校验目标分支 �
              Fork 分支 → 以目标分支为基点重建固定分支
              translator/auto-<目标分支>（全部变更合并为单个 commit，
              由 localgit.rebuild_branch 完成）→ 去重后创建 PR）
-submit_all:  批量提交（单仓失败不中断）
 
 幂等语义：同一仓库重复运行时，已开 PR 不重复创建，新变更以重建的
 单 commit 覆盖固定分支；内容无变化时不强推（避免 PR 噪音）。历史
@@ -448,59 +447,4 @@ def submit_repo(org, repo, branch, files, token, log=print):
         "pr_title": pr_title,
         "head_branch": head_branch,
         "succeeded": succeeded,
-    }
-
-
-def submit_all(changed, token, log=print):
-    """对有变更的仓库逐个幂等提交 PR，单仓失败不中断。
-
-    每个仓库统一使用传入的 token 提交（服务侧为调用方请求头提供的
-    AtomGit token，仅用于目标仓操作）。
-
-    Args:
-        changed: scan_changed 返回的 changed 清单，
-                 每项含 org/repo/branch/files/project
-        token: 提交使用的 AtomGit Token
-        log: 日志函数
-
-    Returns:
-        dict with:
-        - ok: bool
-        - results: [{path, ok, pr_url?, pr_number?, pr_existed?,
-                     stage?, error?}]
-        - submitted: 成功提 PR 的仓库数
-        - failed: 失败的仓库数
-    """
-    token = (token or "").strip()
-    if not token:
-        return {"ok": False, "stage": "validate", "error": "Token 不能为空"}
-
-    changed = changed or []
-    results = []
-    submitted = 0
-    failed_count = 0
-    for i, item in enumerate(changed, 1):
-        path = item["project"]["path"]
-        log(f"正在提交 ({i}/{len(changed)}): {item['org']}/{item['repo']}")
-        result = submit_repo(
-            item["org"], item["repo"], item["branch"], item["files"],
-            token, log)
-        entry = {"path": path, "ok": result["ok"]}
-        if result["ok"]:
-            submitted += 1
-            entry["pr_url"] = result.get("pr_url")
-            entry["pr_number"] = result.get("pr_number")
-            if result.get("pr_existed"):
-                entry["pr_existed"] = True
-        else:
-            failed_count += 1
-            entry["stage"] = result.get("stage")
-            entry["error"] = result.get("error")
-        results.append(entry)
-
-    return {
-        "ok": True,
-        "results": results,
-        "submitted": submitted,
-        "failed": failed_count,
     }

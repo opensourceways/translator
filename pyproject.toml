@@ -11,9 +11,6 @@ dependencies = [
     "requests>=2.33.0",
 ]
 
-[project.scripts]
-translator = "translator.cli:main"
-
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
