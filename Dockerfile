@@ -28,5 +28,6 @@ CMD ["uvicorn", "webapp.api:create_app", "--factory", "--host", "0.0.0.0", "--po
 # /data 属主由 K8s fsGroup 或 compose 侧一次性 chown 保证（镜像无法决定挂载点属主）
 USER 1000:1000
 
+# 存活探针走 /livez（零依赖）：数据库异常时不应触发容器重启
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status == 200 else 1)"]
+    CMD ["python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/livez', timeout=4).status == 200 else 1)"]

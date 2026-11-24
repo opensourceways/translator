@@ -1,7 +1,8 @@
 """FastAPI HTTP API：提交任务、任务查询与 PR 状态实时查询。
 
 端点：
-- GET  /healthz                      探活（无鉴权，K8s 探针用）
+- GET  /livez                        存活探针（无鉴权，零依赖，K8s liveness 用）
+- GET  /healthz                      就绪探活（无鉴权，含队列/SQLite 计数）
 - POST /api/v1/submissions           提交目标仓文件路径，异步创建 PR
 - GET  /api/v1/submissions/{id}      查询提交任务与逐仓库结果（含日志）
 - GET  /api/v1/prs/status            实时查询 PR 状态（URL/编号/request_id）
@@ -280,6 +281,16 @@ def create_app(settings=None):
             raise HTTPException(401, "X-API-Key 无效或未提供")
 
     # ── 探活 ─────────────────────────────────────────────────
+
+    @app.get("/livez")
+    async def livez():
+        """存活探针：只证明进程能响应请求。
+
+        刻意不碰 SQLite、不加锁、不读文件——liveness 只回答「要不要重启」，
+        数据库故障时应当摘流量（readiness）而不是重启容器，否则会把
+        「存储坏了」放大成「反复重启」。分层自检见 ``python -m webapp.doctor``。
+        """
+        return {"status": "alive"}
 
     @app.get("/healthz")
     async def healthz(request: Request):

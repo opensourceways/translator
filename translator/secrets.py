@@ -26,7 +26,13 @@ def _secrets_path(path=None):
 
 
 def _parse(text):
-    """解析 .env 文本：忽略空行与 # 注释，支持可选 export 前缀与成对引号。"""
+    """解析 .env 文本：忽略空行与 # 注释，支持可选 export 前缀与成对引号。
+
+    顺带剥掉开头的 UTF-8 BOM：Windows 记事本/PowerShell 写出的文件会带
+    ``\\ufeff``，不处理会让第一个键变成「\\ufeffTR_API_KEY」，表现是凭据
+    明明写着却读不到。
+    """
+    text = text.lstrip("\ufeff")
     data = {}
     for line in text.splitlines():
         line = line.strip()

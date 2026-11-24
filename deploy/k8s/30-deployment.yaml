@@ -66,14 +66,16 @@ spec:
               cpu: "1"
               memory: 1Gi
           readinessProbe:
+            # 就绪：含队列与 SQLite 计数，存储异常时摘流量而不重启
             httpGet:
               path: /healthz
               port: 8000
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
+            # 存活：零依赖端点，只证明进程能响应；不因数据库故障反复重启
             httpGet:
-              path: /healthz
+              path: /livez
               port: 8000
             initialDelaySeconds: 15
             periodSeconds: 30

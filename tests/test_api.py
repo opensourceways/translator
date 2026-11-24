@@ -16,6 +16,16 @@ HEADERS = {"X-API-Key": API_KEY, "X-AtomGit-Token": CALLER_TOKEN}
 PATH = "CANN/hccl/9.1.0/docs/en/a.md"
 
 
+class _BrokenDB:
+    """模拟数据库故障：任何计数查询都抛错。"""
+
+    def pending_count(self):
+        raise RuntimeError("db down")
+
+    def running_count(self):
+        raise RuntimeError("db down")
+
+
 def _finish_fake(submission_id, token, settings, db):
     """Worker 假实现：立刻把任务与结果项置为成功（不触网）。"""
     submission = db.get_submission(submission_id)
@@ -66,6 +76,20 @@ class TestAuth:
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
         assert {"queue", "pending", "running"} <= set(resp.json())
+
+    def test_livez_no_auth(self, open_client, settings):
+        with open_client(settings) as (client_, _app):
+            resp = client_.get("/livez")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "alive"}
+
+    def test_livez_isolated_from_database(self, open_client, settings):
+        """存活探针不碰 SQLite：数据库坏时 /livez 仍 200，/healthz 才报错。"""
+        with open_client(settings) as (client_, app):
+            app.state.db = _BrokenDB()
+            assert client_.get("/livez").status_code == 200
+            with pytest.raises(RuntimeError, match="db down"):
+                client_.get("/healthz")
 
     def test_missing_or_wrong_api_key_401(self, open_client, settings):
         with open_client(settings) as (client_, _app):

@@ -50,7 +50,9 @@ flowchart LR
 
 服务级鉴权：所有 `/api/v1/*` 端点要求请求头 `X-API-Key`，其值与
 `TR_API_KEY` 一致；未配置时服务拒绝启动（fail-closed）。
-`/healthz` 无鉴权，供 K8s 探针使用。
+两个探活端点无鉴权，供 K8s 探针使用：`/livez` 零依赖，只证明进程能响应
+（liveness 用）；`/healthz` 额外带队列与 SQLite 计数（readiness 用）。
+数据库故障时应当摘流量而不是重启容器，因此 liveness 不要指向 `/healthz`。
 
 ### 提交任务
 
@@ -110,6 +112,31 @@ curl "http://localhost:8000/api/v1/prs/status?request_id=<request_id>" \
 
 success / **partial**（部分仓库提交失败，非致命）/ failed（校验失败、
 全部仓库失败或服务重启中断）。`queued` / `running` 为进行中。
+
+### 容器内自检
+
+排查故障时先分层定位，不要一上来翻业务日志：
+
+```bash
+kubectl -n translator exec deploy/translator -- python3 -m webapp.doctor
+# 加 --network 顺带验证 AtomGit 出网；--json 供监控采集
+```
+
+按「进程 → 端口 → 配置 → 凭据 → 数据盘 →（可选）外网」逐层判定，
+只读状态、不做克隆/提交，所以故障现场也能跑：
+
+```
+translator 容器自检
+----------------------------------------------------------------
+[1] 进程    OK    uvicorn webapp.api:create_app --factory ...
+[2] 端口    OK    http://127.0.0.1:8000/healthz 200 {"status":"ok",...}
+[3] 配置    OK    data_dir=/data wait=30s max_paths=200 queue=100 retention=90d
+[4] 凭据    OK    /vault/secrets/.env 0400 1000:1000，TR_API_KEY=64字 ATOMGIT_TOKEN=40字
+[5] 数据盘  OK    /data 可写，submissions=12，剩余 8.4 GB
+结论：全部通过（仅证明服务自身状态，业务链路请再跑一次 dry_run 提交确认）
+```
+
+凭据层只报「键在不在、权限对不对」，不会打印值；存在 FAIL 时退出码为 1。
 
 ## 部署（服务模式）
 
@@ -219,6 +246,7 @@ translator/
 │   ├── prstatus.py        # PR 派生状态（CI 标签 → 状态 + 下一步指引）
 │   ├── queueing.py        # FIFO 提交队列（有界、不合并）
 │   ├── db.py              # SQLite 状态层（任务/结果项/日志）
+│   ├── doctor.py          # 容器内分层自检（进程/端口/配置/凭据/数据盘/外网）
 │   └── config.py          # Settings.from_env()
 ├── deploy/k8s/            # K8s 清单（单副本 Recreate + RWO PVC）
 ├── tests/                 # pytest 单元测试（全部 mock，不发起真实请求）
